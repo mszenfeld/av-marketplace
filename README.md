@@ -1,7 +1,7 @@
 # AppVerk Claude Code Marketplace
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Plugins](https://img.shields.io/badge/plugins-10-green.svg)](#available-plugins)
+[![Plugins](https://img.shields.io/badge/plugins-11-green.svg)](#available-plugins)
 
 Claude Code plugins that compose into one development harness — from idea and spec, through TDD implementation and QA, to code review and commit — with each stage's artifact feeding the next.
 
@@ -42,6 +42,7 @@ Each stage leaves an artifact the next stage consumes: the brainstormed spec is 
 | [Python Developer](docs/plugins/python-developer.md) | 3.0.4 | Python development workflow with `/develop` command and autonomous `developer` agent. Coding standards, TDD, and stack-specific patterns (FastAPI, SQLAlchemy, Pydantic, Django, DRF, Celery) |
 | [QA](docs/plugins/qa.md) | 2.6.0 | Automated QA testing — analyzes code changes, generates test plans (`/qa:create-plan`), executes FE (Playwright) and BE (API/DB) tests (`/qa:run`), and self-drives the test→fix→retest loop (`/qa:loop` now generates a plan for the branch when none exists, then runs). Produces reports compatible with code-review's `/fix QA-001` and `/fix-report` auto-merge |
 | [Superutils](docs/plugins/superutils.md) | 2.0.0 | Companion utilities for the superpowers workflow. `/superutils:spec-review` runs a bounded triage pipeline on design specs: MoA lens panel, challengers for criticals, an approve-gated fix batch, verification of the applied edits, a second approve-gated batch — hard dispatch and time budgets, every residual reported, every verdict advisory (never "Verified") |
+| [Simple Language](docs/plugins/simple-language.md) | 1.0.0 | Scannable, plain-language replies and documents: answer first, one idea per sentence, no undefined jargon. Activates automatically at session start via a `SessionStart` hook |
 | [Sequential Thinking](https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking) | MCP | Structured problem-solving through dynamic thinking process |
 
 ## Documentation

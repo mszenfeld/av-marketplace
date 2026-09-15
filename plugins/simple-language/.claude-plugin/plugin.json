@@ -1,0 +1,5 @@
+{
+  "name": "simple-language",
+  "description": "Makes the agent write scannable, plain-language replies and documents: answer first, one idea per sentence, no undefined jargon. Activates automatically at session start.",
+  "version": "1.0.0"
+}
