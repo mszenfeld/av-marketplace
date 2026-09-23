@@ -60,4 +60,6 @@ OMP-only plugins live in `omp/native/<name>/` and are copied into
 `plugins-omp/` as-is, minus `tests/`. Their version lives in their own
 `.omp-plugin/plugin.json` and is bumped there; they are not in the Claude
 catalog. Agent and skill names must carry the `<name>:` prefix — the build
-fails otherwise.
+fails otherwise. A native plugin that ships an OMP extension declares it in
+its own `package.json` (`omp.extensions`); its name and version must equal
+`.omp-plugin/plugin.json`, and the build fails otherwise.

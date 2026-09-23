@@ -18,8 +18,8 @@
     {
       "name": "delivery",
       "source": "./delivery",
-      "description": "Plan, route each task to the matching developer agent, review every task, then run the full code review. Oh My Pi only.",
-      "version": "0.1.0",
+      "description": "Delivers approved plan-mode plans: each task goes to the developer agent that owns its files, is reviewed and committed, then the plan's verification and the full code review run. Oh My Pi only.",
+      "version": "0.2.0",
       "category": "development"
     },
     {

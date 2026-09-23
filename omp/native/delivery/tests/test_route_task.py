@@ -16,7 +16,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from route_task import layout, parse_plan, route  # noqa: E402
+from route_task import check, layout, parse_plan, route  # noqa: E402
 
 ROUTER = SCRIPTS / "route_task.py"
 
@@ -141,6 +141,68 @@ class ParsePlanTest(unittest.TestCase):
         self.assertEqual(tasks[1]["paths"], ["docs/orders.md"])
         self.assertNotIn("Notes", tasks[1]["block"])
 
+    def test_fenced_markdown_stays_inside_the_task(self) -> None:
+        tasks = parse_plan(FENCED_PLAN)
+        self.assertEqual([t["task"] for t in tasks], [1])
+        self.assertEqual(tasks[0]["paths"], ["README.md"])
+        self.assertIn("## Usage", tasks[0]["block"])
+        self.assertTrue(tasks[0]["block"].endswith("Append it after the intro."), tasks[0]["block"])
+
+
+FENCED_PLAN = """# Plan
+
+### Task 1: Usage docs
+**Files:**
+- Modify: `README.md`
+
+````markdown
+## Usage
+
+```python
+from calc.ops import add
+```
+
+### Task 9: Not a task
+- Create: `not/a/task/file.py`
+````
+
+Append it after the intro.
+
+## Verification
+- pytest
+"""
+
+
+SPLIT_PLAN = """# Plan
+
+### Task 1: Orders
+**Files:**
+- Modify: `backend/app/orders.py`
+- Modify: `web/src/api.ts`
+
+### Task 2: Notes
+Write the release notes.
+
+### Task 2: Docs
+**Files:**
+- Create: `docs/orders.md`
+"""
+
+
+class CheckTest(RoutingFixture):
+    def test_reports_every_unroutable_task(self) -> None:
+        result = check(self.root, SPLIT_PLAN)
+        self.assertEqual(result["tasks"], 3)
+        problems = result["problems"]
+        self.assertEqual(len(problems), 3, problems)
+        self.assertTrue(problems[0].startswith("Task 1 (Orders): touches several stacks"), problems[0])
+        self.assertIn("python: backend/app/orders.py; frontend: web/src/api.ts", problems[0])
+        self.assertTrue(problems[1].startswith("Task 2 (Notes): lists no files"), problems[1])
+        self.assertTrue(problems[2].startswith("Task 2 appears 2 times"), problems[2])
+
+    def test_routable_plan_has_no_problems(self) -> None:
+        self.assertEqual(check(self.root, PLAN), {"tasks": 2, "problems": []})
+
 
 class LayoutTest(RoutingFixture):
     def test_stacks_and_framework_evidence(self) -> None:
@@ -159,6 +221,12 @@ class CliTest(RoutingFixture):
         result = self.run_router("plan", str(self.root), "empty-plan.md")
         self.assertEqual(result.returncode, 2)
         self.assertIn("no '### Task N:' headings", result.stderr)
+
+    def test_check_without_tasks_reports_zero(self) -> None:
+        write(self.root, "empty-plan.md", "# Nothing here\n")
+        result = self.run_router("check", str(self.root), "empty-plan.md")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"tasks": 0, "problems": []})
 
     def test_plan_routes_every_task(self) -> None:
         write(self.root, "plan.md", PLAN)

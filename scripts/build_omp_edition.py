@@ -272,6 +272,17 @@ def build_native(src_root: Path, out_root: Path, taken: set[str]) -> dict:
         raise BuildError(f"{manifest_path}: name {name!r} must equal its directory {src_root.name!r}")
     if name in taken:
         raise BuildError(f"native plugin {name!r} collides with a generated plugin")
+    package_path = src_root / "package.json"
+    if package_path.is_file():
+        package = json.loads(package_path.read_text())
+        if package.get("name") != name or package.get("version") != manifest["version"]:
+            raise BuildError(f"{package_path}: name and version must equal {name!r} and {manifest['version']!r} from .omp-plugin/plugin.json")
+        entries = (package.get("omp") or {}).get("extensions")
+        if not isinstance(entries, list) or not entries:
+            raise BuildError(f"{package_path}: omp.extensions must list the extension entry files")
+        for entry in entries:
+            if not isinstance(entry, str) or not (src_root / entry).is_file():
+                raise BuildError(f"{package_path}: omp.extensions entry {entry!r} is not a file in the plugin")
 
     for src in sorted((src_root / "agents").glob("*.md")):
         fields = dict(split_frontmatter(src.read_text(), src)[0])

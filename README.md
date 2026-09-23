@@ -24,15 +24,15 @@ for p in code-review delivery python-developer frontend-developer php-developer;
 done
 ```
 
-Delivery runs a plan end to end:
+Delivery runs approved plans end to end, without slash commands. Plan in OMP plan mode (`/plan`). In a git repository the plan's Approach is written as `### Task N:` blocks, each listing its files; proposing a plan whose task mixes stacks or lists no files is rejected with the reason. Approving a plan that has tasks starts the delivery:
 
-- `/delivery:plan <spec or description>` — a planner writes `docs/superpowers/plans/<date>-<topic>.md`, one stack per task.
-- `/delivery:execute <plan>` — each task goes to the developer agent that owns its files (Python, React, PHP, or a generic implementer), is reviewed, gets up to 3 fix rounds, and is committed; then `/code-review:review` runs over the whole branch.
-- `/delivery:task <description>` — one ad-hoc task with the same routing and review, left staged.
+1. the plan is committed to `docs/plans/<date>-<slug>.md` — on a new `delivery/<slug>` branch when you are on `main` or `master`;
+2. each task goes to the developer agent that owns its files (Python, React, PHP, or a generic implementer), is reviewed, gets up to 3 fix rounds, and is committed;
+3. the plan's Verification runs, then `/code-review:review` over the delivered commits.
 
-Tasks that list files are routed by their files; tasks that do not are routed by Jev (the `judge` model role) and fall back to asking you below 0.8 confidence.
+A plan without `### Task` headings runs as usual. `/delivery:execute <plan>` resumes an interrupted delivery, skipping committed tasks, or delivers a plan file you wrote yourself; tasks of such a plan that list no files are routed by Jev (the `judge` model role), falling back to asking you below 0.8 confidence.
 
-Agents route through model roles instead of a fixed model: reviewers use `code_review`, fixers and developers `executor`, adversarial verification `challenger`, single-finding analysis `analyst`, and the delivery planner `plan`. Map each role in `~/.omp/agent/config.yml`, for example:
+Agents route through model roles instead of a fixed model: reviewers use `code_review`, fixers and developers `executor`, adversarial verification `challenger`, single-finding analysis `analyst`, and plan mode `plan`. Map each role in `~/.omp/agent/config.yml`, for example:
 
 ```yaml
 modelRoles:

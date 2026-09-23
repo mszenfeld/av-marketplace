@@ -1,12 +1,108 @@
 ---
 name: "delivery:orchestration"
-description: "Internal procedures used by the /delivery commands: plugin roots, routing, the per-task loop."
+description: "Internal procedures of the delivery plugin: the delivery run, plugin roots, routing, the per-task loop."
 hide: true
 ---
 
 # Delivery orchestration
 
-Shared procedures for `/delivery:plan`, `/delivery:execute` and `/delivery:task`. Run only the section a command names. Values in `<ANGLE_BRACKETS>` come from the calling command.
+Procedures of the delivery plugin. The delivery extension starts the **Delivery run** when a plan with `### Task` headings is approved in plan mode; `/delivery:execute` starts it for a plan file. The Delivery run uses the other sections. Values in `<ANGLE_BRACKETS>` come from the caller.
+
+## Delivery run
+
+Inputs: `PLAN_SOURCE` — the plan as the caller gave it: a `local://` URL or a file path; `PLAN_FILE` — the plan's absolute file path, when the caller knows it.
+
+Run the steps in order. Every `stop` prints its message and ends the run.
+
+### 1. Preflight
+
+1. Run **Plugin roots**. Keep the `code-review` root.
+2. `REPO=$(git rev-parse --show-toplevel)`. A failure → stop with `Delivery needs a git repository.` Step 3 resolves paths from the session's working directory. Run every command after step 3 from `$REPO`.
+3. **Plan file.**
+   - `PLAN_FILE` given → keep it.
+   - `PLAN_SOURCE` is a `local://` URL and no `PLAN_FILE` is given → leave `PLAN_FILE` unset.
+   - Otherwise `PLAN_FILE=$(realpath "$PLAN_SOURCE")`; a failure → stop with `Plan not found: <PLAN_SOURCE>.`
+   - `PLAN_FILE` inside `$REPO/` → `PLAN_PATH` is its path relative to `REPO`. Otherwise step 6 sets `PLAN_PATH`.
+4. **Slug.**
+   ```bash
+   SLUG=$(python3 -c 'import re,sys; s=sys.argv[1].rsplit("/",1)[-1].lower().removesuffix(".md"); s=re.sub(r"[^a-z0-9]+","-",s).strip("-"); s=re.sub(r"^\d{4}-\d{2}-\d{2}-","",s); print(re.sub(r"-plan$","",s) or "plan")' "$PLAN_SOURCE")
+   ```
+5. **Branch.** `BRANCH=$(git branch --show-current)`:
+   - empty (detached HEAD) → stop with `Check out a branch first.`;
+   - `main` or `master` → create the first free delivery branch. Uncommitted changes move with it; step 8 stops on them.
+     ```bash
+     B="delivery/$SLUG"; n=2
+     while git rev-parse --verify --quiet "refs/heads/$B" >/dev/null; do B="delivery/$SLUG-$n"; n=$((n+1)); done
+     git switch -c "$B"
+     ```
+     `BRANCH` becomes `$B`.
+6. **Save the plan** when `PLAN_PATH` is not set yet:
+   ```bash
+   DATE=$(date +%F); P="docs/plans/$DATE-$SLUG.md"; n=2
+   while [ -e "$P" ]; do P="docs/plans/$DATE-$SLUG-$n.md"; n=$((n+1)); done
+   mkdir -p docs/plans
+   ```
+   `PLAN_PATH=$P`. With `PLAN_FILE`, run `cp "$PLAN_FILE" "$PLAN_PATH"`. Without it, `read <PLAN_SOURCE>:raw` and `write` that exact text to `PLAN_PATH`.
+7. **Commit the plan** when `git status --porcelain -- "$PLAN_PATH"` prints anything. The subject is `docs: update delivery plan <SLUG>` when `git ls-files --error-unmatch -- "$PLAN_PATH"` succeeds, otherwise `docs: add delivery plan <SLUG>`. Run `git add -- "$PLAN_PATH"`, then `git commit -m "<subject>" -- "$PLAN_PATH"`. A failed commit → print git's output and stop.
+8. If `git status --porcelain` prints anything → stop with `Commit or stash your other changes, then run /delivery:execute <PLAN_PATH>.`
+9. `TASKS` = JSON output of `python3 "$ROUTER" plan "$REPO" "$PLAN_PATH"`. A non-zero exit → stop with the router's error.
+10. **Done tasks and base.**
+    - `git log -F --grep="Delivery-Plan: $PLAN_PATH" --format=%B`. Every line `Delivery-Task: <N>` marks task `N` as done.
+    - `BASE`: if `git log -F --grep="Delivery-Plan: $PLAN_PATH" --reverse --format=%H` prints commits, `BASE` is the parent of the first one (`git rev-parse <first>^`); otherwise `BASE=$(git rev-parse HEAD)`.
+11. Any not-done task with stack `split` → stop with `Task <N> touches several stacks (<groups>). Split it in <PLAN_PATH>, commit, then run /delivery:execute <PLAN_PATH>.`
+12. Route every not-done task with **Routing**. For an `unknown` task, `TASK_TEXT` is its `block`. Print the `Routing: task <N> → <agent> (source: <source>)` line for every task in your reply before starting step 2; it is the audit trail of each routing decision.
+13. Every routed agent must be listed among the `task` tool's available agents. A missing one → stop with `Install <plugin>: omp plugin install <plugin>@av-marketplace, then start a new session.` (`<plugin>` is the part before `:`).
+14. `todo init` with one item per not-done task, `Task <N>: <title>`, then `Plan verification` and `Final code review`.
+
+If every task is already done, print `All tasks of <PLAN_PATH> are delivered.` and go to step 3.
+
+### 2. Tasks
+
+For each not-done task, in ascending order of `N`:
+
+1. Mark its todo item in progress. Run **Task loop** with `N`, `TASK_BLOCK` = the task's `block`, `AGENT` = its routed agent, `PLAN_PATH`, `BRANCH`.
+2. Act on the result:
+   - `stopped` → run step 4 and end the run;
+   - `skipped` → mark the todo item done and note `skipped` in the summary;
+   - `approved` or `accepted-with-open-findings` → commit with `git commit -F -` and exactly this message:
+     ```
+     <the task's commit, or "chore: <title>" when commit is null>
+
+     Delivery-Plan: <PLAN_PATH>
+     Delivery-Task: <N>
+     ```
+     For `accepted-with-open-findings`, add the line `Delivery-Review: accepted-with-open-findings` directly after `Delivery-Task: <N>`. Mark the todo item done.
+   - A failed commit (for example a rejecting hook) → print git's output and stop.
+
+### 3. Verification
+
+Mark `Plan verification` in progress. When `PLAN_PATH` has a `## Verification` section, carry out each check it lists, in order, with your own tools — commands, scripts, smoke runs — without editing project files. A check that needs a person, such as a manual UI step you cannot perform, is `manual`. Print one line per check:
+
+```
+Verification: <check> — pass | fail | manual (<evidence>)
+```
+
+Without a `## Verification` section, print `Verification: none in plan`. Any `fail` → use the `ask` tool: `Verification failed: <checks>. What now?` with options `Continue to the final review` and `Stop delivery`. `Stop delivery` → run step 4 and end the run. Mark `Plan verification` done.
+
+### 4. Summary
+
+Print the table `Task | Agent | Routing | Fix rounds | Result`, one row per task handled in this run, then the `Verification:` lines. The `Routing` column holds the routing source.
+
+### 5. Final review
+
+Mark `Final code review` in progress.
+
+- `code-review` root is `null` → print `Install code-review@av-marketplace and run /code-review:review.` and end.
+- Otherwise `read <code-review root>/commands/review.md` and carry it out completely, as if it had been invoked with this argument in place of its `$ARGUMENTS`:
+  ```
+  Changes on branch <BRANCH> in <BASE>..HEAD (git diff <BASE>..HEAD), delivered from <PLAN_PATH>. Review only these changes.
+  ```
+
+Mark `Final code review` done.
+
+### 6. Fix offer
+
+If the review saved a report, use the `ask` tool: `Run /code-review:fix-all on <report path>?` with options `Yes` and `No`. On `Yes`, `read <code-review root>/commands/fix-all.md` and carry it out completely with `$ARGUMENTS` = the report path.
 
 ## Plugin roots
 
@@ -27,7 +123,7 @@ The router prints JSON. Each task entry of `python3 "$ROUTER" plan "$REPO" <plan
 Decide the implementer for each task:
 
 - `stack` is `python`, `frontend`, `php` or `generic` → use the entry's `agent`. Source: `files`.
-- `stack` is `split` → do not route. The calling command decides what happens.
+- `stack` is `split` → do not route; the Delivery run stops on it.
 - `stack` is `unknown` (the task lists no files):
   1. Run `python3 "$ROUTER" layout "$REPO"` and keep its JSON as `LAYOUT`. If `LAYOUT["stacks"]` is empty → `delivery:implementer`, source `files`.
   2. Otherwise run this in the `eval` tool (python). Set `LAYOUT` to that JSON and `TASK_TEXT` to the task text:
@@ -59,7 +155,7 @@ Decide the implementer for each task:
   4. Otherwise use the `ask` tool:
      - question: `Which implementer should take Task <N>: <title>? (no file list; Jev: <choice, or the error> p=<confidence> via <model>)`;
      - options: one per stack in `LAYOUT["stacks"]`, then `generic`, then `Stop`;
-     - `Stop` ends the command. Any other answer maps as in step 3. Source: `user`.
+     - `Stop` ends the delivery run. Any other answer maps as in step 3. Source: `user`.
 
 For every routed task, print exactly one line:
 
@@ -69,7 +165,7 @@ Routing: task <N> → <agent> (source: <source>)
 
 ## Task loop
 
-Inputs: `N`, `TASK_BLOCK`, `AGENT`, `PLAN_PATH` (a plan path, or `ad-hoc`), `BRANCH`. `PLUGIN` is the part of `AGENT` before `:` when `AGENT` is a developer agent (`python-developer`, `frontend-developer`, `php-developer`), otherwise `none`.
+Inputs: `N`, `TASK_BLOCK`, `AGENT`, `PLAN_PATH`, `BRANCH`. `PLUGIN` is the part of `AGENT` before `:` when `AGENT` is a developer agent (`python-developer`, `frontend-developer`, `php-developer`), otherwise `none`.
 
 Every dispatch below is one `task` tool call with one item. Wait for its result before continuing; if it has not arrived, use `hub` `wait` with the job id. Use this `context` for every item:
 
@@ -94,7 +190,7 @@ Delivery of <PLAN_PATH> on branch <BRANCH>. One task per agent; the orchestrator
 7. **Still blocking after round 3** → use the `ask` tool:
    - question: `Task <N> still has <k> blocking findings after 3 fix rounds. What now?`
    - options: `Accept and commit with open findings` (result `accepted-with-open-findings`), `Stop delivery` (result `stopped`).
-8. Not blocking → result `approved`. Return `{result, rounds: r, findings}` to the calling command. The calling command commits; this loop never does.
+8. Not blocking → result `approved`. Return `{result, rounds: r, findings}` to the Delivery run. The Delivery run commits; this loop never does.
 
 ### Implementer template
 

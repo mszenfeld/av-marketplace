@@ -8,6 +8,7 @@ config files do not vote. Nothing here calls a model.
 
 Usage:
     route_task.py plan <root> <plan.md>   # JSON list, one entry per task
+    route_task.py check <root> <plan.md>  # JSON {"tasks": N, "problems": [...]}
     route_task.py files <root> <path>...  # JSON routing for these paths
     route_task.py layout <root>           # JSON repo layout for a judge
 """
@@ -18,6 +19,7 @@ import json
 import os
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 AGENTS = {
@@ -47,6 +49,7 @@ SECTION_END = re.compile(r"^#{2,3} ", re.MULTILINE)
 FILE_LINE = re.compile(r"^\s*[-*]\s*(?:Create|Modify|Test|Delete):\s*(.+?)\s*$", re.MULTILINE)
 COMMIT_LINE = re.compile(r"^\*\*Commit:\*\*\s*(.+?)\s*$", re.MULTILINE)
 BACKTICKED = re.compile(r"`([^`]+)`")
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$", re.MULTILINE)
 
 
 def clean_path(raw: str) -> str:
@@ -125,27 +128,66 @@ def route(root: Path, paths: list[str]) -> dict:
     return {"files": files, "stack": stack, "agent": AGENTS.get(stack), "groups": groups}
 
 
+def fenced_spans(text: str) -> list[tuple[int, int]]:
+    """Offsets of fenced code blocks, fences included; an unclosed fence runs to the end."""
+    spans = []
+    opening = None
+    for fence in FENCE.finditer(text):
+        marker = fence.group(1)
+        if opening is None:
+            opening = fence
+        elif marker[0] == opening.group(1)[0] and len(marker) >= len(opening.group(1)) and not fence.group(2).strip():
+            spans.append((opening.start(), fence.end()))
+            opening = None
+    if opening is not None:
+        spans.append((opening.start(), len(text)))
+    return spans
+
+
 def parse_plan(text: str) -> list[dict]:
-    headings = list(TASK_HEADING.finditer(text))
+    """Task blocks of a plan. Headings and file lines inside fenced code blocks are content, not structure."""
+    fences = fenced_spans(text)
+
+    def unfenced(pattern: re.Pattern[str], start: int = 0, end: int | None = None) -> list[re.Match[str]]:
+        matches = pattern.finditer(text, start, len(text) if end is None else end)
+        return [m for m in matches if not any(a <= m.start() < b for a, b in fences)]
+
     tasks = []
-    for heading in headings:
-        rest = text[heading.end():]
-        stop = SECTION_END.search(rest)
-        block = text[heading.start(): heading.end() + (stop.start() if stop else len(rest))].rstrip()
+    for heading in unfenced(TASK_HEADING):
+        stops = unfenced(SECTION_END, heading.end())
+        end = stops[0].start() if stops else len(text)
         paths = []
-        for match in FILE_LINE.finditer(block):
+        for match in unfenced(FILE_LINE, heading.end(), end):
             value = match.group(1)
             quoted = BACKTICKED.search(value)
             paths.append(quoted.group(1) if quoted else value.split()[0])
-        commit = COMMIT_LINE.search(block)
+        commit = unfenced(COMMIT_LINE, heading.end(), end)
         tasks.append({
             "task": int(heading.group(1)),
             "title": heading.group(2),
-            "commit": commit.group(1) if commit else None,
-            "block": block,
+            "commit": commit[0].group(1) if commit else None,
+            "block": text[heading.start():end].rstrip(),
             "paths": paths,
         })
     return tasks
+
+
+def check(root: Path, text: str) -> dict:
+    """Problems that keep a plan's tasks from routing to one implementer each."""
+    tasks = parse_plan(text)
+    problems = []
+    for task in tasks:
+        routed = route(root, task["paths"])
+        label = f"Task {task['task']} ({task['title']})"
+        if routed["stack"] == "split":
+            groups = "; ".join(f"{stack}: {', '.join(files)}" for stack, files in routed["groups"].items())
+            problems.append(f"{label}: touches several stacks ({groups}). Split it into one task per stack.")
+        elif routed["stack"] == "unknown":
+            problems.append(f'{label}: lists no files. Add a **Files:** block with "- Create|Modify|Test|Delete: `path`" lines.')
+    counts = Counter(task["task"] for task in tasks)
+    for number in sorted(n for n, count in counts.items() if count > 1):
+        problems.append(f"Task {number} appears {counts[number]} times. Number tasks 1, 2, 3… once each.")
+    return {"tasks": len(tasks), "problems": problems}
 
 
 def manifest_kinds(directory: Path) -> list[tuple[str, str]]:
@@ -189,7 +231,7 @@ def layout(root: Path) -> dict:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 2 or argv[0] not in {"plan", "files", "layout"}:
+    if len(argv) < 2 or argv[0] not in {"plan", "check", "files", "layout"}:
         print(__doc__, file=sys.stderr)
         return 2
     command, root = argv[0], Path(argv[1]).resolve()
@@ -200,7 +242,7 @@ def main(argv: list[str]) -> int:
         print(json.dumps(route(root, argv[2:])))
         return 0
     if len(argv) != 3:
-        print("usage: route_task.py plan <root> <plan.md>", file=sys.stderr)
+        print(f"usage: route_task.py {command} <root> <plan.md>", file=sys.stderr)
         return 2
     plan_path = Path(argv[2])
     if not plan_path.is_absolute():
@@ -208,7 +250,11 @@ def main(argv: list[str]) -> int:
     if not plan_path.is_file():
         print(f"plan not found: {plan_path}", file=sys.stderr)
         return 2
-    tasks = parse_plan(plan_path.read_text())
+    text = plan_path.read_text()
+    if command == "check":
+        print(json.dumps(check(root, text)))
+        return 0
+    tasks = parse_plan(text)
     if not tasks:
         print(f"no '### Task N:' headings in {plan_path}", file=sys.stderr)
         return 2
