@@ -1,0 +1,6 @@
+{
+  "name": "delivery",
+  "version": "0.1.0",
+  "description": "Plan, route each task to the matching developer agent, review every task, then run the full code review. Oh My Pi only.",
+  "category": "development"
+}

@@ -1,5 +1,5 @@
 ---
-name: dependency-scanning
+name: "code-review:dependency-scanning"
 description: Scans project dependencies for known vulnerabilities (CVEs). Supports Python (uv, pip, poetry), JavaScript, Go, Java, and other languages. Addresses OWASP A03:2025 - Software Supply Chain Failures.
 allowed-tools: Read, Grep, Glob, Bash(uv:*), Bash(pip-audit:*), Bash(pip:*), Bash(poetry:*), Bash(safety:*), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(go:*), Bash(command:*), Bash(jq:*), Bash(cat:*)
 ---

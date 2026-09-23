@@ -1,5 +1,5 @@
 ---
-name: developer-plugins-integration
+name: "code-review:developer-plugins-integration"
 description: Detects installed developer plugins (python-developer, frontend-developer, php-developer) and project stack, then provides a list of relevant skills to load for code review and fix workflows. Supports Python (FastAPI, SQLAlchemy, Pydantic, Django, Celery, asyncio, uv), Frontend (React, Tailwind, Zustand, TanStack, pnpm), and PHP (Symfony, Doctrine, DDD).
 allowed-tools: Read, Grep, Glob, Bash(grep:*), Bash(cat:*), Bash(head:*), Bash(find:*), Bash(test:*), Bash(echo:*)
 ---

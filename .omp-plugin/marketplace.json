@@ -14,6 +14,34 @@
       "description": "Perform comprehensive code review for security, performance, and architecture. Save reviews to file, fix issues via /fix-report (paginated) or /fix-all (bulk, then offers to resolve needs-decision findings, optional severity floor). Persist PR review feedback via /analyze-feedback. Optional verification phase for cross-analysis and adversarial review. Composite findings group symptoms with one cause and are fixed as one unit.",
       "version": "2.1.0",
       "category": "development"
+    },
+    {
+      "name": "delivery",
+      "source": "./delivery",
+      "description": "Plan, route each task to the matching developer agent, review every task, then run the full code review. Oh My Pi only.",
+      "version": "0.1.0",
+      "category": "development"
+    },
+    {
+      "name": "frontend-developer",
+      "source": "./frontend-developer",
+      "description": "Enforces TypeScript + React best practices, coding standards, TDD workflow, and modern tooling (Tailwind, Zustand, TanStack Query, React Hook Form, TanStack Router)",
+      "version": "1.2.1",
+      "category": "development"
+    },
+    {
+      "name": "php-developer",
+      "source": "./php-developer",
+      "description": "Enforces PHP best practices, coding standards, TDD workflow, and modern tooling for Symfony, Doctrine ORM, and DDD projects",
+      "version": "1.0.3",
+      "category": "development"
+    },
+    {
+      "name": "python-developer",
+      "source": "./python-developer",
+      "description": "Master the Python programming language for efficient and effective development",
+      "version": "3.0.4",
+      "category": "development"
     }
   ]
 }

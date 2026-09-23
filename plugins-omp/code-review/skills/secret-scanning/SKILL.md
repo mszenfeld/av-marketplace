@@ -1,5 +1,5 @@
 ---
-name: secret-scanning
+name: "code-review:secret-scanning"
 description: Detects and handles sensitive information in code. Use when reviewing code for secret leaks and hard-coded credentials.
 allowed-tools: Read, Grep, Glob, Bash(trufflehog:*), Bash(jq:*), Bash(command:*), Bash(grep:*), Bash(echo:*)
 ---

@@ -1,5 +1,5 @@
 ---
-name: standards-discovery
+name: "code-review:standards-discovery"
 description: Discovers and parses project coding standards, style guides, and architecture documentation. Searches for CONTRIBUTING, CODING_STANDARDS, STYLE_GUIDE, CONVENTIONS, ARCHITECTURE files and extracts rules for code review.
 allowed-tools: Read, Grep, Glob, Bash(find:*), Bash(cat:*), Bash(head:*), Bash(grep:*)
 ---

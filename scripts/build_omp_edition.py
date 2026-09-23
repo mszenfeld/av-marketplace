@@ -4,15 +4,23 @@
 `plugins/<name>/` stays the single source of truth. For every plugin with an
 overlay at `omp/overlay/<name>.json`, this script writes `plugins-omp/<name>/`:
 
-- `skills/` and `scripts/` are copied verbatim;
+- `scripts/` is copied verbatim;
+- `skills/` is copied verbatim except each `SKILL.md` frontmatter `name`,
+  which becomes `<plugin>:<skill>` so same-named skills of different plugins
+  stay distinct;
 - `commands/*.md` keep `description` / `argument-hint` and gain the harness
   preamble (`omp/preamble.md`) above the unchanged body;
 - `agents/*.md` get OMP frontmatter — `<plugin>:<agent>` names, OMP tool
   names, a role-routed `model` — and the preamble above the unchanged body;
 - `.omp-plugin/plugin.json` mirrors the Claude manifest.
 
+`omp/native/<name>/` holds OMP-only plugins. They are copied as-is (minus
+`tests/` and caches) and listed with the version from their own
+`.omp-plugin/plugin.json`.
+
 It also writes `.omp-plugin/marketplace.json`, listing only plugins that have
-an OMP edition, with versions taken from the Claude catalog.
+an OMP edition, with versions of generated plugins taken from the Claude
+catalog.
 
 Every mapping is total: an unknown source tool, frontmatter key, or an agent
 without an overlay entry fails the build instead of disappearing silently.
@@ -41,9 +49,18 @@ PREAMBLE_PATH = REPO / "omp" / "preamble.md"
 CLAUDE_CATALOG = REPO / ".claude-plugin" / "marketplace.json"
 OMP_CATALOG_REL = Path(".omp-plugin") / "marketplace.json"
 
-VERBATIM_DIRS = ("skills", "scripts")
+VERBATIM_DIRS = ("scripts",)
 COMMAND_KEYS = ("description", "argument-hint")
 AGENT_SOURCE_KEYS = {"name", "description", "tools", "disallowedTools", "model", "skills"}
+OVERLAY_KEYS = {"plugin", "agents", "fallback_model"}
+AGENT_SPEC_KEYS = {"role", "add_tools", "thinking", "autoload"}
+
+NATIVE_DIR = REPO / "omp" / "native"
+NATIVE_MANIFEST_KEYS = {"name", "version", "description", "category"}
+NATIVE_AGENT_KEYS = {
+    "name", "description", "tools", "spawns", "model", "thinking-level", "output",
+    "blocking", "autoloadSkills", "read-summarize", "prewalk", "advisor",
+}
 
 # Claude Code tool name -> OMP tool name. None = no equivalent; dropped on
 # purpose (the preamble tells the model what replaces it).
@@ -65,6 +82,7 @@ TOOL_MAP: dict[str, str | None] = {
     "Skill": None,
 }
 SCOPED_GRANT = re.compile(r"^(?P<tool>[A-Za-z]+)\(.*\)$")
+SKILL_NAME_LINE = re.compile(r"^name:.*$", re.MULTILINE)
 
 
 class BuildError(Exception):
@@ -105,6 +123,27 @@ def scalar(raw: str) -> str:
     return yaml_str(raw)
 
 
+def unquote(raw: str) -> str:
+    """Inverse of `scalar` for the quoting styles frontmatter values use."""
+    if raw.startswith('"'):
+        return json.loads(raw)
+    if len(raw) >= 2 and raw[0] == raw[-1] == "'":
+        return raw[1:-1]
+    return raw
+
+
+def build_skill(src: Path, plugin: str) -> str:
+    """Rename the skill to `<plugin>:<skill>`; every other byte is unchanged."""
+    text = src.read_text()
+    pairs, _ = split_frontmatter(text, src)
+    skill_dir = src.parent.name
+    if unquote(dict(pairs).get("name", "")) != skill_dir:
+        raise BuildError(f"{src}: skill name must equal its directory {skill_dir!r}")
+    end = text.find("\n---\n", 4)
+    head = SKILL_NAME_LINE.sub(f"name: {yaml_str(f'{plugin}:{skill_dir}')}", text[:end], count=1)
+    return head + text[end:]
+
+
 def render(frontmatter: list[tuple[str, str]], preamble: str, body: str) -> str:
     lines = ["---", *(f"{key}: {value}" for key, value in frontmatter), "---", ""]
     return "\n".join(lines) + preamble + "\n" + body.lstrip("\n")
@@ -125,7 +164,7 @@ def map_tools(raw: str, origin: Path) -> list[str]:
     return mapped
 
 
-def build_agent(src: Path, plugin: str, overlay: dict, preamble: str) -> str:
+def build_agent(src: Path, plugin: str, overlay: dict, preamble: str, skill_names: set[str]) -> str:
     pairs, body = split_frontmatter(src.read_text(), src)
     fields = dict(pairs)
     unknown = set(fields) - AGENT_SOURCE_KEYS
@@ -137,6 +176,11 @@ def build_agent(src: Path, plugin: str, overlay: dict, preamble: str) -> str:
     spec = overlay["agents"].get(name)
     if spec is None:
         raise BuildError(f"{src}: agent {name!r} has no entry in omp/overlay/{plugin}.json")
+    extra = set(spec) - AGENT_SPEC_KEYS
+    if extra:
+        raise BuildError(f"{src}: unknown keys {sorted(extra)} for agent {name!r} in omp/overlay/{plugin}.json")
+    if "role" not in spec:
+        raise BuildError(f"{src}: agent {name!r} has no role in omp/overlay/{plugin}.json")
 
     # `todo` is parent-owned in OMP: the task executor strips it from every
     # subagent, so granting it would only mislead a reader of the frontmatter.
@@ -166,9 +210,16 @@ def build_agent(src: Path, plugin: str, overlay: dict, preamble: str) -> str:
     out.append(("model", yaml_str(", ".join(selectors))))
     if "thinking" in spec:
         out.append(("thinking-level", spec["thinking"]))
-    if "skills" in fields:
-        skills = [s.strip() for s in fields["skills"].split(",") if s.strip()]
-        out.append(("autoloadSkills", json.dumps(skills)))
+    if "autoload" in spec:
+        autoload = list(spec["autoload"])
+    else:
+        autoload = [s.strip() for s in fields.get("skills", "").split(",") if s.strip()]
+    missing = [s for s in autoload if s not in skill_names]
+    if missing:
+        raise BuildError(f"{src}: autoload skills {missing} do not exist in plugins/{plugin}/skills/")
+    if autoload:
+        # OMP matches autoload entries by skill name, which build_skill prefixed.
+        out.append(("autoloadSkills", json.dumps([f"{plugin}:{s}" for s in autoload])))
     relpath = src.relative_to(SOURCE_ROOT / plugin).as_posix()
     return render(out, preamble.format(plugin=plugin, relpath=relpath), body)
 
@@ -198,6 +249,55 @@ def copy(src: Path, path: Path, out_root: Path) -> None:
     shutil.copy2(src, guarded(path, out_root))
 
 
+def native_skipped(rel: Path) -> bool:
+    return (
+        rel.parts[0] == "tests"
+        or "__pycache__" in rel.parts
+        or rel.suffix == ".pyc"
+        or rel.name == ".DS_Store"
+    )
+
+
+def build_native(src_root: Path, out_root: Path, taken: set[str]) -> dict:
+    """Copy an OMP-only plugin and return its catalog entry."""
+    manifest_path = src_root / ".omp-plugin" / "plugin.json"
+    if not manifest_path.is_file():
+        raise BuildError(f"{src_root}: missing .omp-plugin/plugin.json")
+    manifest = json.loads(manifest_path.read_text())
+    missing = NATIVE_MANIFEST_KEYS - set(manifest)
+    if missing:
+        raise BuildError(f"{manifest_path}: missing keys {sorted(missing)}")
+    name = manifest["name"]
+    if name != src_root.name:
+        raise BuildError(f"{manifest_path}: name {name!r} must equal its directory {src_root.name!r}")
+    if name in taken:
+        raise BuildError(f"native plugin {name!r} collides with a generated plugin")
+
+    for src in sorted((src_root / "agents").glob("*.md")):
+        fields = dict(split_frontmatter(src.read_text(), src)[0])
+        extra = set(fields) - NATIVE_AGENT_KEYS
+        if extra:
+            raise BuildError(f"{src}: unknown OMP agent frontmatter keys {sorted(extra)}")
+        if not unquote(fields.get("name", "")).startswith(f"{name}:"):
+            raise BuildError(f"{src}: agent name must start with {name + ':'!r}")
+    for src in sorted((src_root / "skills").glob("*/SKILL.md")):
+        expected = f"{name}:{src.parent.name}"
+        if unquote(dict(split_frontmatter(src.read_text(), src)[0]).get("name", "")) != expected:
+            raise BuildError(f"{src}: skill name must be {expected!r}")
+
+    for src in sorted(src_root.rglob("*")):
+        rel = src.relative_to(src_root)
+        if src.is_file() and not native_skipped(rel):
+            copy(src, out_root / name / rel, out_root)
+    return {
+        "name": name,
+        "source": f"./{name}",
+        "description": manifest["description"],
+        "version": manifest["version"],
+        "category": manifest["category"],
+    }
+
+
 def build(dest_repo: Path) -> None:
     preamble = PREAMBLE_PATH.read_text()
     catalog = json.loads(CLAUDE_CATALOG.read_text())
@@ -207,6 +307,9 @@ def build(dest_repo: Path) -> None:
 
     for overlay_path in sorted(OVERLAY_DIR.glob("*.json")):
         overlay = json.loads(overlay_path.read_text())
+        extra = set(overlay) - OVERLAY_KEYS
+        if extra:
+            raise BuildError(f"{overlay_path}: unknown overlay keys {sorted(extra)}")
         plugin = overlay["plugin"]
         if plugin != overlay_path.stem:
             raise BuildError(f"{overlay_path}: 'plugin' must equal the file name")
@@ -221,13 +324,30 @@ def build(dest_repo: Path) -> None:
                     if src.is_file():
                         copy(src, dst_root / src.relative_to(src_root), out_root)
 
+        skills_root = src_root / "skills"
+        skill_names: set[str] = set()
+        if skills_root.is_dir():
+            for src in sorted(skills_root.rglob("*")):
+                if not src.is_file():
+                    continue
+                dst = dst_root / src.relative_to(src_root)
+                if src.name == "SKILL.md" and src.parent.parent == skills_root:
+                    skill_names.add(src.parent.name)
+                    write(dst, build_skill(src, plugin), out_root)
+                else:
+                    copy(src, dst, out_root)
+
         for src in sorted((src_root / "commands").glob("*.md")):
             write(dst_root / "commands" / src.name, build_command(src, plugin, preamble), out_root)
 
         seen = set()
         for src in sorted((src_root / "agents").glob("*.md")):
             seen.add(dict(split_frontmatter(src.read_text(), src)[0])["name"])
-            write(dst_root / "agents" / src.name, build_agent(src, plugin, overlay, preamble), out_root)
+            write(
+                dst_root / "agents" / src.name,
+                build_agent(src, plugin, overlay, preamble, skill_names),
+                out_root,
+            )
         stale = set(overlay["agents"]) - seen
         if stale:
             raise BuildError(f"{overlay_path}: overlay names agents that do not exist: {sorted(stale)}")
@@ -248,6 +368,12 @@ def build(dest_repo: Path) -> None:
                 "category": entry["category"],
             }
         )
+
+    if NATIVE_DIR.is_dir():
+        taken = set(entries) | {entry["name"] for entry in omp_plugins}
+        for native in sorted(p for p in NATIVE_DIR.iterdir() if p.is_dir()):
+            omp_plugins.append(build_native(native, out_root, taken))
+    omp_plugins.sort(key=lambda entry: entry["name"])
 
     omp_catalog = {
         "name": catalog["name"],

@@ -1,5 +1,5 @@
 ---
-name: linter-integration
+name: "code-review:linter-integration"
 description: Auto-detects and runs project-specific linters, formatters, and typecheckers. Supports Python (ruff, mypy, black, flake8, pylint) and TypeScript (eslint, tsc, prettier). Uses existing project configuration.
 allowed-tools: Read, Grep, Glob, Bash(ruff:*), Bash(mypy:*), Bash(black:*), Bash(flake8:*), Bash(pylint:*), Bash(eslint:*), Bash(tsc:*), Bash(npx:*), Bash(prettier:*), Bash(uv:*), Bash(npm:*), Bash(pnpm:*), Bash(yarn:*), Bash(command:*), Bash(jq:*), Bash(cat:*), Bash(head:*), Bash(python:*), Bash(node:*)
 ---

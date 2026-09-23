@@ -1,5 +1,5 @@
 ---
-name: verdict-protocol
+name: "code-review:verdict-protocol"
 description: Use when writing or reviewing the definition of a reporting agent or command (a review, audit, verification, or test-run agent), before its closing contract is finalized.
 ---
 

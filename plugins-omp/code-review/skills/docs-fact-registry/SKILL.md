@@ -1,5 +1,5 @@
 ---
-name: docs-fact-registry
+name: "code-review:docs-fact-registry"
 description: "Use when checking or reporting docs↔code drift — a declarative registry (claim → source of truth → policy) with a three-way classification: mechanical facts auto-fixable, judgment calls escalated, dead references flagged as inconsistencies whose fix is a decision."
 ---
 

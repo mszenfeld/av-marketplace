@@ -1,5 +1,5 @@
 ---
-name: decision-gate
+name: "code-review:decision-gate"
 description: Use when resolving code-review findings flagged needs-decision in bulk — the analysis fan-out, the decision sweep and its five outcomes, the dispatch contract, orchestrator-run verification, and the decision record written into the report. Loaded by /fix-report and /fix-all; /fix loads it for the Alternatives render format and, in composite mode, stage 3's dispatch-copy rule.
 ---
 

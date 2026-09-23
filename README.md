@@ -15,14 +15,24 @@ After installation, verify with `/help` — you should see the new commands list
 
 ### Oh My Pi (OMP)
 
-An OMP edition is generated from the same sources (currently: Code Review):
+An OMP edition is generated from the same sources: Code Review and the Frontend, PHP and Python developer plugins. It adds one OMP-only plugin, **Delivery**:
 
 ```bash
 omp plugin marketplace add AppVerk/av-marketplace
-omp plugin install code-review@av-marketplace
+for p in code-review delivery python-developer frontend-developer php-developer; do
+  omp plugin install "$p@av-marketplace"
+done
 ```
 
-Its agents route through model roles instead of a fixed model: reviewers use `code_review`, the fixer `executor`, adversarial verification `challenger`, and single-finding analysis `analyst`. Map each role in `~/.omp/agent/config.yml`, for example:
+Delivery runs a plan end to end:
+
+- `/delivery:plan <spec or description>` — a planner writes `docs/superpowers/plans/<date>-<topic>.md`, one stack per task.
+- `/delivery:execute <plan>` — each task goes to the developer agent that owns its files (Python, React, PHP, or a generic implementer), is reviewed, gets up to 3 fix rounds, and is committed; then `/code-review:review` runs over the whole branch.
+- `/delivery:task <description>` — one ad-hoc task with the same routing and review, left staged.
+
+Tasks that list files are routed by their files; tasks that do not are routed by Jev (the `judge` model role) and fall back to asking you below 0.8 confidence.
+
+Agents route through model roles instead of a fixed model: reviewers use `code_review`, fixers and developers `executor`, adversarial verification `challenger`, single-finding analysis `analyst`, and the delivery planner `plan`. Map each role in `~/.omp/agent/config.yml`, for example:
 
 ```yaml
 modelRoles:

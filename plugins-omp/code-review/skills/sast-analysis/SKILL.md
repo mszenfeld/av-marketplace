@@ -1,5 +1,5 @@
 ---
-name: sast-analysis
+name: "code-review:sast-analysis"
 description: Static Application Security Testing (SAST) for multi-language codebases. Uses Semgrep and language-specific tools to detect vulnerabilities across Python, JavaScript, TypeScript, Go, Java, and more.
 allowed-tools: Read, Grep, Glob, Bash(semgrep:*), Bash(bandit:*), Bash(eslint:*), Bash(command:*), Bash(jq:*), Bash(cat:*)
 ---

@@ -50,3 +50,14 @@ are total: an agent without an overlay entry, a tool without a `TOOL_MAP` entry,
 or an agent frontmatter key the script does not know fails the build rather
 than being dropped. Versions are copied from `.claude-plugin/marketplace.json`,
 so the four-place versioning rule above is unchanged.
+
+In the OMP edition every skill is named `<plugin>:<skill>`: OMP resolves skills
+by name, and several plugins ship a `coding-standards` or `tdd-workflow`. An
+overlay `autoload` list replaces the agent's `skills:` for OMP; keep it to the
+skills the agent body loads unconditionally.
+
+OMP-only plugins live in `omp/native/<name>/` and are copied into
+`plugins-omp/` as-is, minus `tests/`. Their version lives in their own
+`.omp-plugin/plugin.json` and is bumped there; they are not in the Claude
+catalog. Agent and skill names must carry the `<name>:` prefix — the build
+fails otherwise.

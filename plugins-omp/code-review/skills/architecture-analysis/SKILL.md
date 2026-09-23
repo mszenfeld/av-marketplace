@@ -1,5 +1,5 @@
 ---
-name: architecture-analysis
+name: "code-review:architecture-analysis"
 description: Analyzes codebase for SOLID principles violations, DDD patterns compliance, Clean Architecture layer dependencies, and common anti-patterns. Works with Python and TypeScript, with language-agnostic pattern detection.
 allowed-tools: Read, Grep, Glob, Bash(wc:*), Bash(find:*), Bash(sort:*), Bash(head:*), Bash(tail:*), Bash(awk:*), Bash(grep:*), Bash(radon:*), Bash(vulture:*), Bash(command:*), Bash(jq:*), Bash(cat:*), Bash(uniq:*), Bash(cut:*), Bash(xargs:*)
 ---
