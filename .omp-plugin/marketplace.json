@@ -1,0 +1,19 @@
+{
+  "name": "av-marketplace",
+  "owner": {
+    "name": "AppVerk"
+  },
+  "metadata": {
+    "description": "OMP edition, generated from .claude-plugin/marketplace.json by scripts/build_omp_edition.py",
+    "pluginRoot": "./plugins-omp"
+  },
+  "plugins": [
+    {
+      "name": "code-review",
+      "source": "./code-review",
+      "description": "Perform comprehensive code review for security, performance, and architecture. Save reviews to file, fix issues via /fix-report (paginated) or /fix-all (bulk, then offers to resolve needs-decision findings, optional severity floor). Persist PR review feedback via /analyze-feedback. Optional verification phase for cross-analysis and adversarial review. Composite findings group symptoms with one cause and are fixed as one unit.",
+      "version": "2.1.0",
+      "category": "development"
+    }
+  ]
+}

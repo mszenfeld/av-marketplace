@@ -13,6 +13,27 @@ Claude Code plugins that compose into one development harness — from idea and 
 
 After installation, verify with `/help` — you should see the new commands listed.
 
+### Oh My Pi (OMP)
+
+An OMP edition is generated from the same sources (currently: Code Review):
+
+```bash
+omp plugin marketplace add AppVerk/av-marketplace
+omp plugin install code-review@av-marketplace
+```
+
+Its agents route through model roles instead of a fixed model: reviewers use `code_review`, the fixer `executor`, adversarial verification `challenger`, and single-finding analysis `analyst`. Map each role in `~/.omp/agent/config.yml`, for example:
+
+```yaml
+modelRoles:
+  code_review: anthropic/claude-opus-5-5
+  analyst: anthropic/claude-opus-5-5
+  executor: openai-codex/gpt-5.5
+  challenger: openai-codex/gpt-5.5
+```
+
+An unmapped role falls back to the model the Claude Code edition names (`opus`), or to the session model where that edition inherits one.
+
 ## Workflow
 
 The plugins are designed to work together as a full development cycle:

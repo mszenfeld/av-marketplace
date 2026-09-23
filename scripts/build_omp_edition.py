@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""Build the OMP edition of this marketplace from the Claude Code sources.
+
+`plugins/<name>/` stays the single source of truth. For every plugin with an
+overlay at `omp/overlay/<name>.json`, this script writes `plugins-omp/<name>/`:
+
+- `skills/` and `scripts/` are copied verbatim;
+- `commands/*.md` keep `description` / `argument-hint` and gain the harness
+  preamble (`omp/preamble.md`) above the unchanged body;
+- `agents/*.md` get OMP frontmatter — `<plugin>:<agent>` names, OMP tool
+  names, a role-routed `model` — and the preamble above the unchanged body;
+- `.omp-plugin/plugin.json` mirrors the Claude manifest.
+
+It also writes `.omp-plugin/marketplace.json`, listing only plugins that have
+an OMP edition, with versions taken from the Claude catalog.
+
+Every mapping is total: an unknown source tool, frontmatter key, or an agent
+without an overlay entry fails the build instead of disappearing silently.
+
+Usage:
+    python3 scripts/build_omp_edition.py          # (re)generate
+    python3 scripts/build_omp_edition.py --check  # exit 1 if output is stale
+"""
+
+from __future__ import annotations
+
+import argparse
+import filecmp
+import json
+import re
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+SOURCE_ROOT = REPO / "plugins"
+OUTPUT_DIR_NAME = "plugins-omp"
+OVERLAY_DIR = REPO / "omp" / "overlay"
+PREAMBLE_PATH = REPO / "omp" / "preamble.md"
+CLAUDE_CATALOG = REPO / ".claude-plugin" / "marketplace.json"
+OMP_CATALOG_REL = Path(".omp-plugin") / "marketplace.json"
+
+VERBATIM_DIRS = ("skills", "scripts")
+COMMAND_KEYS = ("description", "argument-hint")
+AGENT_SOURCE_KEYS = {"name", "description", "tools", "disallowedTools", "model", "skills"}
+
+# Claude Code tool name -> OMP tool name. None = no equivalent; dropped on
+# purpose (the preamble tells the model what replaces it).
+TOOL_MAP: dict[str, str | None] = {
+    "Read": "read",
+    "Grep": "grep",
+    "Glob": "glob",
+    "Bash": "bash",
+    "Edit": "edit",
+    "NotebookEdit": "edit",
+    "Write": "write",
+    "WebSearch": "web_search",
+    "WebFetch": "read",
+    "Task": "task",
+    "TaskCreate": "todo",
+    "TaskUpdate": "todo",
+    "TaskList": "todo",
+    "AskUserQuestion": "ask",
+    "Skill": None,
+}
+SCOPED_GRANT = re.compile(r"^(?P<tool>[A-Za-z]+)\(.*\)$")
+
+
+class BuildError(Exception):
+    pass
+
+
+def split_frontmatter(text: str, origin: Path) -> tuple[list[tuple[str, str]], str]:
+    """Return ordered (key, raw value) pairs and the body after the closing fence."""
+    if not text.startswith("---\n"):
+        raise BuildError(f"{origin}: missing frontmatter")
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        raise BuildError(f"{origin}: unterminated frontmatter")
+    pairs: list[tuple[str, str]] = []
+    for line in text[4:end].splitlines():
+        if not line.strip():
+            continue
+        key, sep, value = line.partition(":")
+        if not sep or line[0].isspace():
+            raise BuildError(f"{origin}: unsupported frontmatter line {line!r}")
+        pairs.append((key.strip(), value.strip()))
+    return pairs, text[end + len("\n---\n") :]
+
+
+def yaml_str(value: str) -> str:
+    # A JSON string literal is a valid double-quoted YAML scalar.
+    return json.dumps(value, ensure_ascii=False)
+
+
+def scalar(raw: str) -> str:
+    """Re-emit a raw source value as a string scalar.
+
+    Claude Code reads `argument-hint: [pr-number]` as text; a YAML parser reads
+    it as a list. Quote every value unless the source already quoted it.
+    """
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        return raw
+    return yaml_str(raw)
+
+
+def render(frontmatter: list[tuple[str, str]], preamble: str, body: str) -> str:
+    lines = ["---", *(f"{key}: {value}" for key, value in frontmatter), "---", ""]
+    return "\n".join(lines) + preamble + "\n" + body.lstrip("\n")
+
+
+def map_tools(raw: str, origin: Path) -> list[str]:
+    mapped: list[str] = []
+    for token in (t.strip() for t in raw.split(",")):
+        if not token:
+            continue
+        scoped = SCOPED_GRANT.match(token)
+        name = scoped.group("tool") if scoped else token
+        if name not in TOOL_MAP:
+            raise BuildError(f"{origin}: no OMP mapping for tool {token!r}")
+        target = TOOL_MAP[name]
+        if target and target not in mapped:
+            mapped.append(target)
+    return mapped
+
+
+def build_agent(src: Path, plugin: str, overlay: dict, preamble: str) -> str:
+    pairs, body = split_frontmatter(src.read_text(), src)
+    fields = dict(pairs)
+    unknown = set(fields) - AGENT_SOURCE_KEYS
+    if unknown:
+        raise BuildError(f"{src}: no OMP mapping for frontmatter keys {sorted(unknown)}")
+    name = fields.get("name")
+    if not name or not fields.get("description"):
+        raise BuildError(f"{src}: agent needs name and description")
+    spec = overlay["agents"].get(name)
+    if spec is None:
+        raise BuildError(f"{src}: agent {name!r} has no entry in omp/overlay/{plugin}.json")
+
+    # `todo` is parent-owned in OMP: the task executor strips it from every
+    # subagent, so granting it would only mislead a reader of the frontmatter.
+    tools = [t for t in map_tools(fields.get("tools", ""), src) if t != "todo"]
+    for extra in spec.get("add_tools", []):
+        if extra not in tools:
+            tools.append(extra)
+    # OMP's `tools:` is an allowlist, so `disallowedTools` has nothing to say
+    # there — but the denial must still hold after mapping and overlay extras.
+    denied = set(map_tools(fields.get("disallowedTools", ""), src)) & set(tools)
+    if denied:
+        raise BuildError(f"{src}: granted tools {sorted(denied)} are in disallowedTools")
+    # Claude Code's `inherit` (and an absent `model:`) means "the parent's
+    # model"; OMP falls back to the parent when no listed entry resolves, so
+    # the role alias alone expresses it.
+    selectors = [f"@{spec['role']}"]
+    fallback = fields.get("model") or overlay.get("fallback_model")
+    if fallback and fallback != "inherit":
+        selectors.append(fallback)
+
+    out: list[tuple[str, str]] = [
+        ("name", yaml_str(f"{plugin}:{name}")),
+        ("description", scalar(fields["description"])),
+    ]
+    if tools:
+        out.append(("tools", ", ".join(tools)))
+    out.append(("model", yaml_str(", ".join(selectors))))
+    if "thinking" in spec:
+        out.append(("thinking-level", spec["thinking"]))
+    if "skills" in fields:
+        skills = [s.strip() for s in fields["skills"].split(",") if s.strip()]
+        out.append(("autoloadSkills", json.dumps(skills)))
+    relpath = src.relative_to(SOURCE_ROOT / plugin).as_posix()
+    return render(out, preamble.format(plugin=plugin, relpath=relpath), body)
+
+
+def build_command(src: Path, plugin: str, preamble: str) -> str:
+    pairs, body = split_frontmatter(src.read_text(), src)
+    kept = [(k, scalar(v)) for k, v in pairs if k in COMMAND_KEYS]
+    relpath = src.relative_to(SOURCE_ROOT / plugin).as_posix()
+    return render(kept, preamble.format(plugin=plugin, relpath=relpath), body)
+
+
+def guarded(path: Path, out_root: Path) -> Path:
+    # The one invariant this script guarantees: nothing outside the output root.
+    resolved = path.resolve()
+    if out_root.resolve() not in resolved.parents:
+        raise BuildError(f"refusing to write outside {out_root}: {resolved}")
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
+def write(path: Path, content: str, out_root: Path) -> None:
+    guarded(path, out_root).write_text(content)
+
+
+def copy(src: Path, path: Path, out_root: Path) -> None:
+    # copy2 keeps the executable bit the scripts rely on.
+    shutil.copy2(src, guarded(path, out_root))
+
+
+def build(dest_repo: Path) -> None:
+    preamble = PREAMBLE_PATH.read_text()
+    catalog = json.loads(CLAUDE_CATALOG.read_text())
+    entries = {p["name"]: p for p in catalog["plugins"]}
+    out_root = dest_repo / OUTPUT_DIR_NAME
+    omp_plugins = []
+
+    for overlay_path in sorted(OVERLAY_DIR.glob("*.json")):
+        overlay = json.loads(overlay_path.read_text())
+        plugin = overlay["plugin"]
+        if plugin != overlay_path.stem:
+            raise BuildError(f"{overlay_path}: 'plugin' must equal the file name")
+        if plugin not in entries:
+            raise BuildError(f"{overlay_path}: {plugin!r} is not in the Claude catalog")
+        src_root = SOURCE_ROOT / plugin
+        dst_root = out_root / plugin
+
+        for name in VERBATIM_DIRS:
+            if (src_root / name).is_dir():
+                for src in sorted((src_root / name).rglob("*")):
+                    if src.is_file():
+                        copy(src, dst_root / src.relative_to(src_root), out_root)
+
+        for src in sorted((src_root / "commands").glob("*.md")):
+            write(dst_root / "commands" / src.name, build_command(src, plugin, preamble), out_root)
+
+        seen = set()
+        for src in sorted((src_root / "agents").glob("*.md")):
+            seen.add(dict(split_frontmatter(src.read_text(), src)[0])["name"])
+            write(dst_root / "agents" / src.name, build_agent(src, plugin, overlay, preamble), out_root)
+        stale = set(overlay["agents"]) - seen
+        if stale:
+            raise BuildError(f"{overlay_path}: overlay names agents that do not exist: {sorted(stale)}")
+
+        manifest = json.loads((src_root / ".claude-plugin" / "plugin.json").read_text())
+        write(
+            dst_root / ".omp-plugin" / "plugin.json",
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+            out_root,
+        )
+        entry = entries[plugin]
+        omp_plugins.append(
+            {
+                "name": plugin,
+                "source": f"./{plugin}",
+                "description": entry["description"],
+                "version": entry["version"],
+                "category": entry["category"],
+            }
+        )
+
+    omp_catalog = {
+        "name": catalog["name"],
+        "owner": catalog["owner"],
+        "metadata": {
+            "description": "OMP edition, generated from .claude-plugin/marketplace.json by scripts/build_omp_edition.py",
+            "pluginRoot": f"./{OUTPUT_DIR_NAME}",
+        },
+        "plugins": omp_plugins,
+    }
+    # The catalog is the only output outside plugins-omp/, at a fixed path.
+    catalog_path = dest_repo / OMP_CATALOG_REL
+    catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    catalog_path.write_text(json.dumps(omp_catalog, indent=2, ensure_ascii=False) + "\n")
+
+
+def diff_trees(expected: Path, actual: Path) -> list[str]:
+    problems: list[str] = []
+
+    def walk(cmp: filecmp.dircmp, rel: Path) -> None:
+        problems.extend(f"missing: {rel / n}" for n in cmp.left_only)
+        problems.extend(f"unexpected: {rel / n}" for n in cmp.right_only)
+        _, mismatch, errors = filecmp.cmpfiles(cmp.left, cmp.right, cmp.common_files, shallow=False)
+        problems.extend(f"stale: {rel / n}" for n in mismatch + errors)
+        for name, sub in cmp.subdirs.items():
+            walk(sub, rel / name)
+
+    if not actual.exists():
+        return [f"missing: {actual.name}/"]
+    walk(filecmp.dircmp(expected, actual), Path(actual.name))
+    return problems
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--check", action="store_true", help="fail if the committed output is stale")
+    args = parser.parse_args()
+    try:
+        if not args.check:
+            shutil.rmtree(REPO / OUTPUT_DIR_NAME, ignore_errors=True)
+            build(REPO)
+            print(f"wrote {OUTPUT_DIR_NAME}/ and {OMP_CATALOG_REL}")
+            return 0
+        with tempfile.TemporaryDirectory() as tmp:
+            build(Path(tmp))
+            problems = diff_trees(Path(tmp) / OUTPUT_DIR_NAME, REPO / OUTPUT_DIR_NAME)
+            committed = REPO / OMP_CATALOG_REL
+            if not committed.exists():
+                problems.append(f"missing: {OMP_CATALOG_REL}")
+            elif not filecmp.cmp(Path(tmp) / OMP_CATALOG_REL, committed, shallow=False):
+                problems.append(f"stale: {OMP_CATALOG_REL}")
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        if problems:
+            print("OMP edition is stale: run python3 scripts/build_omp_edition.py", file=sys.stderr)
+            return 1
+        print("OMP edition is up to date")
+        return 0
+    except BuildError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
