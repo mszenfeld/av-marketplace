@@ -18,5 +18,8 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Node packages (the OMP Edition workflow installs OMP under omp/native/delivery/)
+node_modules
+
 # superpowers SDD scratch (ledger, briefs, review packages)
 .superpowers/
