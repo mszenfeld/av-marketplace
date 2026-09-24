@@ -8,7 +8,7 @@ config files do not vote. Nothing here calls a model.
 
 Usage:
     route_task.py plan <root> <plan.md>   # JSON list, one entry per task
-    route_task.py check <root> <plan.md>  # JSON {"tasks": N, "problems": [...]}
+    route_task.py check <root> <plan.md>  # JSON {"tasks": N, "problems": [...], "no_files": [...]}
     route_task.py files <root> <path>...  # JSON routing for these paths
     route_task.py layout <root>           # JSON repo layout for a judge
 """
@@ -183,10 +183,11 @@ def duplicate_tasks(tasks: list[dict]) -> list[str]:
 
 
 def check(root: Path, text: str) -> dict:
-    """Problems that keep a plan's tasks from routing to one implementer each."""
+    """Report plan errors in problems and tasks without a Files block in no_files."""
     tasks = parse_plan(text)
     fences = fenced_spans(text)
     problems = []
+    no_files = []
     for heading in TASK_CANDIDATE.finditer(text):
         if not any(start <= heading.start() < end for start, end in fences) and not TASK_HEADING.fullmatch(heading.group()):
             problems.append(f"Invalid task heading {heading.group()!r}. Use '### Task N: <title>' on one line.")
@@ -201,9 +202,9 @@ def check(root: Path, text: str) -> dict:
             groups = "; ".join(f"{stack}: {', '.join(files)}" for stack, files in routed["groups"].items())
             problems.append(f"{label}: touches several stacks ({groups}). Split it into one task per stack.")
         elif routed["stack"] == "unknown":
-            problems.append(f'{label}: lists no files. Add a **Files:** block with "- Create|Modify|Test|Delete: `path`" lines.')
+            no_files.append(f'{label}: lists no files. Add a **Files:** block with "- Create|Modify|Test|Delete: `path`" lines.')
     problems.extend(duplicate_tasks(tasks))
-    return {"tasks": len(tasks), "problems": problems}
+    return {"tasks": len(tasks), "problems": problems, "no_files": no_files}
 
 
 def manifest_kinds(directory: Path) -> list[tuple[str, str]]:

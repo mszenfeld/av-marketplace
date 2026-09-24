@@ -194,14 +194,15 @@ class CheckTest(RoutingFixture):
         result = check(self.root, SPLIT_PLAN)
         self.assertEqual(result["tasks"], 3)
         problems = result["problems"]
-        self.assertEqual(len(problems), 3, problems)
+        self.assertEqual(len(problems), 2, problems)
         self.assertTrue(problems[0].startswith("Task 1 (Orders): touches several stacks"), problems[0])
         self.assertIn("python: backend/app/orders.py; frontend: web/src/api.ts", problems[0])
-        self.assertTrue(problems[1].startswith("Task 2 (Notes): lists no files"), problems[1])
-        self.assertTrue(problems[2].startswith("Task 2 appears 2 times"), problems[2])
+        self.assertTrue(problems[1].startswith("Task 2 appears 2 times"), problems[1])
+        self.assertEqual(len(result["no_files"]), 1, result)
+        self.assertTrue(result["no_files"][0].startswith("Task 2 (Notes): lists no files"), result)
 
     def test_routable_plan_has_no_problems(self) -> None:
-        self.assertEqual(check(self.root, PLAN), {"tasks": 2, "problems": []})
+        self.assertEqual(check(self.root, PLAN), {"tasks": 2, "problems": [], "no_files": []})
 
     def test_empty_task_title_does_not_consume_files_heading(self) -> None:
         plan = """### Task 1:
@@ -241,7 +242,9 @@ class CheckTest(RoutingFixture):
 `backend/app/orders.py`
 """
         self.assertEqual(parse_plan(plan)[0]["paths"], [])
-        self.assertTrue(any("lists no files" in problem for problem in check(self.root, plan)["problems"]))
+        result = check(self.root, plan)
+        self.assertEqual(result["problems"], [])
+        self.assertTrue(any("lists no files" in message for message in result["no_files"]), result)
 
     def test_invalid_task_heading_in_fence_is_not_reported(self) -> None:
         plan = """### Task 1: Orders
@@ -252,7 +255,7 @@ class CheckTest(RoutingFixture):
 **Commit:**
 ```
 """
-        self.assertEqual(check(self.root, plan), {"tasks": 1, "problems": []})
+        self.assertEqual(check(self.root, plan), {"tasks": 1, "problems": [], "no_files": []})
 
     def test_malformed_heading_is_reported_beside_valid_task(self) -> None:
         plan = """### Task 1: Orders
@@ -302,7 +305,23 @@ class CliTest(RoutingFixture):
         write(self.root, "empty-plan.md", "# Nothing here\n")
         result = self.run_router("check", str(self.root), "empty-plan.md")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), {"tasks": 0, "problems": []})
+        self.assertEqual(json.loads(result.stdout), {"tasks": 0, "problems": [], "no_files": []})
+
+    def test_check_cli_separates_tasks_without_files(self) -> None:
+        write(self.root, "notes-plan.md", """### Task 1: Notes
+Write release notes.
+
+### Task 2: Orders
+**Files:**
+- Modify: `backend/app/orders.py`
+""")
+        result = self.run_router("check", str(self.root), "notes-plan.md")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        checked = json.loads(result.stdout)
+        self.assertEqual(checked["tasks"], 2)
+        self.assertEqual(checked["problems"], [])
+        self.assertEqual(len(checked["no_files"]), 1, checked)
+        self.assertIn("Task 1 (Notes)", checked["no_files"][0])
 
     def test_check_cli_reports_empty_title_and_commit(self) -> None:
         write(self.root, "invalid-plan.md", """### Task 1:
