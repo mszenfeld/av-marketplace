@@ -9,6 +9,8 @@ config files do not vote. Nothing here calls a model.
 Usage:
     route_task.py plan <root> <plan.md>   # JSON list, one entry per task
     route_task.py check <root> <plan.md>  # JSON {"tasks": N, "problems": [...], "no_files": [...]}
+    route_task.py message <root> <plan.md> <N> [--open-findings]  # task commit with trailers
+    route_task.py done <root> <plan.md>  # JSON delivered tasks, conflicts, base
     route_task.py files <root> <path>...  # JSON routing for these paths
     route_task.py layout <root>           # JSON repo layout for a judge
 """
@@ -18,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
@@ -247,8 +250,84 @@ def layout(root: Path) -> dict:
     return {"stacks": stacks, "lines": lines}
 
 
+def plan_rel(root: Path, plan_path: Path) -> str:
+    """Return the plan's POSIX path relative to the repository root."""
+    return plan_path.resolve().relative_to(root).as_posix()
+
+
+def commit_message(rel: str, tasks: list[dict], number: int, open_findings: bool) -> str:
+    """Build a task commit message with delivery trailers."""
+    task = next((task for task in tasks if task["task"] == number), None)
+    if task is None:
+        raise ValueError(f"task {number} is not in the plan")
+    lines = [
+        task["commit"] or f"chore: {task['title']}",
+        "",
+        f"Delivery-Plan: {rel}",
+        f"Delivery-Task: {number}",
+        f"Delivery-Task-Title: {task['title']}",
+    ]
+    if open_findings:
+        lines.append("Delivery-Review: accepted-with-open-findings")
+    return "\n".join(lines) + "\n"
+
+
+def delivered(root: Path, rel: str, tasks: list[dict]) -> dict:
+    """Find delivered tasks by exact plan and task trailers in git history."""
+    log = subprocess.run(
+        ["git", "-C", str(root), "log", "--no-show-signature", "--topo-order", "--reverse", "-F",
+         f"--grep=Delivery-Plan: {rel}", "--format=%H%x00%B%x00"],
+        capture_output=True, text=True,
+    )
+    if log.returncode != 0:
+        raise RuntimeError(log.stderr.strip())
+
+    titles = {task["task"]: task["title"] for task in tasks}
+    done: set[int] = set()
+    conflicts = []
+    first_commit = None
+    entries = log.stdout.split("\0")
+    for index in range(0, len(entries) - 1, 2):
+        sha = entries[index].strip()
+        lines = entries[index + 1].splitlines()
+        if f"Delivery-Plan: {rel}" not in lines:
+            continue
+        if first_commit is None:
+            first_commit = sha
+        committed_title = next(
+            (line.removeprefix("Delivery-Task-Title: ") for line in lines
+             if line.startswith("Delivery-Task-Title: ")),
+            None,
+        )
+        for line in lines:
+            match = re.fullmatch(r"Delivery-Task: ([0-9]+)", line)
+            if match is None:
+                continue
+            number = int(match.group(1))
+            if number not in titles:
+                continue
+            if committed_title == titles[number]:
+                done.add(number)
+            else:
+                conflicts.append({
+                    "commit": sha,
+                    "task": number,
+                    "committed_title": committed_title,
+                    "plan_title": titles[number],
+                })
+
+    base_ref = f"{first_commit}^" if first_commit is not None else "HEAD"
+    base = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", base_ref],
+        capture_output=True, text=True,
+    )
+    if base.returncode != 0:
+        raise RuntimeError(base.stderr.strip())
+    return {"done": sorted(done), "conflicts": conflicts, "base": base.stdout.strip()}
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) < 2 or argv[0] not in {"plan", "check", "files", "layout"}:
+    if len(argv) < 2 or argv[0] not in {"plan", "check", "files", "layout", "message", "done"}:
         print(__doc__, file=sys.stderr)
         return 2
     command, root = argv[0], Path(argv[1]).resolve()
@@ -258,8 +337,13 @@ def main(argv: list[str]) -> int:
     if command == "files":
         print(json.dumps(route(root, argv[2:])))
         return 0
-    if len(argv) != 3:
-        print(f"usage: route_task.py {command} <root> <plan.md>", file=sys.stderr)
+    if command == "message":
+        valid = len(argv) == 4 or (len(argv) == 5 and argv[4] == "--open-findings")
+    else:
+        valid = len(argv) == 3
+    if not valid:
+        print(f"usage: route_task.py {command} <root> <plan.md>"
+              + (" <N> [--open-findings]" if command == "message" else ""), file=sys.stderr)
         return 2
     plan_path = Path(argv[2])
     if not plan_path.is_absolute():
@@ -279,6 +363,32 @@ def main(argv: list[str]) -> int:
     if duplicates:
         print("\n".join(duplicates), file=sys.stderr)
         return 2
+    if command in {"message", "done"}:
+        try:
+            rel = plan_rel(root, plan_path)
+        except ValueError:
+            print(f"plan must be inside {root}", file=sys.stderr)
+            return 2
+        if command == "message":
+            try:
+                number = int(argv[3])
+            except ValueError:
+                print(f"invalid task number: {argv[3]}", file=sys.stderr)
+                return 2
+            try:
+                message = commit_message(rel, tasks, number, len(argv) == 5)
+            except ValueError:
+                print(f"task {number} is not in {plan_path}", file=sys.stderr)
+                return 2
+            sys.stdout.write(message)
+        else:
+            try:
+                result = delivered(root, rel, tasks)
+            except RuntimeError as error:
+                print(error, file=sys.stderr)
+                return 2
+            print(json.dumps(result))
+        return 0
     out = []
     for task in tasks:
         routed = route(root, task["paths"])

@@ -46,6 +46,9 @@ class RoutingFixture(unittest.TestCase):
     def routed(self, *paths: str) -> dict:
         return route(self.root, list(paths))
 
+    def run_router(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(ROUTER), *args], capture_output=True, text=True)
+
 
 class RouteTest(RoutingFixture):
     def test_python_backend_task(self) -> None:
@@ -279,9 +282,6 @@ class LayoutTest(RoutingFixture):
 
 
 class CliTest(RoutingFixture):
-    def run_router(self, *args: str) -> subprocess.CompletedProcess:
-        return subprocess.run([sys.executable, str(ROUTER), *args], capture_output=True, text=True)
-
     def test_plan_without_tasks_exits_2(self) -> None:
         write(self.root, "empty-plan.md", "# Nothing here\n")
         result = self.run_router("plan", str(self.root), "empty-plan.md")
@@ -346,6 +346,162 @@ Write release notes.
         self.assertEqual(result.returncode, 0, result.stderr)
         routed = json.loads(result.stdout)
         self.assertEqual([(t["task"], t["agent"]) for t in routed], [(1, "python-developer:developer"), (2, "delivery:implementer")])
+
+
+class MessageTest(RoutingFixture):
+    def setUp(self) -> None:
+        write(self.root, "plan.md", PLAN)
+
+    def test_message_uses_commit_and_exact_trailers(self) -> None:
+        result = self.run_router("message", str(self.root), "plan.md", "1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            "feat: add orders endpoint\n\nDelivery-Plan: plan.md\n"
+            "Delivery-Task: 1\nDelivery-Task-Title: Orders endpoint\n",
+        )
+
+    def test_message_falls_back_to_chore_and_adds_review_trailer(self) -> None:
+        result = self.run_router("message", str(self.root), "plan.md", "2", "--open-findings")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.startswith("chore: Docs\n\n"), result.stdout)
+        self.assertTrue(
+            result.stdout.endswith("Delivery-Task-Title: Docs\nDelivery-Review: accepted-with-open-findings\n"),
+            result.stdout,
+        )
+
+    def test_message_rejects_unknown_task(self) -> None:
+        result = self.run_router("message", str(self.root), "plan.md", "3")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("task 3 is not in", result.stderr)
+
+    def test_message_rejects_unknown_option(self) -> None:
+        result = self.run_router("message", str(self.root), "plan.md", "1", "--bogus")
+        self.assertEqual(result.returncode, 2)
+
+    def test_message_rejects_plan_outside_root(self) -> None:
+        with tempfile.TemporaryDirectory() as elsewhere:
+            external = Path(elsewhere) / "plan.md"
+            external.write_text(PLAN)
+            result = self.run_router("message", str(self.root), str(external), "1")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("plan must be inside", result.stderr)
+
+    def test_message_rejects_plan_without_tasks(self) -> None:
+        write(self.root, "empty.md", "# Empty\n")
+        result = self.run_router("message", str(self.root), "empty.md", "1")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no '### Task N:' headings", result.stderr)
+
+    def test_message_rejects_duplicate_task_numbers(self) -> None:
+        write(self.root, "duplicate.md", "### Task 1: First\n### Task 1: Second\n")
+        result = self.run_router("message", str(self.root), "duplicate.md", "1")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Task 1 appears 2 times", result.stderr)
+
+
+class DoneTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        write(self.root, "docs/plans/plan.md", PLAN)
+        self.initial = self.commit(self.root, "init\n")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def commit(self, repo: Path, message: str, signed: bool = False) -> str:
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.name=test", "-c", "user.email=test@example.com",
+             "-c", f"commit.gpgsign={'true' if signed else 'false'}", "commit", "-q", "--allow-empty", "-F", "-"],
+            input=message, text=True, check=True,
+        )
+        return subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+    def run_router(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(ROUTER), *args], capture_output=True, text=True)
+
+    def done(self) -> dict:
+        result = self.run_router("done", str(self.root), "docs/plans/plan.md")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def delivery_message(self, number: int, title: str | None, plan: str = "docs/plans/plan.md") -> str:
+        message = f"feat: x\n\nDelivery-Plan: {plan}\nDelivery-Task: {number}\n"
+        if title is not None:
+            message += f"Delivery-Task-Title: {title}\n"
+        return message
+
+    def test_done_without_delivery_commits_uses_head_as_base(self) -> None:
+        self.assertEqual(self.done(), {"done": [], "conflicts": [], "base": self.initial})
+
+    def test_done_recognizes_matching_title_and_uses_parent_as_base(self) -> None:
+        self.commit(self.root, self.delivery_message(1, "Orders endpoint"))
+        self.assertEqual(self.done(), {"done": [1], "conflicts": [], "base": self.initial})
+
+    def test_done_reports_changed_title_as_conflict(self) -> None:
+        sha = self.commit(self.root, self.delivery_message(1, "Old name"))
+        self.assertEqual(self.done(), {
+            "done": [],
+            "conflicts": [{"commit": sha, "task": 1, "committed_title": "Old name", "plan_title": "Orders endpoint"}],
+            "base": self.initial,
+        })
+
+    def test_done_reports_missing_title_as_conflict(self) -> None:
+        sha = self.commit(self.root, self.delivery_message(1, None))
+        self.assertEqual(self.done()["conflicts"], [
+            {"commit": sha, "task": 1, "committed_title": None, "plan_title": "Orders endpoint"},
+        ])
+
+    def test_done_ignores_signature_output_from_git_log(self) -> None:
+        signing_key = self.root / ".git" / "signing-key"
+        subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(signing_key)],
+            check=True, capture_output=True,
+        )
+        for option, value in (
+            ("gpg.format", "ssh"),
+            ("user.signingkey", str(signing_key)),
+            ("log.showSignature", "true"),
+        ):
+            subprocess.run(["git", "-C", str(self.root), "config", option, value], check=True)
+        self.commit(self.root, self.delivery_message(1, "Orders endpoint"), signed=True)
+        sha = self.commit(self.root, self.delivery_message(1, "Old name"), signed=True)
+        self.assertEqual(self.done(), {
+            "done": [1],
+            "conflicts": [{"commit": sha, "task": 1, "committed_title": "Old name", "plan_title": "Orders endpoint"}],
+            "base": self.initial,
+        })
+
+    def test_done_ignores_substring_plan_match(self) -> None:
+        sha = self.commit(self.root, self.delivery_message(1, "Orders endpoint", "docs/plans/plan.md.bak"))
+        self.assertEqual(self.done(), {"done": [], "conflicts": [], "base": sha})
+
+    def test_done_ignores_unknown_task_but_uses_its_commit_as_base(self) -> None:
+        self.commit(self.root, self.delivery_message(9, "Other"))
+        self.assertEqual(self.done(), {"done": [], "conflicts": [], "base": self.initial})
+
+    def test_done_sorts_tasks_and_uses_first_delivery_parent(self) -> None:
+        self.commit(self.root, self.delivery_message(2, "Docs"))
+        self.commit(self.root, self.delivery_message(1, "Orders endpoint"))
+        self.assertEqual(self.done(), {"done": [1, 2], "conflicts": [], "base": self.initial})
+
+    def test_done_matches_backticks_in_title_byte_for_byte(self) -> None:
+        write(self.root, "docs/plans/plan.md", "### Task 1: Rename `foo`\n")
+        self.commit(self.root, self.delivery_message(1, "Rename `foo`"))
+        self.assertEqual(self.done(), {"done": [1], "conflicts": [], "base": self.initial})
+
+    def test_done_reports_git_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as elsewhere:
+            root = Path(elsewhere)
+            write(root, "plan.md", PLAN)
+            result = self.run_router("done", str(root), "plan.md")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not a git repository", result.stderr)
 
 
 if __name__ == "__main__":
