@@ -27,9 +27,10 @@ Run the steps in order. Every `stop` prints its message and ends the run.
    ```bash
    SLUG=$(python3 -c 'import re,sys; s=sys.argv[1].rsplit("/",1)[-1].lower().removesuffix(".md"); s=re.sub(r"[^a-z0-9]+","-",s).strip("-"); s=re.sub(r"^\d{4}-\d{2}-\d{2}-","",s); print(re.sub(r"-plan$","",s) or "plan")' "$PLAN_SOURCE")
    ```
+Before step 5, check for existing changes other than an in-repository plan: when `PLAN_PATH` is set, run `git status --porcelain --untracked-files=all -- . ":(exclude,literal)$PLAN_PATH"`; otherwise run `git status --porcelain --untracked-files=all`. Any output → stop with `Commit or stash your other changes before delivery, then retry <PLAN_SOURCE>.` Do not create a branch or commit the plan on this path.
 5. **Branch.** `BRANCH=$(git branch --show-current)`:
    - empty (detached HEAD) → stop with `Check out a branch first.`;
-   - `main` or `master` → create the first free delivery branch. Uncommitted changes move with it; step 8 stops on them.
+   - `main` or `master` → create the first free delivery branch. The plan may still have uncommitted changes; step 7 commits it.
      ```bash
      B="delivery/$SLUG"; n=2
      while git rev-parse --verify --quiet "refs/heads/$B" >/dev/null; do B="delivery/$SLUG-$n"; n=$((n+1)); done
@@ -45,10 +46,10 @@ Run the steps in order. Every `stop` prints its message and ends the run.
    `PLAN_PATH=$P`. With `PLAN_FILE`, run `cp "$PLAN_FILE" "$PLAN_PATH"`. Without it, `read <PLAN_SOURCE>:raw` and `write` that exact text to `PLAN_PATH`.
 7. **Commit the plan** when `git status --porcelain -- "$PLAN_PATH"` prints anything. The subject is `docs: update delivery plan <SLUG>` when `git ls-files --error-unmatch -- "$PLAN_PATH"` succeeds, otherwise `docs: add delivery plan <SLUG>`. Run `git add -- "$PLAN_PATH"`, then `git commit -m "<subject>" -- "$PLAN_PATH"`. A failed commit → print git's output and stop.
 8. If `git status --porcelain` prints anything → stop with `Commit or stash your other changes, then run /delivery:execute <PLAN_PATH>.`
-9. `TASKS` = JSON output of `python3 "$ROUTER" plan "$REPO" "$PLAN_PATH"`. A non-zero exit → stop with the router's error.
+9. First run `python3 "$ROUTER" check "$REPO" "$PLAN_PATH"`. A non-zero exit → stop with the router's error. Inspect its JSON `problems`: any `Task <N> appears <count> times` → stop with those duplicate-number problems and ask for unique task numbers in `<PLAN_PATH>`. Other problems remain subject to steps 11–12. Then `TASKS` = JSON output of `python3 "$ROUTER" plan "$REPO" "$PLAN_PATH"`; a non-zero exit → stop with the router's error.
 10. **Done tasks and base.**
-    - `git log -F --grep="Delivery-Plan: $PLAN_PATH" --format=%B`. Every line `Delivery-Task: <N>` marks task `N` as done.
-    - `BASE`: if `git log -F --grep="Delivery-Plan: $PLAN_PATH" --reverse --format=%H` prints commits, `BASE` is the parent of the first one (`git rev-parse <first>^`); otherwise `BASE=$(git rev-parse HEAD)`.
+    - Read commits separately with `git log -F --grep="Delivery-Plan: $PLAN_PATH" --format='%H%x00%B%x00'`. Only a commit containing an exact `Delivery-Plan: <PLAN_PATH>` line counts. For each exact `Delivery-Task: <N>` line whose `N` occurs in `TASKS`, require an exact `Delivery-Task-Title: <title>` line in the same commit matching that task's current title byte for byte. A missing or different title → stop with the commit hash, task number, committed title (or `missing`), and plan title; do not mark any task done. Only matched number-and-title pairs mark tasks done. Old delivery commits without a title trailer cannot be resumed without resolving the ambiguity first.
+    - `BASE`: if any matching delivery commits exist, use the parent of the earliest one (`git rev-parse <first>^`); otherwise `BASE=$(git rev-parse HEAD)`.
 11. Any not-done task with stack `split` → stop with `Task <N> touches several stacks (<groups>). Split it in <PLAN_PATH>, commit, then run /delivery:execute <PLAN_PATH>.`
 12. Route every not-done task with **Routing**. For an `unknown` task, `TASK_TEXT` is its `block`. Print the `Routing: task <N> → <agent> (source: <source>)` line for every task in your reply before starting step 2; it is the audit trail of each routing decision.
 13. Every routed agent must be listed among the `task` tool's available agents. A missing one → stop with `Install <plugin>: omp plugin install <plugin>@av-marketplace, then start a new session.` (`<plugin>` is the part before `:`).
@@ -70,8 +71,9 @@ For each not-done task, in ascending order of `N`:
 
      Delivery-Plan: <PLAN_PATH>
      Delivery-Task: <N>
+     Delivery-Task-Title: <title>
      ```
-     For `accepted-with-open-findings`, add the line `Delivery-Review: accepted-with-open-findings` directly after `Delivery-Task: <N>`. Mark the todo item done.
+     For `accepted-with-open-findings`, add the line `Delivery-Review: accepted-with-open-findings` directly after `Delivery-Task-Title: <title>`. Mark the todo item done.
    - A failed commit (for example a rejecting hook) → print git's output and stop.
 
 ### 3. Verification
@@ -103,13 +105,14 @@ Mark `Final code review` done.
 ### 6. Fix offer
 
 If the review saved a report, use the `ask` tool: `Run /code-review:fix-all on <report path>?` with options `Yes` and `No`. On `Yes`, `read <code-review root>/commands/fix-all.md` and carry it out completely with `$ARGUMENTS` = the report path.
+After the fix offer (including a declined fix), if the review saved a report, commit its final contents: `git add -- "<report path>"`, then `git commit -m "docs: add review of delivery $SLUG" -- "<report path>"`. Commit only that path, even if `/code-review:fix-all` left other changes staged or unstaged. If adding or committing fails, print git's output and stop. If the review was not saved, do not create a review commit.
 
 ## Plugin roots
 
 Run:
 
 ```bash
-omp plugin list --json | python3 -c 'import json,sys; want=sys.argv[1:]; d=json.load(sys.stdin); r={p["id"].split("@")[0]: p["entries"][0]["installPath"] for p in d.get("marketplace", []) if p.get("entries")}; print(json.dumps({w: r.get(w) for w in want}))' delivery code-review
+omp plugin list --json | python3 -c 'import json,sys; want=sys.argv[1:]; d=json.load(sys.stdin); r={p["id"]: p["entries"][0]["installPath"] for p in d.get("marketplace", []) if p.get("entries") and not p.get("shadowedBy")}; print(json.dumps({w: r.get(f"{w}@av-marketplace") for w in want}))' delivery code-review
 ```
 
 - `delivery` is `null` → stop with `Install delivery: omp plugin install delivery@av-marketplace`.
@@ -175,7 +178,7 @@ Delivery of <PLAN_PATH> on branch <BRANCH>. One task per agent; the orchestrator
 
 1. `TASK_BASE=$(git rev-parse HEAD)`.
 2. **Implement.** Dispatch `AGENT` with the **Implementer template**.
-3. **Stage.** If `git rev-parse HEAD` differs from `TASK_BASE`, the agent committed: run `git reset --soft "$TASK_BASE"`. Then run `git add -A`.
+3. **Stage.** First run `CURRENT_BRANCH=$(git branch --show-current)`. If `CURRENT_BRANCH` differs from `BRANCH`, print `Delivery stopped: expected branch <BRANCH>, current branch <CURRENT_BRANCH or detached HEAD>.` and return result `stopped` without resetting or staging. If `git rev-parse HEAD` differs from `TASK_BASE`, the agent committed: run `git reset --soft "$TASK_BASE"`. Then run `git add -A`.
 4. **Nothing to review?** If `git diff --cached --quiet` succeeds (no changes), or the report's `**Status:**` line contains `❌`, use the `ask` tool:
    - question: `Task <N> produced <no changes | a ❌ Failed report>. What now?`
    - `Retry once` → go back to step 2. Allowed once per task; after a retry, offer only the other two options;
@@ -233,7 +236,7 @@ Findings to fix — fix exactly these, do not redo the task:
 <blocking findings as JSON>
 
 Rules:
-- Implement exactly this task. Write tests first when the task lists a Test file.
+- Change only what the findings require; add a failing test first when a finding reports missing coverage.
 - Do not commit, stash, switch branches or rewrite history. Leave all changes in the working tree.
 - End with your report, including a **Status:** line (✅ Complete | ⚠️ Partial | ❌ Failed).
 ```

@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""Contract tests for build_omp_edition.
+
+Run: python3 scripts/test_build_omp_edition.py
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from build_omp_edition import BuildError, build, build_native, guarded, main
+
+
+AGENT = "---\nname: worker\ndescription: Does work\ntools: Read, Bash\nskills: review\n---\n\nAgent body.\n"
+SKILL = "---\nname: review\ndescription: Reviews work\n---\n\nSkill body.\n"
+MANIFEST = {"name": "sample", "version": "1.2.3", "description": "Sample plugin", "category": "development"}
+ENTRY = {"name": "sample", "version": "1.2.3", "description": "Catalog entry", "category": "development"}
+
+
+def put(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def put_json(path: Path, value: object) -> None:
+    put(path, json.dumps(value))
+
+
+def fixture(root: Path) -> None:
+    put(root / "omp/preamble.md", "Source: {plugin}/{relpath}\n")
+    put_json(root / ".claude-plugin/marketplace.json", {
+        "name": "test", "owner": {"name": "tester"}, "plugins": [ENTRY],
+    })
+    put_json(root / "omp/overlay/sample.json", {
+        "plugin": "sample", "agents": {"worker": {"role": "analyst"}},
+    })
+    plugin = root / "plugins/sample"
+    put_json(plugin / ".claude-plugin/plugin.json", MANIFEST)
+    put(plugin / "agents/worker.md", AGENT)
+    put(plugin / "skills/review/SKILL.md", SKILL)
+    put(plugin / "commands/check.md", "---\ndescription: Check\nargument-hint: [target]\n---\n\nCommand body.\n")
+    put(plugin / "scripts/utility.py", "print('ok')\n")
+
+
+def native_fixture(root: Path) -> Path:
+    native = root / "native"
+    put_json(native / ".omp-plugin/plugin.json", {
+        "name": "native", "version": "0.1.0", "description": "Native", "category": "development",
+    })
+    put(native / "agents/worker.md", "---\nname: native:worker\ndescription: Native worker\n---\n\nBody.\n")
+    put(native / "skills/review/SKILL.md", "---\nname: native:review\ndescription: Native review\n---\n\nBody.\n")
+    put(native / "tests/ignored.txt", "not generated\n")
+    return native
+
+
+class TestGenerated(unittest.TestCase):
+    def test_builds_from_explicit_source_and_preserves_rendered_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, output = root / "source", root / "output"
+            fixture(source)
+            build(output, source)
+            catalog = json.loads((output / ".omp-plugin/marketplace.json").read_text())
+            self.assertEqual(catalog["plugins"], [{**ENTRY, "source": "./sample"}])
+            plugin = output / "plugins-omp/sample"
+            agent = (plugin / "agents/worker.md").read_text()
+            self.assertIn('name: "sample:worker"', agent)
+            self.assertIn("tools: read, bash", agent)
+            self.assertIn('autoloadSkills: ["sample:review"]', agent)
+            self.assertIn("Source: sample/agents/worker.md", agent)
+            self.assertIn("Agent body.", agent)
+            self.assertIn('name: "sample:review"', (plugin / "skills/review/SKILL.md").read_text())
+            command = (plugin / "commands/check.md").read_text()
+            self.assertIn('argument-hint: "[target]"', command)
+            self.assertIn("Source: sample/commands/check.md", command)
+            self.assertEqual((plugin / "scripts/utility.py").read_text(), "print('ok')\n")
+            self.assertEqual(json.loads((plugin / ".omp-plugin/plugin.json").read_text()), MANIFEST)
+
+    def test_unknown_source_entries_and_overlay_entries_fail_closed(self):
+        cases = {
+            "unmapped source entry": ("plugins/sample/surprise.txt", "x", "no OMP mapping for"),
+            "unknown overlay key": ("omp/overlay/sample.json", {"plugin": "sample", "agents": {"worker": {"role": "analyst"}}, "surprise": True}, "unknown overlay keys"),
+            "overlay plugin mismatch": ("omp/overlay/sample.json", {"plugin": "other", "agents": {}}, "must equal the file name"),
+            "missing catalog registration": (".claude-plugin/marketplace.json", {"name": "test", "owner": {}, "plugins": []}, "not in the Claude catalog"),
+            "stale overlay agent": ("omp/overlay/sample.json", {"plugin": "sample", "agents": {"worker": {"role": "analyst"}, "gone": {"role": "analyst"}}}, "agents that do not exist"),
+        }
+        for label, (path, value, error) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "source"
+                fixture(source)
+                if isinstance(value, str):
+                    put(source / path, value)
+                else:
+                    put_json(source / path, value)
+                with self.assertRaisesRegex(BuildError, error):
+                    build(root / "output", source)
+
+    def test_unmapped_agent_tools_frontmatter_and_overlay_specs_fail_closed(self):
+        agent_cases = {
+            "unknown tool": (AGENT.replace("Bash", "UnmappedTool"), "no OMP mapping for tool"),
+            "unknown frontmatter key": (AGENT.replace("tools:", "surprise: yes\ntools:"), "no OMP mapping for frontmatter keys"),
+            "agent missing name": (AGENT.replace("name: worker\n", ""), "agent needs name and description"),
+            "agent missing description": (AGENT.replace("description: Does work\n", ""), "agent needs name and description"),
+            "denied tool": (AGENT.replace("skills: review", "disallowedTools: Bash\nskills: review"), "are in disallowedTools"),
+            "unknown denied tool": (AGENT.replace("skills: review", "disallowedTools: Mystery\nskills: review"), "no OMP mapping for tool"),
+            "unknown autoload skill": (AGENT.replace("skills: review", "skills: gone"), "autoload skills"),
+            "missing frontmatter": ("name: worker\n", "missing frontmatter"),
+            "unterminated frontmatter": ("---\nname: worker\n", "unterminated frontmatter"),
+            "unsupported frontmatter line": (AGENT.replace("tools:", "  surprise: yes\ntools:"), "unsupported frontmatter line"),
+        }
+        for label, (content, error) in agent_cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "source"
+                fixture(source)
+                put(source / "plugins/sample/agents/worker.md", content)
+                with self.assertRaisesRegex(BuildError, error):
+                    build(root / "output", source)
+
+        overlay_cases = {
+            "agent without overlay entry": ({}, "has no entry"),
+            "unknown agent spec key": ({"worker": {"role": "analyst", "surprise": True}}, "unknown keys"),
+            "agent without role": ({"worker": {}}, "has no role"),
+            "unknown overlay autoload": ({"worker": {"role": "analyst", "autoload": ["gone"]}}, "autoload skills"),
+        }
+        for label, (agents, error) in overlay_cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "source"
+                fixture(source)
+                put_json(source / "omp/overlay/sample.json", {"plugin": "sample", "agents": agents})
+                with self.assertRaisesRegex(BuildError, error):
+                    build(root / "output", source)
+
+    def test_rejects_invalid_overlay_role_tools_and_thinking(self):
+        cases = {
+            "misspelled role": ({"role": "exector"}, "unknown role.*allowed project roles:.*README.md.*MODEL_ROLES"),
+            "non-string role": ({"role": True}, "unknown role"),
+            "misspelled tool": ({"role": "executor", "add_tools": ["ast-edit"]}, "unknown OMP tool"),
+            "non-list tools": ({"role": "executor", "add_tools": "lsp"}, "add_tools must be a list"),
+            "non-string tool": ({"role": "executor", "add_tools": [True]}, "unknown OMP tool"),
+            "boolean thinking": ({"role": "executor", "thinking": True}, "unknown thinking level"),
+            "misspelled thinking": ({"role": "executor", "thinking": "hgh"}, "unknown thinking level"),
+        }
+        for label, (spec, error) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "source"
+                fixture(source)
+                put_json(source / "omp/overlay/sample.json", {
+                    "plugin": "sample", "agents": {"worker": spec},
+                })
+                with self.assertRaisesRegex(BuildError, error):
+                    build(root / "output", source)
+
+    def test_accepts_documented_role_and_supported_tools_and_thinking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            fixture(source)
+            put_json(source / "omp/overlay/sample.json", {
+                "plugin": "sample", "agents": {
+                    "worker": {"role": "executor", "add_tools": ["ast_edit"], "thinking": "high"},
+                },
+            })
+            build(root / "output", source)
+            agent = (root / "output/plugins-omp/sample/agents/worker.md").read_text()
+            self.assertIn('model: "@executor"', agent)
+            self.assertIn("tools: read, bash, ast_edit", agent)
+            self.assertIn("thinking-level: high", agent)
+
+    def test_rejects_agent_restrictions_that_would_become_unrestricted(self):
+        cases = {
+            "skill only": ("tools: Skill\n", "no usable OMP tools"),
+            "parent-owned todo only": ("tools: TaskCreate, TaskUpdate, TaskList\n", "no usable OMP tools"),
+            "empty tools": ("tools:\n", "no usable OMP tools"),
+            "denials without allowlist": ("disallowedTools: Edit, Write\n", "disallowedTools requires tools"),
+        }
+        for label, restriction in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "source"
+                fixture(source)
+                content = AGENT.replace("tools: Read, Bash\n", restriction[0])
+                put(source / "plugins/sample/agents/worker.md", content)
+                with self.assertRaisesRegex(BuildError, restriction[1]):
+                    build(root / "output", source)
+
+    def test_malformed_skill_and_command_fail_instead_of_disappearing(self):
+        cases = {
+            "wrong skill name": ("plugins/sample/skills/review/SKILL.md", SKILL.replace("name: review", "name: elsewhere"), "skill name must equal"),
+            "command with no frontmatter": ("plugins/sample/commands/check.md", "Command body.\n", "missing frontmatter"),
+            "unknown command key": ("plugins/sample/commands/check.md", "---\ndescription: Check\nsurprise: yes\n---\n\nCommand body.\n", "no OMP mapping for frontmatter keys"),
+        }
+        for label, (path, content, error) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "source"
+                fixture(source)
+                put(source / path, content)
+                with self.assertRaisesRegex(BuildError, error):
+                    build(root / "output", source)
+
+    def test_output_path_must_remain_within_generated_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaisesRegex(BuildError, "refusing to write outside"):
+                guarded(root / "elsewhere", root / "plugins-omp")
+
+    def test_generated_sources_reject_symlinks_before_copying_or_reading(self):
+        cases = (
+            "plugins/sample/scripts/utility.py",
+            "plugins/sample/skills/review/SKILL.md",
+            "plugins/sample/commands/check.md",
+            "plugins/sample/agents/worker.md",
+        )
+        for rel in cases:
+            with self.subTest(source=rel), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "source"
+                fixture(source)
+                original = source / rel
+                external = root / "private.txt"
+                external.write_bytes(original.read_bytes())
+                original.unlink()
+                original.symlink_to(external)
+                with self.assertRaisesRegex(BuildError, "symlinks are not allowed"):
+                    build(root / "output", source)
+                self.assertFalse((root / "output/plugins-omp/sample" / rel.removeprefix("plugins/sample/")).exists())
+
+    def test_generated_sources_reject_symlinked_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            fixture(source)
+            skills = source / "plugins/sample/skills"
+            skills.rename(root / "outside-skills")
+            skills.symlink_to(root / "outside-skills", target_is_directory=True)
+            with self.assertRaisesRegex(BuildError, "symlinks are not allowed"):
+                build(root / "output", source)
+
+    def test_regeneration_rejects_symlinked_output_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture(root)
+            outside = root / "elsewhere"
+            outside.mkdir()
+            (root / "plugins-omp").symlink_to(outside, target_is_directory=True)
+            with patch("build_omp_edition.REPO", root), patch.object(sys, "argv", ["build_omp_edition.py"]):
+                self.assertEqual(main(), 1)
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_failed_regeneration_keeps_existing_output_until_build_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture(root)
+            output = root / "plugins-omp"
+            put(output / "old-plugin/marker.txt", "old output\n")
+            catalog = root / ".omp-plugin/marketplace.json"
+            put(catalog, "old catalog\n")
+            overlay = root / "omp/overlay/sample.json"
+            put_json(overlay, {
+                "plugin": "sample",
+                "agents": {"worker": {"role": "analyst"}, "gone": {"role": "analyst"}},
+            })
+            with (
+                patch("build_omp_edition.REPO", root),
+                patch("build_omp_edition.build", side_effect=lambda dest: build(dest, root)),
+                patch.object(sys, "argv", ["build_omp_edition.py"]),
+            ):
+                self.assertEqual(main(), 1)
+                self.assertEqual((output / "old-plugin/marker.txt").read_text(), "old output\n")
+                self.assertEqual(catalog.read_text(), "old catalog\n")
+                put_json(overlay, {"plugin": "sample", "agents": {"worker": {"role": "analyst"}}})
+                self.assertEqual(main(), 0)
+            self.assertFalse((output / "old-plugin").exists())
+            self.assertTrue((output / "sample/.omp-plugin/plugin.json").is_file())
+            self.assertEqual(json.loads(catalog.read_text())["plugins"][0]["name"], "sample")
+
+
+class TestNative(unittest.TestCase):
+    def test_builds_native_plugin_without_tests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            native = native_fixture(root)
+            entry = build_native(native, root / "out", set())
+            self.assertEqual(entry["name"], "native")
+            self.assertTrue((root / "out/native/agents/worker.md").is_file())
+            self.assertFalse((root / "out/native/tests/ignored.txt").exists())
+
+    def test_native_copy_omits_dependency_install_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            native = native_fixture(root)
+            excluded = [
+                "node_modules/@oh-my-pi/pi-coding-agent/package.json",
+                "skills/review/node_modules/dependency/index.js",
+                "bun.lock",
+                "bun.lockb",
+                "package-lock.json",
+            ]
+            for rel in excluded:
+                put(native / rel, "installed dependency\n")
+            put(native / "scripts/run.js", "console.log('run')\n")
+
+            build_native(native, root / "out", set())
+
+            for rel in excluded:
+                with self.subTest(path=rel):
+                    self.assertFalse((root / "out/native" / rel).exists())
+            self.assertEqual((root / "out/native/scripts/run.js").read_text(), "console.log('run')\n")
+
+    def test_native_sources_reject_symlinks_even_when_the_target_is_missing(self):
+        for target_exists in (True, False):
+            with self.subTest(target_exists=target_exists), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                native = native_fixture(root)
+                secret = root / "private.txt"
+                if target_exists:
+                    secret.write_text("private data\n")
+                (native / "leaked.txt").symlink_to(secret)
+                with self.assertRaisesRegex(BuildError, "symlinks are not allowed"):
+                    build_native(native, root / "out", set())
+                self.assertFalse((root / "out/native/leaked.txt").exists())
+
+    def test_native_manifest_and_catalog_guards(self):
+        cases = {
+            "missing manifest": (None, "missing .omp-plugin/plugin.json"),
+            "missing manifest key": ({"name": "native"}, "missing keys"),
+            "wrong manifest name": ({"name": "wrong", "version": "0.1.0", "description": "Native", "category": "development"}, "must equal its directory"),
+        }
+        for label, (manifest, error) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                native = native_fixture(root)
+                path = native / ".omp-plugin/plugin.json"
+                if manifest is None:
+                    path.unlink()
+                else:
+                    put_json(path, manifest)
+                with self.assertRaisesRegex(BuildError, error):
+                    build_native(native, root / "out", set())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaisesRegex(BuildError, "collides with a generated plugin"):
+                build_native(native_fixture(root), root / "out", {"native"})
+
+    def test_native_extension_guards(self):
+        cases = {
+            "package mismatch": ({"name": "different", "version": "0.1.0", "omp": {"extensions": ["index.ts"]}}, "name and version must equal"),
+            "no extensions": ({"name": "native", "version": "0.1.0", "omp": {"extensions": []}}, "omp.extensions must list"),
+            "missing extension file": ({"name": "native", "version": "0.1.0", "omp": {"extensions": ["missing.ts"]}}, "is not a file"),
+        }
+        for label, (package, error) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                native = native_fixture(root)
+                put_json(native / "package.json", package)
+                with self.assertRaisesRegex(BuildError, error):
+                    build_native(native, root / "out", set())
+
+    def test_native_agent_and_skill_guards(self):
+        cases = {
+            "unknown agent key": ("agents/worker.md", "---\nname: native:worker\nsurprise: yes\n---\n", "unknown OMP agent frontmatter keys"),
+            "unprefixed agent": ("agents/worker.md", "---\nname: worker\n---\n", "agent name must start"),
+            "unprefixed skill": ("skills/review/SKILL.md", "---\nname: review\n---\n", "skill name must be"),
+        }
+        for label, (path, content, error) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                native = native_fixture(root)
+                put(native / path, content)
+                with self.assertRaisesRegex(BuildError, error):
+                    build_native(native, root / "out", set())
+
+    def test_native_agents_validate_csv_and_inline_list_tools(self):
+        for tools in ("read, ast-edit", "[read, ast-edit]", '["read", "ast-edit"]'):
+            with self.subTest(tools=tools), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                native = native_fixture(root)
+                put(native / "agents/worker.md", f"---\nname: native:worker\ndescription: Worker\ntools: {tools}\n---\n\nBody.\n")
+                with self.assertRaisesRegex(BuildError, "unknown OMP tool"):
+                    build_native(native, root / "out", set())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            native = native_fixture(root)
+            put(native / "agents/worker.md", "---\nname: native:worker\ndescription: Worker\ntools: [read, ast_edit]\n---\n\nBody.\n")
+            build_native(native, root / "out", set())
+            self.assertTrue((root / "out/native/agents/worker.md").is_file())
+
+
+if __name__ == "__main__":
+    unittest.main()

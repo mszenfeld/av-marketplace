@@ -24,15 +24,17 @@ for p in code-review delivery python-developer frontend-developer php-developer;
 done
 ```
 
-Delivery runs approved plans end to end, without slash commands. Plan in OMP plan mode (`/plan`). In a git repository the plan's Approach is written as `### Task N:` blocks, each listing its files; proposing a plan whose task mixes stacks or lists no files is rejected with the reason. Approving a plan that has tasks starts the delivery:
+Delivery needs Python 3.9 or newer, available as `python3` on `PATH`: its plan check, task router and preflight run Python. Without it, approving a plan does not start a delivery and the plan runs as usual.
+
+Delivery runs approved plans end to end, without slash commands. Plan in OMP plan mode (`/plan`). In a git repository the plan's Approach is written as `### Task N:` blocks, each listing its files; proposing a plan whose task mixes stacks or lists no files is rejected with the reason. Before creating a branch or committing the plan, delivery stops if the working tree has changes other than the plan itself. Approving a plan that has tasks starts the delivery:
 
 1. the plan is committed to `docs/plans/<date>-<slug>.md` — on a new `delivery/<slug>` branch when you are on `main` or `master`;
 2. each task goes to the developer agent that owns its files (Python, React, PHP, or a generic implementer), is reviewed, gets up to 3 fix rounds, and is committed;
-3. the plan's Verification runs, then `/code-review:review` over the delivered commits.
+3. the plan's Verification runs, then `/code-review:review` over the delivered commits. If you save the review report, delivery commits that report alone after the optional `/code-review:fix-all`.
 
-A plan without `### Task` headings runs as usual. `/delivery:execute <plan>` resumes an interrupted delivery, skipping committed tasks, or delivers a plan file you wrote yourself; tasks of such a plan that list no files are routed by Jev (the `judge` model role), falling back to asking you below 0.8 confidence.
+A plan without `### Task` headings runs as usual. `/delivery:execute <plan>` resumes an interrupted delivery, skipping committed tasks, or delivers a plan file you wrote yourself; tasks of such a plan that list no files are routed by Jev (the `judge` model role, e.g. `typesafe/jev-latest`) when it is at least 0.8 confident; below that, or on every such task when the `judge` role resolves to a non-Jev model, delivery asks you. See the [Delivery guide](docs/plugins/delivery.md) for the plan format and prerequisites.
 
-Agents route through model roles instead of a fixed model: reviewers use `code_review`, fixers and developers `executor`, adversarial verification `challenger`, single-finding analysis `analyst`, and plan mode `plan`. Map each role in `~/.omp/agent/config.yml`, for example:
+Agents route through model roles instead of a fixed model: reviewers use `code_review`, fixers and developers `executor`, adversarial verification `challenger`, finding analysis (composite grouping, needs-decision findings, PR feedback) `analyst`, and plan mode `plan`. Map each role in `~/.omp/agent/config.yml`, for example:
 
 ```yaml
 modelRoles:
@@ -43,6 +45,7 @@ modelRoles:
 ```
 
 An unmapped role falls back to the model the Claude Code edition names (`opus`), or to the session model where that edition inherits one.
+The generator accepts only these documented project roles in overlays; to introduce another user-configured role, document it here and add it to `MODEL_ROLES` in `scripts/build_omp_edition.py`.
 
 ## Workflow
 

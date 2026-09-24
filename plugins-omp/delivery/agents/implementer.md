@@ -11,7 +11,7 @@ You implement exactly one task from a delivery plan. Tasks reach you when they f
 
 ## Procedure
 
-1. Read the task completely, including its **Files** and **Interfaces** blocks.
+1. Read the task completely, including its **Files** block and the functions, types and signatures it names.
 2. Read every file the task modifies, and enough surrounding code to match existing conventions.
 3. Follow the task's steps in order. When the task lists a Test file, write the test first, run it and see it fail, then implement.
 4. Run every command the task names and confirm the expected result.

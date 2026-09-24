@@ -6,17 +6,17 @@
  * - Plan approval (the interactive "Plan approved." prompt): when the plan has `### Task`
  *   headings, adds a message that hands it to the Delivery run of skill://delivery:orchestration.
  */
-import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { normalizePlanTitle, planFileUrlForSlug } from "@oh-my-pi/pi-coding-agent/plan-mode/approved-plan";
+import approvedPlanPrompt from "@oh-my-pi/pi-coding-agent/prompts/system/plan-mode-approved" with { type: "text" };
+import { parseXdUrl } from "@oh-my-pi/pi-tui/tools/xd-url";
 
 const ROUTER = path.join(import.meta.dir, "..", "scripts", "route_task.py");
-const TASK_HEADING = /^### Task \d+:\s*.+/;
-const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-const PROPOSE_TARGET = /^xd:\/\/propose\/?$/;
-const APPROVED_PLAN_OPEN = /<plan path="(local:\/\/[^"]+)">\n/;
+const APPROVED_PLAN_PREFIX = approvedPlanPrompt.split("\n", 1)[0];
+const APPROVED_PLAN_TAG = approvedPlanPrompt.match(/^<plan path="\{\{planFilePath\}\}">$/m)?.[0];
 
 const PLAN_FORMAT = `# Delivery plans
 
@@ -43,18 +43,19 @@ Rules:
 - Writing the slug to xd://propose checks these rules and lists every violation.
 - A plan that changes no files (research, analysis, an answer) has no \`### Task\` headings and runs without delivery.`;
 
-function run(command: string, args: string[], timeout: number): Promise<string> {
-	const { promise, resolve, reject } = Promise.withResolvers<string>();
-	execFile(command, args, { timeout, encoding: "utf8" }, (error, stdout) => (error ? reject(error) : resolve(stdout)));
-	return promise;
-}
-
-async function gitRoot(cwd: string): Promise<string | undefined> {
+async function gitRoot(pi: ExtensionAPI, cwd: string): Promise<string | undefined> {
 	try {
-		return (await run("git", ["-C", cwd, "rev-parse", "--show-toplevel"], 5_000)).trim() || undefined;
+		const { code, stdout } = await pi.exec("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { timeout: 5_000 });
+		return code === 0 ? stdout.trim() || undefined : undefined;
 	} catch {
 		return undefined;
 	}
+}
+
+async function checkPlan(pi: ExtensionAPI, root: string, file: string): Promise<{ tasks: number; problems: string[] }> {
+	const { code, stdout, stderr } = await pi.exec("python3", [ROUTER, "check", root, file], { timeout: 10_000 });
+	if (code !== 0) throw new Error(`${ROUTER}: ${stderr.trim() || `exit code ${code}`}`);
+	return JSON.parse(stdout);
 }
 
 function inPlanMode(ctx: ExtensionContext): boolean {
@@ -66,75 +67,69 @@ function inPlanMode(ctx: ExtensionContext): boolean {
 	return false;
 }
 
-/** On-disk path of a `local://` URL under the session's local root (mirrors OMP's local-protocol.ts). */
 function localPath(url: string, ctx: ExtensionContext): string | undefined {
-	const rel = url.replace(/^local:\/+/, "");
-	if (!rel || path.isAbsolute(rel) || rel.split("/").includes("..")) return undefined;
-	const artifacts = ctx.localProtocolOptions?.getArtifactsDir?.() ?? ctx.sessionManager.getArtifactsDir();
-	const sessionId = (ctx.sessionManager.getSessionId() || "session").replace(/[^a-zA-Z0-9_.-]/g, "_");
-	const root = artifacts ? path.resolve(artifacts, "local") : path.join(os.tmpdir(), "omp-local", sessionId);
-	return path.resolve(root, rel);
-}
-
-/** `local://<slug>-plan.md` for a title written to xd://propose (mirrors OMP's approved-plan.ts normalization). */
-function proposedPlanUrl(title: string): string | undefined {
-	const trimmed = title.trim();
-	if (!trimmed || /[\\/]/.test(trimmed) || trimmed.includes("..")) return undefined;
-	const slug = trimmed
-		.replace(/\.md$/i, "")
-		.replace(/\s+/g, "-")
-		.replace(/[^A-Za-z0-9_-]/g, "")
-		.replace(/-{2,}/g, "-")
-		.replace(/^-+|-+$/g, "");
-	if (!slug) return undefined;
-	return `local://${slug.replace(/-plan$/i, "") || slug}-plan.md`;
-}
-
-/** The approved plan's URL and task count, when the prompt is OMP's interactive plan-approved prompt. */
-function approvedPlan(prompt: string): { url: string; tasks: number } | undefined {
-	if (!prompt.startsWith("Plan approved.")) return undefined;
-	const open = APPROVED_PLAN_OPEN.exec(prompt);
-	if (!open) return undefined;
-	const start = open.index + open[0].length;
-	const end = prompt.lastIndexOf("\n</plan>");
-	if (end < start) return undefined;
-	// `### Task` headings outside fenced code blocks, as route_task.py parse_plan counts them.
-	let fence: string | undefined;
-	let tasks = 0;
-	for (const line of prompt.slice(start, end).split("\n")) {
-		const marker = FENCE.exec(line);
-		if (marker && !fence) fence = marker[1];
-		else if (marker && fence && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = undefined;
-		else if (!fence && TASK_HEADING.test(line)) tasks++;
+	try {
+		return resolveLocalUrlToPath(url, {
+			getArtifactsDir: ctx.localProtocolOptions?.getArtifactsDir ?? (() => ctx.sessionManager.getArtifactsDir()),
+			getSessionId: ctx.localProtocolOptions?.getSessionId ?? (() => ctx.sessionManager.getSessionId()),
+		});
+	} catch {
+		return undefined;
 	}
-	return tasks > 0 ? { url: open[1], tasks } : undefined;
+}
+
+function proposedPlanUrl(title: string): string | undefined {
+	try {
+		const { title: normalized } = normalizePlanTitle(title);
+		return planFileUrlForSlug(normalized.replace(/-plan$/i, "") || normalized);
+	} catch {
+		return undefined;
+	}
+}
+
+function approvedPlanPath(prompt: string): string | undefined {
+	if (!prompt.startsWith(APPROVED_PLAN_PREFIX) || !APPROVED_PLAN_TAG) return undefined;
+	const [start, end] = APPROVED_PLAN_TAG.split("{{planFilePath}}");
+	const tagStart = prompt.indexOf(start);
+	if (tagStart < 0) return undefined;
+	const tagEnd = prompt.indexOf("\n", tagStart);
+	const tag = prompt.slice(tagStart, tagEnd < 0 ? undefined : tagEnd);
+	return tag.endsWith(end) ? tag.slice(start.length, -end.length) : undefined;
 }
 
 export default function deliveryExtension(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (inPlanMode(ctx)) {
-			if (!(await gitRoot(ctx.cwd))) return undefined;
+			if (!(await gitRoot(pi, ctx.cwd))) return undefined;
 			return { systemPrompt: [...event.systemPrompt, PLAN_FORMAT] };
 		}
-		const plan = approvedPlan(event.prompt);
-		if (!plan) return undefined;
-		if (!(await gitRoot(ctx.cwd))) {
+		const url = approvedPlanPath(event.prompt);
+		if (!url) return undefined;
+		const root = await gitRoot(pi, ctx.cwd);
+		if (!root) {
 			ctx.ui.notify("Delivery skipped: not a git repository. The plan runs without delivery.", "warning");
 			return undefined;
 		}
-		const file = localPath(plan.url, ctx);
-		const planFile = file && existsSync(file) ? file : undefined;
-		ctx.ui.notify(`Delivery: ${plan.tasks} task(s) — starting the delivery run.`, "info");
+		const file = url.startsWith("local:") ? localPath(url, ctx) : path.resolve(ctx.cwd, url);
+		if (!file || !existsSync(file)) return undefined;
+		let tasks: number;
+		try {
+			({ tasks } = await checkPlan(pi, root, file));
+		} catch {
+			return undefined;
+		}
+		if (tasks === 0) return undefined;
+		ctx.ui.notify(`Delivery: ${tasks} task(s) — starting the delivery run.`, "info");
 		return {
 			message: {
 				customType: "delivery-run",
 				content: [
 					"<critical>",
-					`Delivery takes over this approved plan: it has ${plan.tasks} task(s) under \`### Task\` headings. This replaces the instruction above to execute the plan step by step yourself. Implementing this plan means running the delivery: each task goes to the developer agent that owns its files, is reviewed and committed; then the plan's Verification and the full code review run. Do not edit project files yourself.`,
+					`Delivery takes over this approved plan: it has ${tasks} task(s) under \`### Task\` headings. This replaces the instruction above to execute the plan step by step yourself. Implementing this plan means running the delivery: each task goes to the developer agent that owns its files, is reviewed and committed; then the plan's Verification and the full code review run. Do not edit project files yourself.`,
 					"",
 					"`read skill://delivery:orchestration` and run its **Delivery run** section with:",
-					`- PLAN_SOURCE: ${plan.url}`,
-					...(planFile ? [`- PLAN_FILE: ${planFile}`] : []),
+					`- PLAN_SOURCE: ${url}`,
+					`- PLAN_FILE: ${file}`,
 					"</critical>",
 				].join("\n"),
 				display: true,
@@ -146,16 +141,22 @@ export default function deliveryExtension(pi: ExtensionAPI): void {
 	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName !== "write") return undefined;
 		const { path: target, content } = event.input as { path?: unknown; content?: unknown };
-		if (typeof target !== "string" || typeof content !== "string" || !PROPOSE_TARGET.test(target.trim())) return undefined;
+		if (typeof target !== "string" || typeof content !== "string" || parseXdUrl(target)?.name !== "propose")
+			return undefined;
 		const url = proposedPlanUrl(content);
 		const file = url ? localPath(url, ctx) : undefined;
-		if (!url || !file || !existsSync(file)) return undefined;
-		const root = await gitRoot(ctx.cwd);
+		if (!url) return undefined;
+		if (!file || !existsSync(file)) {
+			ctx.ui.notify(`Delivery plan check skipped: plan file not found for ${url}.`, "warning");
+			return undefined;
+		}
+		const root = await gitRoot(pi, ctx.cwd);
 		if (!root) return undefined;
 		let result: { tasks: number; problems: string[] };
 		try {
-			result = JSON.parse(await run("python3", [ROUTER, "check", root, file], 10_000));
-		} catch {
+			result = await checkPlan(pi, root, file);
+		} catch (error) {
+			ctx.ui.notify(`Delivery plan check skipped: router failed for ${url}: ${String(error)}`, "warning");
 			return undefined;
 		}
 		if (result.tasks === 0 || result.problems.length === 0) return undefined;

@@ -203,6 +203,69 @@ class CheckTest(RoutingFixture):
     def test_routable_plan_has_no_problems(self) -> None:
         self.assertEqual(check(self.root, PLAN), {"tasks": 2, "problems": []})
 
+    def test_empty_task_title_does_not_consume_files_heading(self) -> None:
+        plan = """### Task 1:
+**Files:**
+- Modify: `backend/app/orders.py`
+"""
+        self.assertEqual(parse_plan(plan), [])
+        result = check(self.root, plan)
+        self.assertEqual(result["tasks"], 0)
+        self.assertTrue(any("### Task 1:" in problem for problem in result["problems"]), result)
+
+    def test_empty_title_does_not_consume_commit_line(self) -> None:
+        plan = """### Task 1:
+**Commit:** feat: add orders
+**Files:**
+- Modify: `backend/app/orders.py`
+"""
+        self.assertEqual(parse_plan(plan), [])
+        self.assertTrue(check(self.root, plan)["problems"])
+
+    def test_empty_commit_does_not_consume_files_heading(self) -> None:
+        plan = """### Task 1: Orders
+**Commit:**
+**Files:**
+- Modify: `backend/app/orders.py`
+"""
+        tasks = parse_plan(plan)
+        self.assertEqual(tasks[0]["commit"], None)
+        result = check(self.root, plan)
+        self.assertEqual(result["tasks"], 1)
+        self.assertTrue(any("Commit" in problem for problem in result["problems"]), result)
+
+    def test_empty_file_entry_does_not_consume_next_line(self) -> None:
+        plan = """### Task 1: Orders
+**Files:**
+- Modify:
+`backend/app/orders.py`
+"""
+        self.assertEqual(parse_plan(plan)[0]["paths"], [])
+        self.assertTrue(any("lists no files" in problem for problem in check(self.root, plan)["problems"]))
+
+    def test_invalid_task_heading_in_fence_is_not_reported(self) -> None:
+        plan = """### Task 1: Orders
+**Files:**
+- Modify: `backend/app/orders.py`
+```
+### Task 2:
+**Commit:**
+```
+"""
+        self.assertEqual(check(self.root, plan), {"tasks": 1, "problems": []})
+
+    def test_malformed_heading_is_reported_beside_valid_task(self) -> None:
+        plan = """### Task 1: Orders
+**Files:**
+- Modify: `backend/app/orders.py`
+### Task two: Docs
+**Files:**
+- Modify: `docs/orders.md`
+"""
+        result = check(self.root, plan)
+        self.assertEqual(result["tasks"], 1)
+        self.assertTrue(any("### Task two: Docs" in problem for problem in result["problems"]), result)
+
 
 class LayoutTest(RoutingFixture):
     def test_stacks_and_framework_evidence(self) -> None:
@@ -222,11 +285,41 @@ class CliTest(RoutingFixture):
         self.assertEqual(result.returncode, 2)
         self.assertIn("no '### Task N:' headings", result.stderr)
 
+    def test_plan_rejects_duplicate_task_numbers(self) -> None:
+        write(self.root, "duplicate-plan.md", """### Task 1: Orders
+**Files:**
+- Modify: `backend/app/orders.py`
+
+### Task 1: Docs
+**Files:**
+- Modify: `docs/orders.md`
+""")
+        result = self.run_router("plan", str(self.root), "duplicate-plan.md")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Task 1 appears 2 times", result.stderr)
+
     def test_check_without_tasks_reports_zero(self) -> None:
         write(self.root, "empty-plan.md", "# Nothing here\n")
         result = self.run_router("check", str(self.root), "empty-plan.md")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {"tasks": 0, "problems": []})
+
+    def test_check_cli_reports_empty_title_and_commit(self) -> None:
+        write(self.root, "invalid-plan.md", """### Task 1:
+**Files:**
+- Modify: `backend/app/orders.py`
+### Task 2: Orders
+**Commit:**
+**Files:**
+- Modify: `backend/app/orders.py`
+""")
+        result = self.run_router("check", str(self.root), "invalid-plan.md")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        checked = json.loads(result.stdout)
+        self.assertEqual(checked["tasks"], 1)
+        self.assertEqual(len(checked["problems"]), 2, checked)
+        self.assertTrue(any("### Task 1:" in problem for problem in checked["problems"]), checked)
+        self.assertTrue(any("empty **Commit:**" in problem for problem in checked["problems"]), checked)
 
     def test_plan_routes_every_task(self) -> None:
         write(self.root, "plan.md", PLAN)

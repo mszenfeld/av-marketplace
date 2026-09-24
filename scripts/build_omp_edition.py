@@ -8,8 +8,9 @@ overlay at `omp/overlay/<name>.json`, this script writes `plugins-omp/<name>/`:
 - `skills/` is copied verbatim except each `SKILL.md` frontmatter `name`,
   which becomes `<plugin>:<skill>` so same-named skills of different plugins
   stay distinct;
-- `commands/*.md` keep `description` / `argument-hint` and gain the harness
-  preamble (`omp/preamble.md`) above the unchanged body;
+- `commands/*.md` keep `description` / `argument-hint`, drop `allowed-tools` /
+  `model` (OMP commands read neither), and gain the harness preamble
+  (`omp/preamble.md`) above the unchanged body;
 - `agents/*.md` get OMP frontmatter — `<plugin>:<agent>` names, OMP tool
   names, a role-routed `model` — and the preamble above the unchanged body;
 - `.omp-plugin/plugin.json` mirrors the Claude manifest.
@@ -22,8 +23,8 @@ It also writes `.omp-plugin/marketplace.json`, listing only plugins that have
 an OMP edition, with versions of generated plugins taken from the Claude
 catalog.
 
-Every mapping is total: an unknown source tool, frontmatter key, or an agent
-without an overlay entry fails the build instead of disappearing silently.
+Every mapping is total: an unknown source entry, tool, frontmatter key, or an
+agent without an overlay entry fails the build instead of disappearing silently.
 
 Usage:
     python3 scripts/build_omp_edition.py          # (re)generate
@@ -42,25 +43,38 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SOURCE_ROOT = REPO / "plugins"
 OUTPUT_DIR_NAME = "plugins-omp"
-OVERLAY_DIR = REPO / "omp" / "overlay"
-PREAMBLE_PATH = REPO / "omp" / "preamble.md"
-CLAUDE_CATALOG = REPO / ".claude-plugin" / "marketplace.json"
 OMP_CATALOG_REL = Path(".omp-plugin") / "marketplace.json"
 
 VERBATIM_DIRS = ("scripts",)
+KNOWN_ENTRIES = {".claude-plugin", "agents", "commands", "skills", *VERBATIM_DIRS}
 COMMAND_KEYS = ("description", "argument-hint")
+# OMP commands read only `description` and `argument-hint`; these Claude Code
+# keys are dropped on purpose.
+COMMAND_DROPPED_KEYS = {"allowed-tools", "model"}
 AGENT_SOURCE_KEYS = {"name", "description", "tools", "disallowedTools", "model", "skills"}
 OVERLAY_KEYS = {"plugin", "agents", "fallback_model"}
 AGENT_SPEC_KEYS = {"role", "add_tools", "thinking", "autoload"}
 
-NATIVE_DIR = REPO / "omp" / "native"
 NATIVE_MANIFEST_KEYS = {"name", "version", "description", "category"}
 NATIVE_AGENT_KEYS = {
     "name", "description", "tools", "spawns", "model", "thinking-level", "output",
     "blocking", "autoloadSkills", "read-summarize", "prewalk", "advisor",
 }
+# Project model roles documented in README (including the plan-mode role).
+# These are user-configurable OMP aliases, not a list of OMP built-in models.
+MODEL_ROLES = {"code_review", "executor", "challenger", "analyst", "plan"}
+# Canonical built-in tool names from OMP's tools/builtin-names.ts. Custom
+# extension tools are not used by these overlays or native agent definitions.
+OMP_TOOLS = {
+    "read", "bash", "edit", "ast_grep", "ast_edit", "ask", "debug", "eval",
+    "github", "glob", "grep", "find", "lsp", "checkpoint", "rewind",
+    "context_notes", "new_context", "security_scan", "task", "hub", "todo",
+    "web_search", "write", "memory_edit", "retain", "recall", "reflect",
+    "learn", "manage_skill",
+}
+# OMP parses these values via parseConfiguredThinkingLevel.
+THINKING_LEVELS = {"inherit", "off", "min", "low", "medium", "high", "xhigh", "max", "auto"}
 
 # Claude Code tool name -> OMP tool name. None = no equivalent; dropped on
 # purpose (the preamble tells the model what replaces it).
@@ -164,7 +178,14 @@ def map_tools(raw: str, origin: Path) -> list[str]:
     return mapped
 
 
-def build_agent(src: Path, plugin: str, overlay: dict, preamble: str, skill_names: set[str]) -> str:
+def validate_omp_tool(name: object, origin: Path) -> None:
+    if not isinstance(name, str) or name not in OMP_TOOLS:
+        raise BuildError(f"{origin}: unknown OMP tool {name!r}")
+
+
+def build_agent(
+    src: Path, plugin: str, overlay: dict, preamble: str, skill_names: set[str], src_root: Path
+) -> str:
     pairs, body = split_frontmatter(src.read_text(), src)
     fields = dict(pairs)
     unknown = set(fields) - AGENT_SOURCE_KEYS
@@ -181,11 +202,31 @@ def build_agent(src: Path, plugin: str, overlay: dict, preamble: str, skill_name
         raise BuildError(f"{src}: unknown keys {sorted(extra)} for agent {name!r} in omp/overlay/{plugin}.json")
     if "role" not in spec:
         raise BuildError(f"{src}: agent {name!r} has no role in omp/overlay/{plugin}.json")
+    role = spec["role"]
+    if not isinstance(role, str) or role not in MODEL_ROLES:
+        raise BuildError(
+            f"{src}: unknown role {role!r} in omp/overlay/{plugin}.json; "
+            f"allowed project roles: {', '.join(sorted(MODEL_ROLES))}. "
+            "To add a new role, document it in README.md and add it to MODEL_ROLES."
+        )
+    extras = spec.get("add_tools", [])
+    if not isinstance(extras, list):
+        raise BuildError(f"{src}: add_tools must be a list in omp/overlay/{plugin}.json")
+    for extra in extras:
+        validate_omp_tool(extra, src)
+    if "thinking" in spec and (
+        not isinstance(spec["thinking"], str) or spec["thinking"] not in THINKING_LEVELS
+    ):
+        raise BuildError(f"{src}: unknown thinking level {spec['thinking']!r} in omp/overlay/{plugin}.json")
 
     # `todo` is parent-owned in OMP: the task executor strips it from every
     # subagent, so granting it would only mislead a reader of the frontmatter.
     tools = [t for t in map_tools(fields.get("tools", ""), src) if t != "todo"]
-    for extra in spec.get("add_tools", []):
+    if "disallowedTools" in fields and "tools" not in fields:
+        raise BuildError(f"{src}: disallowedTools requires tools (an explicit allowlist in OMP)")
+    if "tools" in fields and not tools:
+        raise BuildError(f"{src}: declared tools map to no usable OMP tools")
+    for extra in extras:
         if extra not in tools:
             tools.append(extra)
     # OMP's `tools:` is an allowlist, so `disallowedTools` has nothing to say
@@ -220,15 +261,27 @@ def build_agent(src: Path, plugin: str, overlay: dict, preamble: str, skill_name
     if autoload:
         # OMP matches autoload entries by skill name, which build_skill prefixed.
         out.append(("autoloadSkills", json.dumps([f"{plugin}:{s}" for s in autoload])))
-    relpath = src.relative_to(SOURCE_ROOT / plugin).as_posix()
+    relpath = src.relative_to(src_root).as_posix()
     return render(out, preamble.format(plugin=plugin, relpath=relpath), body)
 
 
-def build_command(src: Path, plugin: str, preamble: str) -> str:
+def build_command(src: Path, plugin: str, preamble: str, src_root: Path) -> str:
     pairs, body = split_frontmatter(src.read_text(), src)
+    unknown = {k for k, _ in pairs} - set(COMMAND_KEYS) - COMMAND_DROPPED_KEYS
+    if unknown:
+        raise BuildError(f"{src}: no OMP mapping for frontmatter keys {sorted(unknown)}")
     kept = [(k, scalar(v)) for k, v in pairs if k in COMMAND_KEYS]
-    relpath = src.relative_to(SOURCE_ROOT / plugin).as_posix()
+    relpath = src.relative_to(src_root).as_posix()
     return render(kept, preamble.format(plugin=plugin, relpath=relpath), body)
+
+
+def reject_source_symlinks(root: Path) -> None:
+    """Reject links before any source file is opened, including linked directories."""
+    if root.is_symlink():
+        raise BuildError(f"{root}: symlinks are not allowed in plugin sources")
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise BuildError(f"{path}: symlinks are not allowed in plugin sources")
 
 
 def guarded(path: Path, out_root: Path) -> Path:
@@ -245,14 +298,18 @@ def write(path: Path, content: str, out_root: Path) -> None:
 
 
 def copy(src: Path, path: Path, out_root: Path) -> None:
+    if src.is_symlink():
+        raise BuildError(f"{src}: symlinks are not allowed in plugin sources")
     # copy2 keeps the executable bit the scripts rely on.
-    shutil.copy2(src, guarded(path, out_root))
+    shutil.copy2(src, guarded(path, out_root), follow_symlinks=False)
 
 
 def native_skipped(rel: Path) -> bool:
     return (
         rel.parts[0] == "tests"
         or "__pycache__" in rel.parts
+        or "node_modules" in rel.parts
+        or rel.name in {"bun.lock", "bun.lockb", "package-lock.json"}
         or rel.suffix == ".pyc"
         or rel.name == ".DS_Store"
     )
@@ -260,6 +317,7 @@ def native_skipped(rel: Path) -> bool:
 
 def build_native(src_root: Path, out_root: Path, taken: set[str]) -> dict:
     """Copy an OMP-only plugin and return its catalog entry."""
+    reject_source_symlinks(src_root)
     manifest_path = src_root / ".omp-plugin" / "plugin.json"
     if not manifest_path.is_file():
         raise BuildError(f"{src_root}: missing .omp-plugin/plugin.json")
@@ -291,6 +349,15 @@ def build_native(src_root: Path, out_root: Path, taken: set[str]) -> dict:
             raise BuildError(f"{src}: unknown OMP agent frontmatter keys {sorted(extra)}")
         if not unquote(fields.get("name", "")).startswith(f"{name}:"):
             raise BuildError(f"{src}: agent name must start with {name + ':'!r}")
+        if "tools" in fields:
+            raw_tools = fields["tools"]
+            if raw_tools.startswith("[") and raw_tools.endswith("]"):
+                tokens = raw_tools[1:-1].split(",")
+            else:
+                tokens = unquote(raw_tools).split(",")
+            for tool in tokens:
+                if tool.strip():
+                    validate_omp_tool(unquote(tool.strip()), src)
     for src in sorted((src_root / "skills").glob("*/SKILL.md")):
         expected = f"{name}:{src.parent.name}"
         if unquote(dict(split_frontmatter(src.read_text(), src)[0]).get("name", "")) != expected:
@@ -309,80 +376,109 @@ def build_native(src_root: Path, out_root: Path, taken: set[str]) -> dict:
     }
 
 
-def build(dest_repo: Path) -> None:
-    preamble = PREAMBLE_PATH.read_text()
-    catalog = json.loads(CLAUDE_CATALOG.read_text())
-    entries = {p["name"]: p for p in catalog["plugins"]}
-    out_root = dest_repo / OUTPUT_DIR_NAME
-    omp_plugins = []
+def build_generated(
+    src_root: Path, overlay_path: Path, entry: dict, out_root: Path, preamble: str
+) -> dict:
+    """Build one overlaid Claude plugin and return its OMP catalog entry."""
+    reject_source_symlinks(src_root)
+    reject_source_symlinks(overlay_path)
+    overlay = json.loads(overlay_path.read_text())
+    extra = set(overlay) - OVERLAY_KEYS
+    if extra:
+        raise BuildError(f"{overlay_path}: unknown overlay keys {sorted(extra)}")
+    plugin = overlay["plugin"]
+    if plugin != overlay_path.stem:
+        raise BuildError(f"{overlay_path}: 'plugin' must equal the file name")
+    dst_root = out_root / plugin
+    unknown = {path.name for path in src_root.iterdir()} - KNOWN_ENTRIES - {"tests"}
+    if unknown:
+        raise BuildError(f"{src_root}: no OMP mapping for {sorted(unknown)}")
 
-    for overlay_path in sorted(OVERLAY_DIR.glob("*.json")):
-        overlay = json.loads(overlay_path.read_text())
-        extra = set(overlay) - OVERLAY_KEYS
-        if extra:
-            raise BuildError(f"{overlay_path}: unknown overlay keys {sorted(extra)}")
-        plugin = overlay["plugin"]
-        if plugin != overlay_path.stem:
-            raise BuildError(f"{overlay_path}: 'plugin' must equal the file name")
-        if plugin not in entries:
-            raise BuildError(f"{overlay_path}: {plugin!r} is not in the Claude catalog")
-        src_root = SOURCE_ROOT / plugin
-        dst_root = out_root / plugin
+    for name in VERBATIM_DIRS:
+        if (src_root / name).is_dir():
+            for src in sorted((src_root / name).rglob("*")):
+                if src.is_file():
+                    copy(src, dst_root / src.relative_to(src_root), out_root)
 
-        for name in VERBATIM_DIRS:
-            if (src_root / name).is_dir():
-                for src in sorted((src_root / name).rglob("*")):
-                    if src.is_file():
-                        copy(src, dst_root / src.relative_to(src_root), out_root)
+    skills_root = src_root / "skills"
+    skill_names: set[str] = set()
+    if skills_root.is_dir():
+        for src in sorted(skills_root.rglob("*")):
+            if not src.is_file():
+                continue
+            dst = dst_root / src.relative_to(src_root)
+            if src.name == "SKILL.md" and src.parent.parent == skills_root:
+                skill_names.add(src.parent.name)
+                write(dst, build_skill(src, plugin), out_root)
+            else:
+                copy(src, dst, out_root)
 
-        skills_root = src_root / "skills"
-        skill_names: set[str] = set()
-        if skills_root.is_dir():
-            for src in sorted(skills_root.rglob("*")):
-                if not src.is_file():
-                    continue
-                dst = dst_root / src.relative_to(src_root)
-                if src.name == "SKILL.md" and src.parent.parent == skills_root:
-                    skill_names.add(src.parent.name)
-                    write(dst, build_skill(src, plugin), out_root)
-                else:
-                    copy(src, dst, out_root)
-
-        for src in sorted((src_root / "commands").glob("*.md")):
-            write(dst_root / "commands" / src.name, build_command(src, plugin, preamble), out_root)
-
-        seen = set()
-        for src in sorted((src_root / "agents").glob("*.md")):
-            seen.add(dict(split_frontmatter(src.read_text(), src)[0])["name"])
-            write(
-                dst_root / "agents" / src.name,
-                build_agent(src, plugin, overlay, preamble, skill_names),
-                out_root,
-            )
-        stale = set(overlay["agents"]) - seen
-        if stale:
-            raise BuildError(f"{overlay_path}: overlay names agents that do not exist: {sorted(stale)}")
-
-        manifest = json.loads((src_root / ".claude-plugin" / "plugin.json").read_text())
+    for src in sorted((src_root / "commands").glob("*.md")):
         write(
-            dst_root / ".omp-plugin" / "plugin.json",
-            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+            dst_root / "commands" / src.name,
+            build_command(src, plugin, preamble, src_root),
             out_root,
         )
-        entry = entries[plugin]
+
+    seen = set()
+    for src in sorted((src_root / "agents").glob("*.md")):
+        seen.add(dict(split_frontmatter(src.read_text(), src)[0]).get("name"))
+        write(
+            dst_root / "agents" / src.name,
+            build_agent(src, plugin, overlay, preamble, skill_names, src_root),
+            out_root,
+        )
+    stale = set(overlay["agents"]) - seen
+    if stale:
+        raise BuildError(f"{overlay_path}: overlay names agents that do not exist: {sorted(stale)}")
+
+    manifest = json.loads((src_root / ".claude-plugin" / "plugin.json").read_text())
+    write(
+        dst_root / ".omp-plugin" / "plugin.json",
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        out_root,
+    )
+    return {
+        "name": plugin,
+        "source": f"./{plugin}",
+        "description": entry["description"],
+        "version": entry["version"],
+        "category": entry["category"],
+    }
+
+
+def build(dest_repo: Path, source_repo: Path = REPO) -> None:
+    for root in (source_repo / "omp", source_repo / ".claude-plugin"):
+        if root.is_symlink():
+            raise BuildError(f"{root}: symlinks are not allowed in plugin sources")
+    reject_source_symlinks(source_repo / "plugins")
+    reject_source_symlinks(source_repo / "omp" / "overlay")
+    reject_source_symlinks(source_repo / "omp" / "native")
+    for path in (source_repo / "omp" / "preamble.md", source_repo / ".claude-plugin" / "marketplace.json"):
+        if path.is_symlink():
+            raise BuildError(f"{path}: symlinks are not allowed in plugin sources")
+    out_root = dest_repo / OUTPUT_DIR_NAME
+    if out_root.is_symlink():
+        raise BuildError(f"{out_root}: symlinked output directory is not allowed")
+    preamble = (source_repo / "omp" / "preamble.md").read_text()
+    catalog = json.loads((source_repo / ".claude-plugin" / "marketplace.json").read_text())
+    entries = {p["name"]: p for p in catalog["plugins"]}
+    omp_plugins = []
+
+    for overlay_path in sorted((source_repo / "omp" / "overlay").glob("*.json")):
+        plugin = overlay_path.stem
+        if plugin not in entries:
+            raise BuildError(f"{overlay_path}: {plugin!r} is not in the Claude catalog")
         omp_plugins.append(
-            {
-                "name": plugin,
-                "source": f"./{plugin}",
-                "description": entry["description"],
-                "version": entry["version"],
-                "category": entry["category"],
-            }
+            build_generated(
+                source_repo / "plugins" / plugin, overlay_path, entries[plugin], out_root, preamble
+            )
         )
 
-    if NATIVE_DIR.is_dir():
+    native_dir = source_repo / "omp" / "native"
+    if native_dir.is_dir():
         taken = set(entries) | {entry["name"] for entry in omp_plugins}
-        for native in sorted(p for p in NATIVE_DIR.iterdir() if p.is_dir()):
+        for native in sorted(p for p in native_dir.iterdir() if p.is_dir()):
             omp_plugins.append(build_native(native, out_root, taken))
     omp_plugins.sort(key=lambda entry: entry["name"])
 
@@ -423,9 +519,29 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="fail if the committed output is stale")
     args = parser.parse_args()
     try:
+        out_root = REPO / OUTPUT_DIR_NAME
+        if out_root.is_symlink():
+            raise BuildError(f"{out_root}: symlinked output directory is not allowed")
         if not args.check:
-            shutil.rmtree(REPO / OUTPUT_DIR_NAME, ignore_errors=True)
-            build(REPO)
+            # Build on the same filesystem so a failed build leaves both
+            # published outputs untouched and the finished tree can be renamed.
+            with tempfile.TemporaryDirectory(prefix=".omp-build-", dir=REPO) as tmp:
+                staged = Path(tmp)
+                build(staged)
+                catalog_path = REPO / OMP_CATALOG_REL
+                catalog_path.parent.mkdir(parents=True, exist_ok=True)
+                previous = staged / "previous-plugins-omp"
+                if out_root.exists():
+                    out_root.rename(previous)
+                try:
+                    (staged / OUTPUT_DIR_NAME).rename(out_root)
+                    (staged / OMP_CATALOG_REL).replace(catalog_path)
+                except OSError:
+                    if out_root.exists():
+                        shutil.rmtree(out_root)
+                    if previous.exists():
+                        previous.rename(out_root)
+                    raise
             print(f"wrote {OUTPUT_DIR_NAME}/ and {OMP_CATALOG_REL}")
             return 0
         with tempfile.TemporaryDirectory() as tmp:

@@ -19,4 +19,5 @@
 - [ ] Follows existing plugin patterns and conventions
 - [ ] Tested with Claude Code on a real project
 - [ ] Version bumped in `plugin.json` (if modifying an existing plugin)
+- [ ] OMP edition regenerated with `python3 scripts/build_omp_edition.py` and committed (if a plugin with an `omp/overlay/` entry, anything under `omp/`, or the generator changed)
 - [ ] No unrelated changes included

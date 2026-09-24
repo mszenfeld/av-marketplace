@@ -38,6 +38,8 @@ plugins/your-plugin/
 └── scripts/                 # Shell scripts used by hooks (optional)
 ```
 
+Plugins with an OMP edition also have an `omp/overlay/<name>.json`, from which `plugins-omp/<name>/` is generated; OMP-only plugins live in `omp/native/<name>/`. See [CLAUDE.md](../CLAUDE.md#omp-edition).
+
 ### plugin.json
 
 Defines plugin metadata:
@@ -166,6 +168,7 @@ Every pull request should include:
 - Evidence of testing with Claude Code on at least one real project
 - Adherence to existing plugin patterns and naming conventions
 - Updated version in `plugin.json` (if modifying an existing plugin) — must match `.claude-plugin/marketplace.json`, the row in `README.md`, and the `**Version:**` header in `docs/plugins/<name>.md`. The `Plugin Version Parity` GitHub Actions workflow enforces this; run `python3 scripts/check_plugin_versions.py` locally before pushing.
+- Regenerated OMP edition (if you changed `plugins/<name>/` of a plugin that has an `omp/overlay/<name>.json` — a version bump included — or anything under `omp/` or `scripts/build_omp_edition.py`): `plugins-omp/` and `.omp-plugin/marketplace.json` are generated, so never edit them by hand — run `python3 scripts/build_omp_edition.py` and commit both. OMP-only plugins in `omp/native/<name>/` are versioned in their own `.omp-plugin/plugin.json` and `package.json`, not in the four places above. The `OMP Edition` GitHub Actions workflow (`.github/workflows/omp-edition.yml`) enforces this and runs the generator and delivery tests listed there; the full rules are in [CLAUDE.md](../CLAUDE.md#omp-edition).
 - No unrelated changes bundled in the same PR
 
 ## Review Process

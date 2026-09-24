@@ -44,10 +44,12 @@ JS_FRAMEWORKS = (
     "@tanstack/react-query", "@tanstack/react-router", "react-hook-form",
 )
 
-TASK_HEADING = re.compile(r"^### Task (\d+):\s*(.+?)\s*$", re.MULTILINE)
+TASK_HEADING = re.compile(r"^### Task (\d+):[ \t]*(\S.*?)[ \t]*$", re.MULTILINE)
 SECTION_END = re.compile(r"^#{2,3} ", re.MULTILINE)
-FILE_LINE = re.compile(r"^\s*[-*]\s*(?:Create|Modify|Test|Delete):\s*(.+?)\s*$", re.MULTILINE)
-COMMIT_LINE = re.compile(r"^\*\*Commit:\*\*\s*(.+?)\s*$", re.MULTILINE)
+FILE_LINE = re.compile(r"^[ \t]*[-*][ \t]*(?:Create|Modify|Test|Delete):[ \t]*(\S.*?)[ \t]*$", re.MULTILINE)
+COMMIT_LINE = re.compile(r"^\*\*Commit:\*\*[ \t]*(\S.*?)[ \t]*$", re.MULTILINE)
+TASK_CANDIDATE = re.compile(r"^### Task(?=[ \t:]|$)[^\n]*", re.MULTILINE)
+EMPTY_COMMIT = re.compile(r"^\*\*Commit:\*\*[ \t]*$", re.MULTILINE)
 BACKTICKED = re.compile(r"`([^`]+)`")
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$", re.MULTILINE)
 
@@ -172,21 +174,35 @@ def parse_plan(text: str) -> list[dict]:
     return tasks
 
 
+def duplicate_tasks(tasks: list[dict]) -> list[str]:
+    counts = Counter(task["task"] for task in tasks)
+    return [
+        f"Task {number} appears {counts[number]} times. Number tasks 1, 2, 3… once each."
+        for number in sorted(n for n, count in counts.items() if count > 1)
+    ]
+
+
 def check(root: Path, text: str) -> dict:
     """Problems that keep a plan's tasks from routing to one implementer each."""
     tasks = parse_plan(text)
+    fences = fenced_spans(text)
     problems = []
+    for heading in TASK_CANDIDATE.finditer(text):
+        if not any(start <= heading.start() < end for start, end in fences) and not TASK_HEADING.fullmatch(heading.group()):
+            problems.append(f"Invalid task heading {heading.group()!r}. Use '### Task N: <title>' on one line.")
     for task in tasks:
         routed = route(root, task["paths"])
         label = f"Task {task['task']} ({task['title']})"
+        block_fences = fenced_spans(task["block"])
+        if any(not any(start <= match.start() < end for start, end in block_fences)
+               for match in EMPTY_COMMIT.finditer(task["block"])):
+            problems.append(f"{label}: empty **Commit:**. Add a subject or remove the line.")
         if routed["stack"] == "split":
             groups = "; ".join(f"{stack}: {', '.join(files)}" for stack, files in routed["groups"].items())
             problems.append(f"{label}: touches several stacks ({groups}). Split it into one task per stack.")
         elif routed["stack"] == "unknown":
             problems.append(f'{label}: lists no files. Add a **Files:** block with "- Create|Modify|Test|Delete: `path`" lines.')
-    counts = Counter(task["task"] for task in tasks)
-    for number in sorted(n for n, count in counts.items() if count > 1):
-        problems.append(f"Task {number} appears {counts[number]} times. Number tasks 1, 2, 3… once each.")
+    problems.extend(duplicate_tasks(tasks))
     return {"tasks": len(tasks), "problems": problems}
 
 
@@ -257,6 +273,10 @@ def main(argv: list[str]) -> int:
     tasks = parse_plan(text)
     if not tasks:
         print(f"no '### Task N:' headings in {plan_path}", file=sys.stderr)
+        return 2
+    duplicates = duplicate_tasks(tasks)
+    if duplicates:
+        print("\n".join(duplicates), file=sys.stderr)
         return 2
     out = []
     for task in tasks:

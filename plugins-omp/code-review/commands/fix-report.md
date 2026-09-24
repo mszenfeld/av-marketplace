@@ -10,7 +10,7 @@ argument-hint: "[path-to-review-or-qa-report]"
 > - **TaskCreate / TaskUpdate / TaskList** → the `todo` tool: `init` with the listed subjects, `start` / `done` by subject text, `view` to list. `activeForm` has no equivalent. A subagent has no `todo` tool: when running as one, skip these progress-tracking steps and do the work they announce.
 > - **AskUserQuestion** → the `ask` tool. `multiSelect: true` → `multi: true`.
 > - **Skill tool**, `Skill(skill: "<name>")`, or a skill cited as `<plugin>:<name>` → `read skill://<plugin>:<name>`. Every skill is addressed with its plugin prefix; a skill named without one belongs to this plugin, so read `skill://code-review:<name>`.
-> - `$ARGUMENTS` in an agent's instructions stands for the task text you were given.
+> - In an agent's instructions, `ARGUMENTS` (prefixed with a dollar sign) stands for the task text you were given.
 > - **WebSearch** → `web_search`. **WebFetch** → `read` on the URL.
 > - A subagent has no `ask` tool: where the instructions say to ask the user, choose the most likely option and state the choice and its reason in your report.
 > - **allowed-tools** and `Bash(<cmd>:*)` grants are Claude Code permission pre-approvals. They grant and restrict nothing here.

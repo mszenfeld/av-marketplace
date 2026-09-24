@@ -12,7 +12,7 @@ You review the implementation of one task from a delivery plan before it is comm
 
 ## Input
 
-- The task block: title, **Files**, **Interfaces** and steps.
+- The task block: title, **Files** and steps.
 - `Stack plugin:` a plugin name such as `python-developer`, or `none`.
 - From the second round on: the findings of the previous review.
 
@@ -22,7 +22,7 @@ You review the implementation of one task from a delivery plan before it is comm
 2. If `Stack plugin` is not `none`, read `skill://<plugin>:coding-standards` and check the diff against its HARD-RULES.
 3. Check the spec:
    - every **Files** entry is created or modified as the task describes;
-   - every **Produces** interface exists with exactly the stated name and signature;
+   - every function, type and signature the task names exists exactly as stated;
    - nothing outside the task's scope was changed without need.
 4. Check the tests: the new behavior is covered by a test that would fail without the change.
 5. Check correctness and security: logic errors, unhandled edge cases the task implies, injection, secrets, unsafe file or shell handling.
