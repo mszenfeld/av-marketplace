@@ -22,38 +22,41 @@ Run the steps in order. Every `stop` prints its message and ends the run.
    - `PLAN_FILE` given → keep it.
    - `PLAN_SOURCE` is a `local://` URL and no `PLAN_FILE` is given → leave `PLAN_FILE` unset.
    - Otherwise `PLAN_FILE=$(realpath "$PLAN_SOURCE")`; a failure → stop with `Plan not found: <PLAN_SOURCE>.`
-   - `PLAN_FILE` inside `$REPO/` → `PLAN_PATH` is its path relative to `REPO`. Otherwise step 6 sets `PLAN_PATH`.
+   - `PLAN_FILE` inside `$REPO/` → `PLAN_PATH` is its path relative to `REPO`. Otherwise step 7 sets `PLAN_PATH`.
 4. **Slug.**
    ```bash
    SLUG=$(python3 -c 'import re,sys; s=sys.argv[1].rsplit("/",1)[-1].lower().removesuffix(".md"); s=re.sub(r"[^a-z0-9]+","-",s).strip("-"); s=re.sub(r"^\d{4}-\d{2}-\d{2}-","",s); print(re.sub(r"-plan$","",s) or "plan")' "$PLAN_SOURCE")
    ```
-Before step 5, check for existing changes other than an in-repository plan: when `PLAN_PATH` is set, run `git status --porcelain --untracked-files=all -- . ":(exclude,literal)$PLAN_PATH"`; otherwise run `git status --porcelain --untracked-files=all`. Any output → stop with `Commit or stash your other changes before delivery, then retry <PLAN_SOURCE>.` Do not create a branch or commit the plan on this path.
-5. **Branch.** `BRANCH=$(git branch --show-current)`:
-   - empty (detached HEAD) → stop with `Check out a branch first.`;
-   - `main` or `master` → create the first free delivery branch. The plan may still have uncommitted changes; step 7 commits it.
-     ```bash
-     B="delivery/$SLUG"; n=2
-     while git rev-parse --verify --quiet "refs/heads/$B" >/dev/null; do B="delivery/$SLUG-$n"; n=$((n+1)); done
-     git switch -c "$B"
-     ```
-     `BRANCH` becomes `$B`.
-6. **Save the plan** when `PLAN_PATH` is not set yet:
+5. **Other changes.** When `PLAN_PATH` is set, run `git status --porcelain --untracked-files=all -- . ":(exclude,literal)$PLAN_PATH"`; otherwise run `git status --porcelain --untracked-files=all`. Any output → stop with `Commit or stash your other changes before delivery, then retry <PLAN_SOURCE>.` Nothing below runs on this path.
+6. **Current branch.** `BRANCH=$(git branch --show-current)`; empty (detached HEAD) → stop with `Check out a branch first.`
+7. **Save the plan** when `PLAN_PATH` is not set yet:
    ```bash
    DATE=$(date +%F); P="docs/plans/$DATE-$SLUG.md"; n=2
    while [ -e "$P" ]; do P="docs/plans/$DATE-$SLUG-$n.md"; n=$((n+1)); done
    mkdir -p docs/plans
    ```
-   `PLAN_PATH=$P`. With `PLAN_FILE`, run `cp "$PLAN_FILE" "$PLAN_PATH"`. Without it, `read <PLAN_SOURCE>:raw` and `write` that exact text to `PLAN_PATH`.
-7. **Commit the plan** when `git status --porcelain -- "$PLAN_PATH"` prints anything. The subject is `docs: update delivery plan <SLUG>` when `git ls-files --error-unmatch -- "$PLAN_PATH"` succeeds, otherwise `docs: add delivery plan <SLUG>`. Run `git add -- "$PLAN_PATH"`, then `git commit -m "<subject>" -- "$PLAN_PATH"`. A failed commit → print git's output and stop.
-8. If `git status --porcelain` prints anything → stop with `Commit or stash your other changes, then run /delivery:execute <PLAN_PATH>.`
-9. First run `python3 "$ROUTER" check "$REPO" "$PLAN_PATH"`. A non-zero exit → stop with the router's error. Inspect its JSON `problems`: any `Task <N> appears <count> times` → stop with those duplicate-number problems and ask for unique task numbers in `<PLAN_PATH>`. Other problems remain subject to steps 11–12. Then `TASKS` = JSON output of `python3 "$ROUTER" plan "$REPO" "$PLAN_PATH"`; a non-zero exit → stop with the router's error.
-10. **Done tasks and base.**
-    - Read commits separately with `git log -F --grep="Delivery-Plan: $PLAN_PATH" --format='%H%x00%B%x00'`. Only a commit containing an exact `Delivery-Plan: <PLAN_PATH>` line counts. For each exact `Delivery-Task: <N>` line whose `N` occurs in `TASKS`, require an exact `Delivery-Task-Title: <title>` line in the same commit matching that task's current title byte for byte. A missing or different title → stop with the commit hash, task number, committed title (or `missing`), and plan title; do not mark any task done. Only matched number-and-title pairs mark tasks done. Old delivery commits without a title trailer cannot be resumed without resolving the ambiguity first.
-    - `BASE`: if any matching delivery commits exist, use the parent of the earliest one (`git rev-parse <first>^`); otherwise `BASE=$(git rev-parse HEAD)`.
-11. Any not-done task with stack `split` → stop with `Task <N> touches several stacks (<groups>). Split it in <PLAN_PATH>, commit, then run /delivery:execute <PLAN_PATH>.`
-12. Route every not-done task with **Routing**. For an `unknown` task, `TASK_TEXT` is its `block`. Print the `Routing: task <N> → <agent> (source: <source>)` line for every task in your reply before starting step 2; it is the audit trail of each routing decision.
-13. Every routed agent must be listed among the `task` tool's available agents. A missing one → stop with `Install <plugin>: omp plugin install <plugin>@av-marketplace, then start a new session.` (`<plugin>` is the part before `:`).
-14. `todo init` with one item per not-done task, `Task <N>: <title>`, then `Plan verification` and `Final code review`.
+   `PLAN_PATH=$P`. With `PLAN_FILE`, run `cp "$PLAN_FILE" "$PLAN_PATH"`. Without it, `read <PLAN_SOURCE>:raw` and `write` that exact text to `PLAN_PATH`. The file stays untracked until step 10.
+8. **Plan check.** `CHECK=$(python3 "$ROUTER" check "$REPO" "$PLAN_PATH")`; a non-zero exit → stop with the router's error. When its JSON `problems` list is not empty → stop with one line per problem:
+   ```
+   Delivery cannot run <PLAN_PATH>:
+   - <problem>
+   Fix these tasks in <PLAN_PATH>, then run /delivery:execute <PLAN_PATH>.
+   ```
+   A plan saved in step 7 stays where it is. Entries of `no_files` are not problems: step 14 routes those tasks.
+9. **Delivery branch.** `BRANCH` is `main` or `master` → create the first free delivery branch; the untracked plan comes along.
+   ```bash
+   B="delivery/$SLUG"; n=2
+   while git rev-parse --verify --quiet "refs/heads/$B" >/dev/null; do B="delivery/$SLUG-$n"; n=$((n+1)); done
+   git switch -c "$B"
+   ```
+   `BRANCH` becomes `$B`.
+10. **Commit the plan** when `git status --porcelain -- "$PLAN_PATH"` prints anything. The subject is `docs: update delivery plan <SLUG>` when `git ls-files --error-unmatch -- "$PLAN_PATH"` succeeds, otherwise `docs: add delivery plan <SLUG>`. Run `git add -- "$PLAN_PATH"`, then `git commit -m "<subject>" -- "$PLAN_PATH"`. A failed commit → print git's output and stop.
+11. If `git status --porcelain` prints anything → stop with `Commit or stash your other changes, then run /delivery:execute <PLAN_PATH>.`
+12. `TASKS` = JSON output of `python3 "$ROUTER" plan "$REPO" "$PLAN_PATH"`; a non-zero exit → stop with the router's error.
+13. **Done tasks and base.** `DONE=$(python3 "$ROUTER" done "$REPO" "$PLAN_PATH")`; a non-zero exit → stop with the router's error. When its `conflicts` list is not empty → stop, printing one line per entry: `Task <task> is committed as "<committed_title, or missing>" in <commit>, but <PLAN_PATH> titles it "<plan_title>". Restore the title or drop the commit, then run /delivery:execute <PLAN_PATH>.` Mark no task done on this path. Otherwise the tasks listed in `done` are done and `BASE` is its `base`.
+14. Route every not-done task with **Routing**. For an `unknown` task, `TASK_TEXT` is its `block`. Print the `Routing: task <N> → <agent> (source: <source>)` line for every task in your reply before starting step 2; it is the audit trail of each routing decision.
+15. Every routed agent must be listed among the `task` tool's available agents. A missing one → stop with `Install <plugin>: omp plugin install <plugin>@av-marketplace, then start a new session.` (`<plugin>` is the part before `:`).
+16. `todo init` with one item per not-done task, `Task <N>: <title>`, then `Plan verification` and `Final code review`.
 
 If every task is already done, print `All tasks of <PLAN_PATH> are delivered.` and go to step 3.
 
@@ -65,16 +68,8 @@ For each not-done task, in ascending order of `N`:
 2. Act on the result:
    - `stopped` → run step 4 and end the run;
    - `skipped` → mark the todo item done and note `skipped` in the summary;
-   - `approved` or `accepted-with-open-findings` → commit with `git commit -F -` and exactly this message:
-     ```
-     <the task's commit, or "chore: <title>" when commit is null>
-
-     Delivery-Plan: <PLAN_PATH>
-     Delivery-Task: <N>
-     Delivery-Task-Title: <title>
-     ```
-     For `accepted-with-open-findings`, add the line `Delivery-Review: accepted-with-open-findings` directly after `Delivery-Task-Title: <title>`. Mark the todo item done.
-   - A failed commit (for example a rejecting hook) → print git's output and stop.
+   - `approved` or `accepted-with-open-findings` → commit the staged changes with the router's message: `python3 "$ROUTER" message "$REPO" "$PLAN_PATH" <N> | git commit -F -`; for `accepted-with-open-findings` add `--open-findings` after `<N>`. Mark the todo item done.
+   - A failed commit (for example a rejecting hook, or a router error that leaves the message empty) → print the output and stop.
 
 ### 3. Verification
 
@@ -100,12 +95,13 @@ Mark `Final code review` in progress.
   Changes on branch <BRANCH> in <BASE>..HEAD (git diff <BASE>..HEAD), delivered from <PLAN_PATH>. Review only these changes.
   ```
 
+- If the review saved a report, commit it before anything else touches it: `git add -- "<report path>"`, then `git commit -m "docs: add review of delivery $SLUG" -- "<report path>"`. Commit only that path. If adding or committing fails, print git's output and stop.
+
 Mark `Final code review` done.
 
 ### 6. Fix offer
 
-If the review saved a report, use the `ask` tool: `Run /code-review:fix-all on <report path>?` with options `Yes` and `No`. On `Yes`, `read <code-review root>/commands/fix-all.md` and carry it out completely with `$ARGUMENTS` = the report path.
-After the fix offer (including a declined fix), if the review saved a report, commit its final contents: `git add -- "<report path>"`, then `git commit -m "docs: add review of delivery $SLUG" -- "<report path>"`. Commit only that path, even if `/code-review:fix-all` left other changes staged or unstaged. If adding or committing fails, print git's output and stop. If the review was not saved, do not create a review commit.
+If the review saved a report, use the `ask` tool: `Run /code-review:fix-all on <report path>?` with options `Yes` and `No`. On `Yes`, `read <code-review root>/commands/fix-all.md` and carry it out completely with `$ARGUMENTS` = the report path. Whatever it changes, including the statuses it writes into the report, stays uncommitted: end with `Review fixes are uncommitted; review them and commit.` Without a saved report, end the run.
 
 ## Plugin roots
 
@@ -119,14 +115,18 @@ omp plugin list --json | python3 -c 'import json,sys; want=sys.argv[1:]; d=json.
 - Otherwise `ROUTER` is `<delivery root>/scripts/route_task.py`; use it through `python3 "$ROUTER" ...`.
 - Keep the `code-review` root; `null` means code-review is not installed.
 
-The router prints JSON. Each task entry of `python3 "$ROUTER" plan "$REPO" <plan>` has `task`, `title`, `commit`, `block`, `files`, `stack`, `agent`, `groups`.
+The router prints JSON:
+
+- `check "$REPO" <plan>` → `{"tasks": N, "problems": [...], "no_files": [...]}`. `problems` are plan errors that stop a run; `no_files` names tasks without a **Files:** block, which **Routing** handles.
+- `plan "$REPO" <plan>` → one entry per task with `task`, `title`, `commit`, `block`, `files`, `stack`, `agent`, `groups`.
+- `message "$REPO" <plan> <N> [--open-findings]` → the commit message of task N with its `Delivery-*` trailers.
+- `done "$REPO" <plan>` → `{"done": [...], "conflicts": [...], "base": "<sha>"}` from the branch's delivery commits.
 
 ## Routing
 
 Decide the implementer for each task:
 
 - `stack` is `python`, `frontend`, `php` or `generic` → use the entry's `agent`. Source: `files`.
-- `stack` is `split` → do not route; the Delivery run stops on it.
 - `stack` is `unknown` (the task lists no files):
   1. Run `python3 "$ROUTER" layout "$REPO"` and keep its JSON as `LAYOUT`. If `LAYOUT["stacks"]` is empty → `delivery:implementer`, source `files`.
   2. Otherwise run this in the `eval` tool (python). Set `LAYOUT` to that JSON and `TASK_TEXT` to the task text:
@@ -170,7 +170,7 @@ Routing: task <N> → <agent> (source: <source>)
 
 Inputs: `N`, `TASK_BLOCK`, `AGENT`, `PLAN_PATH`, `BRANCH`. `PLUGIN` is the part of `AGENT` before `:` when `AGENT` is a developer agent (`python-developer`, `frontend-developer`, `php-developer`), otherwise `none`.
 
-Every dispatch below is one `task` tool call with one item. Wait for its result before continuing; if it has not arrived, use `hub` `wait` with the job id. Use this `context` for every item:
+Every dispatch below is one `task` tool call with one item. Its result arrives on its own; if you have nothing else to do until then, call the `wait` tool. Use this `context` for every item:
 
 ```
 Delivery of <PLAN_PATH> on branch <BRANCH>. One task per agent; the orchestrator reviews and commits.
