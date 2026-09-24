@@ -9,6 +9,8 @@ Delivery (`omp/native/delivery/`, OMP-only; 0.3.0 is in the working tree, uncomm
 3. The delivery run commits the review report after `/code-review:fix-all`, so the committed report carries `✅ Fixed` statuses while fix-all leaves the code uncommitted (`plugins-omp/code-review/commands/fix-all.md:579` "Changes remain uncommitted for your control").
 4. OMP 18.3.0 has a `wait` tool and no `hub` tool (`src/tools/builtin-names.ts`; `/hub` is a slash command). `SKILL.md:173` says "use `hub` `wait` with the job id" and `OMP_TOOLS` in `scripts/build_omp_edition.py:72` lists `hub`. The `wait` tool takes no arguments (`waitSchema = type({})`).
 
+Found during delivery: `scripts/build_omp_edition.py` rejects the symlinks of an installed `omp/native/delivery/node_modules` (a link to a global OMP install, or `bun install`'s `.bin/` links), which the local test setup creates; Task 2 fixes that before any later task regenerates the edition with the install present.
+
 Improvements delivered with the fixes: the commit message with its `Delivery-*` trailers and the resume detection move from model-written shell into router subcommands `message` and `done`; `node_modules/` is gitignored and the local delivery test commands are documented; CI checks that `OMP_TOOLS` equals OMP's `BUILTIN_TOOL_NAMES`. End state: delivery 0.4.0, generated edition regenerated, README and guide updated.
 
 Decided, not open: the delivery branch is still created only off `main`/`master`. `/delivery:execute` keeps accepting tasks without a `**Files:**` block (routed by Jev or by asking; documented in the README), while the plan-mode gate keeps rejecting them.
@@ -26,12 +28,12 @@ Routing facts for this repository: the plugin's `.ts` files route to `delivery:i
 - Modify: `.gitignore`
 - Modify: `docs/contributing.md`
 
-Why first: Tasks 4 and 7 run `bun test` with OMP linked into `omp/native/delivery/node_modules`; the ignore rule keeps `git add -A` in the delivery task loop from staging that link.
+Why first: Tasks 5 and 8 run `bun test` with OMP linked into `omp/native/delivery/node_modules`; the ignore rule keeps `git add -A` in the delivery task loop from staging that link. The pattern has no trailing slash: `node_modules/` matches only real directories, not a symlink. Task 2 makes the generator accept that install.
 
 1. In `.gitignore`, insert after the `# Python` block (`__pycache__/`, `*.pyc`, `*.pyo`) and before the `# superpowers SDD scratch` comment, separated by one blank line:
    ```
    # Node packages (the OMP Edition workflow installs OMP under omp/native/delivery/)
-   node_modules/
+   node_modules
    ```
 2. In `docs/contributing.md`, section `## Pull Request Requirements`, insert one bullet directly after the bullet that starts with `- Regenerated OMP edition` and before `- No unrelated changes bundled in the same PR`:
    ```
@@ -40,7 +42,34 @@ Why first: Tasks 4 and 7 run `bun test` with OMP linked into `omp/native/deliver
 
 Check: `git check-ignore -v omp/native/delivery/node_modules/x` prints the new `.gitignore` line; `grep -c 'bun test tests/delivery.test.ts' docs/contributing.md` prints `1`.
 
-### Task 2: Report tasks without files apart from plan problems
+### Task 2: Keep node_modules out of the generator's symlink check
+**Commit:** fix(omp-edition): let a native plugin keep an installed node_modules
+
+**Files:**
+- Modify: `scripts/build_omp_edition.py`
+- Test: `scripts/test_build_omp_edition.py`
+
+Why here: `reject_source_symlinks` (`scripts/build_omp_edition.py`, ~line 278) walks a source tree with `rglob("*")` and raises `symlinks are not allowed in plugin sources` on every symlink it meets. The local delivery test setup documented in Task 1 puts `omp/native/delivery/node_modules` into the tree, either as a symlink to a global OMP install or as a real directory from `bun install`, whose `.bin/` entries are symlinks. With either present, `python3 scripts/build_omp_edition.py` and its `--check` exit 1, and Tasks 5, 6 and 8 regenerate the edition with that install present. `build_native` already leaves every `node_modules` path out of the copy (`native_skipped`); the symlink check must skip the same directories, in native plugin trees only. CI does not hit this today only because its `Check OMP edition` step runs before `Install OMP for delivery hook tests`.
+
+1. Tests first, in `scripts/test_build_omp_edition.py` (`unittest`, run with `python3 scripts/test_build_omp_edition.py`; add `import os` to its imports), reusing `fixture`, `native_fixture` and `put`:
+   - In `TestNative`, `test_native_build_skips_an_installed_node_modules`, two `subTest`s, each in its own `tempfile.TemporaryDirectory()` with `native = native_fixture(root)`:
+     - `linked`: `put(root / "global/pkg/index.js", "installed\n")`, then `(native / "node_modules").symlink_to(root / "global", target_is_directory=True)`;
+     - `installed`: `put(native / "node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js", "cli\n")`, then `(native / "node_modules/.bin").mkdir()` and `(native / "node_modules/.bin/omp").symlink_to("../@oh-my-pi/pi-coding-agent/dist/cli.js")`.
+     In both: `build_native(native, root / "out", set())` does not raise, `(root / "out/native/agents/worker.md").is_file()` is true, and `os.path.lexists(root / "out/native/node_modules")` is false.
+   - In `TestNative`, `test_build_skips_node_modules_under_omp_native`: `fixture(source)`, `native_fixture(source / "omp/native")` (creates `source/omp/native/native`), `put(root / "global/pkg/index.js", "installed\n")`, `(source / "omp/native/native/node_modules").symlink_to(root / "global", target_is_directory=True)`; `build(root / "output", source)` does not raise and `(root / "output/plugins-omp/native/agents/worker.md").is_file()` is true.
+   - In `TestGenerated`, `test_overlaid_plugin_sources_still_reject_a_symlinked_node_modules`: `fixture(source)`, `put(root / "global/pkg/index.js", "installed\n")`, `(source / "plugins/sample/scripts/node_modules").symlink_to(root / "global", target_is_directory=True)`; `build(root / "output", source)` raises `BuildError` matching `symlinks are not allowed`.
+   The existing symlink tests (`test_native_sources_reject_symlinks_even_when_the_target_is_missing`, `test_generated_sources_reject_symlinks_before_copying_or_reading`, `test_generated_sources_reject_symlinked_directories`) stay unchanged and must pass.
+2. Implement in `scripts/build_omp_edition.py`:
+   - add `import os` to the imports, in alphabetical order after `import json`;
+   - directly above `reject_source_symlinks`, add the module constant `NATIVE_SKIPPED_DIRS = frozenset({"node_modules"})`; in `native_skipped`, replace `or "node_modules" in rel.parts` with `or not NATIVE_SKIPPED_DIRS.isdisjoint(rel.parts)`, so the copy filter and the symlink check share one list;
+   - change the signature to `reject_source_symlinks(root: Path, skip_dirs: frozenset[str] = frozenset()) -> None` and its docstring to `Reject links before any source file is opened, including linked directories. Directories named in skip_dirs are neither inspected nor descended.`; keep the `root.is_symlink()` check; replace the `rglob` loop with `for current, dirs, files in os.walk(root):` (default `followlinks=False`), which checks every name in `dirs` and `files` that is not in `skip_dirs` with `(Path(current) / name).is_symlink()` and raises the same `BuildError(f"{path}: symlinks are not allowed in plugin sources")` for that path, then prunes with `dirs[:] = [d for d in dirs if d not in skip_dirs]`. A symlinked directory whose name is not in `skip_dirs` still raises;
+   - pass `NATIVE_SKIPPED_DIRS` at the two native call sites only: in `build_native` (`reject_source_symlinks(src_root, NATIVE_SKIPPED_DIRS)`) and in `build` (`reject_source_symlinks(source_repo / "omp" / "native", NATIVE_SKIPPED_DIRS)`). The calls for `plugins/`, `omp/overlay` and those in `build_generated` keep the default, so overlaid plugins still reject a `node_modules` symlink;
+   - the copy loop in `build_native` (`sorted(src_root.rglob("*"))` filtered by `native_skipped`) stays as it is.
+3. Nothing under `plugins-omp/` changes: this script is not part of the generated edition.
+
+Checks: `python3 scripts/test_build_omp_edition.py` → `OK`; `ln -s "$HOME/.bun/install/global/node_modules" omp/native/delivery/node_modules && python3 scripts/build_omp_edition.py --check` → `OMP edition is up to date`; then `rm omp/native/delivery/node_modules`.
+
+### Task 3: Report tasks without files apart from plan problems
 **Commit:** feat(delivery): report tasks without files apart from plan problems
 
 **Files:**
@@ -48,7 +77,7 @@ Check: `git check-ignore -v omp/native/delivery/node_modules/x` prints the new `
 - Test: `omp/native/delivery/tests/test_route_task.py`
 - Modify: `plugins-omp/delivery/scripts/route_task.py`
 
-Behavior: `route_task.py check <root> <plan.md>` prints `{"tasks": N, "problems": [...], "no_files": [...]}`. `problems` keeps exactly: invalid task heading, empty `**Commit:**`, several stacks, duplicate task numbers. The existing message `Task N (title): lists no files. Add a **Files:** block with "- Create|Modify|Test|Delete: `path`" lines.` moves unchanged from `problems` into the new `no_files` list (same order as the tasks). `plan`, `files` and `layout` do not change. Consumers: the `xd://propose` gate (Task 4) blocks on either list; the preflight (Task 5) stops only on `problems`.
+Behavior: `route_task.py check <root> <plan.md>` prints `{"tasks": N, "problems": [...], "no_files": [...]}`. `problems` keeps exactly: invalid task heading, empty `**Commit:**`, several stacks, duplicate task numbers. The existing message `Task N (title): lists no files. Add a **Files:** block with "- Create|Modify|Test|Delete: `path`" lines.` moves unchanged from `problems` into the new `no_files` list (same order as the tasks). `plan`, `files` and `layout` do not change. Consumers: the `xd://propose` gate (Task 5) blocks on either list; the preflight (Task 6) stops only on `problems`.
 
 The test file is `unittest`, run with `python3 omp/native/delivery/tests/test_route_task.py`; keep that runner and style (no pytest, no new dependencies). Tests first:
 
@@ -63,7 +92,7 @@ The test file is `unittest`, run with `python3 omp/native/delivery/tests/test_ro
 
 Checks: `python3 omp/native/delivery/tests/test_route_task.py` → `OK`; `python3 scripts/build_omp_edition.py --check` → `OMP edition is up to date`.
 
-### Task 3: Router subcommands message and done
+### Task 4: Router subcommands message and done
 **Commit:** feat(delivery): build commit messages and detect delivered tasks in the router
 
 **Files:**
@@ -71,7 +100,7 @@ Checks: `python3 omp/native/delivery/tests/test_route_task.py` → `OK`; `python
 - Test: `omp/native/delivery/tests/test_route_task.py`
 - Modify: `plugins-omp/delivery/scripts/route_task.py`
 
-Two deterministic subcommands (no model, no shell interpolation), consumed by the orchestration skill in Task 5.
+Two deterministic subcommands (no model, no shell interpolation), consumed by the orchestration skill in Task 6.
 
 `route_task.py message <root> <plan.md> <N> [--open-findings]` prints to stdout exactly:
 ```
@@ -110,7 +139,7 @@ Tests first, in `test_route_task.py` (CLI-level, through `run_router`, like `Cli
 
 Checks: `python3 omp/native/delivery/tests/test_route_task.py` → `OK`; `python3 scripts/build_omp_edition.py --check` → up to date.
 
-### Task 4: Warn when approval skips delivery and block plans without a valid task
+### Task 5: Warn when approval skips delivery and block plans without a valid task
 **Commit:** fix(delivery): warn when approval skips delivery and block plans without a valid task
 
 **Files:**
@@ -118,7 +147,7 @@ Checks: `python3 omp/native/delivery/tests/test_route_task.py` → `OK`; `python
 - Test: `omp/native/delivery/tests/delivery.test.ts`
 - Modify: `plugins-omp/delivery/extensions/delivery.ts`
 
-Depends on Task 2 (`no_files` in the `check` JSON). Prerequisite for running the tests: `[ -e omp/native/delivery/node_modules ] || ln -s "$HOME/.bun/install/global/node_modules" omp/native/delivery/node_modules` (that global install holds `@oh-my-pi/pi-coding-agent` 18.3.0 and `@oh-my-pi/pi-tui`; the link is gitignored since Task 1), then `bun test tests/delivery.test.ts` from `omp/native/delivery/`.
+Depends on Task 3 (`no_files` in the `check` JSON). Prerequisite for running the tests: `[ -e omp/native/delivery/node_modules ] || ln -s "$HOME/.bun/install/global/node_modules" omp/native/delivery/node_modules` (that global install holds `@oh-my-pi/pi-coding-agent` 18.3.0 and `@oh-my-pi/pi-tui`; the link is gitignored since Task 1, and the generator skips it since Task 2), then `bun test tests/delivery.test.ts` from `omp/native/delivery/`.
 
 Changes in `delivery.ts` (keep the current order of checks):
 
@@ -141,14 +170,14 @@ Then `python3 scripts/build_omp_edition.py`.
 
 Checks: `bun test tests/delivery.test.ts` (from `omp/native/delivery/`) → `9 pass`, `0 fail`; `python3 scripts/build_omp_edition.py --check` → up to date.
 
-### Task 5: Orchestration: check before branching, router-built commits and resume, review commit before the fix offer, wait tool
+### Task 6: Orchestration: check before branching, router-built commits and resume, review commit before the fix offer, wait tool
 **Commit:** feat(delivery): stop on every plan problem before branching and commit the review before the fix offer
 
 **Files:**
 - Modify: `omp/native/delivery/skills/orchestration/SKILL.md`
 - Modify: `plugins-omp/delivery/skills/orchestration/SKILL.md`
 
-Depends on Tasks 2 and 3. Edit `omp/native/delivery/skills/orchestration/SKILL.md`; everything not named below stays byte-identical. The fenced blocks below are quoted with `~~~` only to carry them in this plan: copy their content without the outer `~~~` lines.
+Depends on Tasks 3 and 4. Edit `omp/native/delivery/skills/orchestration/SKILL.md`; everything not named below stays byte-identical. The fenced blocks below are quoted with `~~~` only to carry them in this plan: copy their content without the outer `~~~` lines.
 
 A. Replace the whole `### 1. Preflight` section (from that heading up to, not including, `### 2. Tasks`) with:
 
@@ -240,7 +269,7 @@ Then `python3 scripts/build_omp_edition.py`.
 
 Checks: `grep -n 'hub\|steps 11\|touches several stacks (<groups>)' omp/native/delivery/skills/orchestration/SKILL.md` prints nothing; `grep -c '"\$ROUTER" message\|"\$ROUTER" done\|"\$ROUTER" check' omp/native/delivery/skills/orchestration/SKILL.md` prints `3` or more; `python3 scripts/build_omp_edition.py --check` → up to date.
 
-### Task 6: OMP_TOOLS names wait, and a checker compares it with OMP
+### Task 7: OMP_TOOLS names wait, and a checker compares it with OMP
 **Commit:** fix(omp-edition): replace hub with wait in OMP_TOOLS and check it against OMP
 
 **Files:**
@@ -265,7 +294,7 @@ No equivalent checker exists; `OMP_TOOLS` is only ever compared by hand.
 
 Checks: `python3 scripts/test_check_omp_tools.py` → `OK`; `python3 scripts/test_build_omp_edition.py` → `OK`; `python3 scripts/check_omp_tools.py "$HOME/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent"` → exit 0 and `OMP_TOOLS matches OMP 18.3.0 (29 tools)`; `python3 scripts/build_omp_edition.py --check` → up to date.
 
-### Task 7: CI tool check, guide and README updates, delivery 0.4.0
+### Task 8: CI tool check, guide and README updates, delivery 0.4.0
 **Commit:** chore(delivery): release 0.4.0, check OMP_TOOLS in CI, update the guide
 
 **Files:**
@@ -278,7 +307,7 @@ Checks: `python3 scripts/test_check_omp_tools.py` → `OK`; `python3 scripts/tes
 - Modify: `plugins-omp/delivery/.omp-plugin/plugin.json`
 - Modify: `plugins-omp/delivery/package.json`
 
-Depends on Task 6 (the script) and Task 5 (the behavior described).
+Depends on Task 7 (the script) and Task 6 (the behavior described).
 
 1. `.github/workflows/omp-edition.yml`: directly after the step `Install OMP for delivery hook tests` and before `Test delivery hooks against OMP`, add:
    ```yaml
@@ -316,13 +345,13 @@ Checks: `python3 scripts/build_omp_edition.py --check` → up to date; `grep -c 
 
 ## Verification
 
-Run from the repository root on the delivery branch after Task 7:
+Run from the repository root on the delivery branch after Task 8:
 
 1. `python3 scripts/build_omp_edition.py --check` → `OMP edition is up to date`.
 2. `python3 omp/native/delivery/tests/test_route_task.py` → ends with `OK`, no failures or errors.
 3. `python3 scripts/test_build_omp_edition.py && python3 scripts/test_check_omp_tools.py` → both end with `OK`.
 4. `python3 scripts/check_omp_tools.py "$HOME/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent"` → exit 0, prints `OMP_TOOLS matches OMP 18.3.0 (29 tools)`.
-5. Hook tests: `[ -e omp/native/delivery/node_modules ] || ln -s "$HOME/.bun/install/global/node_modules" omp/native/delivery/node_modules`, then `bun test tests/delivery.test.ts` in `omp/native/delivery/` → `9 pass`, `0 fail`.
+5. Hook tests: `[ -e omp/native/delivery/node_modules ] || ln -s "$HOME/.bun/install/global/node_modules" omp/native/delivery/node_modules`, then `bun test tests/delivery.test.ts` in `omp/native/delivery/` → `9 pass`, `0 fail`; with the link still present, `python3 scripts/build_omp_edition.py --check` from the repository root → `OMP edition is up to date`.
 6. A malformed heading is reported, not dropped. Write `/tmp/dlv-check.md` with:
    ```
    # P
@@ -338,13 +367,13 @@ Run from the repository root on the delivery branch after Task 7:
    `python3 omp/native/delivery/scripts/route_task.py check . /tmp/dlv-check.md` → `{"tasks": 1, "problems": ["Invalid task heading '### Task 2 - Document search'. Use '### Task N: <title>' on one line."], "no_files": []}`.
 7. `message` and `done` against this delivery's own commits: `P=$(ls docs/plans/*-delivery-hardening*.md | head -1)`.
    - `python3 omp/native/delivery/scripts/route_task.py message . "$P" 1` prints `chore(delivery): ignore node_modules and document the local test commands`, an empty line, `Delivery-Plan: $P`, `Delivery-Task: 1`, `Delivery-Task-Title: Ignore node_modules and document the local delivery tests`.
-   - `python3 omp/native/delivery/scripts/route_task.py done . "$P"` prints `done` = `[1, 2, 3, 4, 5, 6, 7]`, `conflicts` = `[]`, and `base` equal to `git log --format=%H --grep='docs: add delivery plan delivery-hardening' -1` (the plan commit is the parent of the first task commit).
+   - `python3 omp/native/delivery/scripts/route_task.py done . "$P"` prints `done` = `[1, 2, 3, 4, 5, 6, 7, 8]`, `conflicts` = `[]`, and `base` equal to `git rev-parse "$(git log --format=%H -F --grep='Delivery-Task-Title: Ignore node_modules and document the local delivery tests' -1)^"` (the parent of the Task 1 commit).
 8. `git status --porcelain` prints nothing (the `node_modules` link is ignored).
 9. Manual, in a fresh OMP session after `omp plugin install delivery@av-marketplace` picks up 0.4.0, in the fixture `/tmp/delivery-e2e` (clean, on `main`): (a) in plan mode, write a plan whose only heading is `### Task 1 - Bad` and propose it → the proposal is rejected with `Invalid task heading`; (b) approve a two-task plan whose Task 2 title contains backticks (for example `Rename \`foo\``), interrupt the session after Task 1's commit, run `/delivery:execute <PLAN_PATH>` → Task 1 is skipped as done, Task 2's commit body carries `Delivery-Task-Title: Rename \`foo\`` verbatim; (c) save the review report and answer `Yes` to the fix offer → `git log --format=%s` shows `docs: add review of delivery <slug>` on top, and `git status --porcelain` lists the report and the files fix-all changed as uncommitted.
 
 ## Assumptions & contingencies
 
-- Version bump is `0.4.0` (behavior changes and new router subcommands). If it should fold into the uncommitted 0.3.0 instead, keep `0.3.0` and skip step 4 of Task 7.
+- Version bump is `0.4.0` (behavior changes and new router subcommands). If it should fold into the uncommitted 0.3.0 instead, keep `0.3.0` and skip step 4 of Task 8.
 - OMP 18.3.0 is globally installed at `~/.bun/install/global/node_modules` with `@oh-my-pi/pi-coding-agent` and `@oh-my-pi/pi-tui`. If that directory is missing, run the CI command `bun install --no-save --cwd omp/native/delivery @oh-my-pi/pi-coding-agent@latest` (verified with `--dry-run` on 2026-09-24) instead of the symlink; both land in the gitignored `node_modules/`.
 - Verification step 4 expects `29 tools`; if the global OMP is newer than 18.3.0 and the check exits 1, that is the checker doing its job: report the difference as a `fail` with the names, do not edit `OMP_TOOLS` during verification.
 - The delivery of this plan runs on the installed delivery 0.3.0, so its own commits are made by the 0.3.0 procedure; Verification step 7 depends only on the trailer lines, which 0.3.0 and 0.4.0 write identically.
