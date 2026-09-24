@@ -5,6 +5,7 @@
  * - `write xd://propose`: rejects a plan whose `### Task` blocks the router cannot route.
  * - Plan approval (the interactive "Plan approved." prompt): when the plan has `### Task`
  *   headings, adds a message that hands it to the Delivery run of skill://delivery:orchestration.
+ * - Plan approval that cannot start delivery (missing plan file, failed check, no valid task) warns instead of staying silent.
  */
 import { existsSync } from "node:fs";
 import * as path from "node:path";
@@ -15,6 +16,7 @@ import approvedPlanPrompt from "@oh-my-pi/pi-coding-agent/prompts/system/plan-mo
 import { parseXdUrl } from "@oh-my-pi/pi-tui/tools/xd-url";
 
 const ROUTER = path.join(import.meta.dir, "..", "scripts", "route_task.py");
+type PlanCheck = { tasks: number; problems: string[]; no_files: string[] };
 const APPROVED_PLAN_PREFIX = approvedPlanPrompt.split("\n", 1)[0];
 const APPROVED_PLAN_TAG = approvedPlanPrompt.match(/^<plan path="\{\{planFilePath\}\}">$/m)?.[0];
 
@@ -52,7 +54,7 @@ async function gitRoot(pi: ExtensionAPI, cwd: string): Promise<string | undefine
 	}
 }
 
-async function checkPlan(pi: ExtensionAPI, root: string, file: string): Promise<{ tasks: number; problems: string[] }> {
+async function checkPlan(pi: ExtensionAPI, root: string, file: string): Promise<PlanCheck> {
 	const { code, stdout, stderr } = await pi.exec("python3", [ROUTER, "check", root, file], { timeout: 10_000 });
 	if (code !== 0) throw new Error(`${ROUTER}: ${stderr.trim() || `exit code ${code}`}`);
 	return JSON.parse(stdout);
@@ -111,14 +113,23 @@ export default function deliveryExtension(pi: ExtensionAPI): void {
 			return undefined;
 		}
 		const file = url.startsWith("local:") ? localPath(url, ctx) : path.resolve(ctx.cwd, url);
-		if (!file || !existsSync(file)) return undefined;
-		let tasks: number;
-		try {
-			({ tasks } = await checkPlan(pi, root, file));
-		} catch {
+		if (!file || !existsSync(file)) {
+			ctx.ui.notify(`Delivery skipped: plan file not found for ${url}. The plan runs without delivery.`, "warning");
 			return undefined;
 		}
-		if (tasks === 0) return undefined;
+		let tasks: number;
+		let problems: string[];
+		try {
+			({ tasks, problems } = await checkPlan(pi, root, file));
+		} catch (error) {
+			ctx.ui.notify(`Delivery skipped: plan check failed for ${url}: ${String(error)}. The plan runs without delivery.`, "warning");
+			return undefined;
+		}
+		if (tasks === 0) {
+			if (problems.length > 0)
+				ctx.ui.notify(`Delivery skipped: ${url} has no valid task heading. ${problems.join(" ")} The plan runs without delivery.`, "warning");
+			return undefined;
+		}
 		ctx.ui.notify(`Delivery: ${tasks} task(s) — starting the delivery run.`, "info");
 		return {
 			message: {
@@ -152,19 +163,20 @@ export default function deliveryExtension(pi: ExtensionAPI): void {
 		}
 		const root = await gitRoot(pi, ctx.cwd);
 		if (!root) return undefined;
-		let result: { tasks: number; problems: string[] };
+		let result: PlanCheck;
 		try {
 			result = await checkPlan(pi, root, file);
 		} catch (error) {
 			ctx.ui.notify(`Delivery plan check skipped: router failed for ${url}: ${String(error)}`, "warning");
 			return undefined;
 		}
-		if (result.tasks === 0 || result.problems.length === 0) return undefined;
+		const violations = [...result.problems, ...result.no_files];
+		if (violations.length === 0) return undefined;
 		return {
 			block: true,
 			reason: [
 				`Delivery plan check failed for ${url}:`,
-				...result.problems.map(problem => `- ${problem}`),
+				...violations.map(problem => `- ${problem}`),
 				"Fix these tasks in the plan file, then write the slug to xd://propose again.",
 			].join("\n"),
 		};

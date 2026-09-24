@@ -131,3 +131,43 @@ test("approved task-free plan does not start delivery", async () => {
 	expect(await callHook("before_agent_start", { prompt, systemPrompt: [] })).toBeUndefined();
 	expect(notifications).toEqual([]);
 });
+
+test("approval warns when the plan file is missing", async () => {
+	const url = "local://gone-plan.md";
+	const prompt = approvedPlanPrompt.replaceAll("{{planFilePath}}", url).replace("{{planContent}}", validPlan);
+	expect(await callHook("before_agent_start", { prompt, systemPrompt: [] })).toBeUndefined();
+	expect(notifications[0]).toContain("Delivery skipped: plan file not found for local://gone-plan.md");
+	expect(notificationLevels[0]).toBe("warning");
+});
+
+test("approval warns when the router fails", async () => {
+	const url = "local://feature-plan.md";
+	writeFileSync(join(artifacts, "local", "feature-plan.md"), validPlan);
+	const prompt = approvedPlanPrompt.replaceAll("{{planFilePath}}", url).replace("{{planContent}}", validPlan);
+	const realExec = execute;
+	execute = async (command, args, options) => {
+		const result = await realExec(command, args, options);
+		return command === "python3" ? { ...result, code: 1 } : result;
+	};
+	expect(await callHook("before_agent_start", { prompt, systemPrompt: [] })).toBeUndefined();
+	expect(notifications[0]).toContain("Delivery skipped: plan check failed for local://feature-plan.md");
+});
+
+test("xd://propose blocks a plan whose only task heading is malformed", async () => {
+	const badPlan = "# Plan\n\n### Task 1 - Docs\n**Files:**\n- Modify: `README.md`\n";
+	writeFileSync(join(artifacts, "local", "bad-plan.md"), badPlan);
+	const result = await callHook("tool_call", { toolName: "write", input: { path: "xd://propose", content: "bad" } }) as { block: boolean; reason: string };
+	expect(result.block).toBe(true);
+	expect(result.reason).toContain("Invalid task heading");
+});
+
+test("approval warns and skips a plan whose only task heading is malformed", async () => {
+	const url = "local://bad-plan.md";
+	const badPlan = "# Plan\n\n### Task 1 - Docs\n**Files:**\n- Modify: `README.md`\n";
+	writeFileSync(join(artifacts, "local", "bad-plan.md"), badPlan);
+	const prompt = approvedPlanPrompt.replaceAll("{{planFilePath}}", url).replace("{{planContent}}", badPlan);
+	expect(await callHook("before_agent_start", { prompt, systemPrompt: [] })).toBeUndefined();
+	expect(notifications[0]).toContain("has no valid task heading");
+	expect(notifications[0]).toContain("Invalid task heading");
+	expect(notificationLevels[0]).toBe("warning");
+});
