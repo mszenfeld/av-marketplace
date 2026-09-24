@@ -28,7 +28,7 @@ Write a failing search test first, implement the search endpoint, then remove th
 
 Number tasks 1, 2, 3… in execution order, each number exactly once; put producers before consumers. Every file change belongs to a task: text outside task blocks is context, not implementation work. List every file the task will create, modify, test, or delete under `**Files:**`, with repository-relative paths in backticks. The file list determines the implementer. Keep one stack per task (Python, React/TypeScript frontend, PHP, or other files such as docs and CI); split work spanning stacks into separate tasks. Each task must stand alone and name any functions, types, or signatures later tasks depend on. Do not put `##` or `###` headings inside a task outside fenced code blocks: the next heading ends that task.
 
-`**Commit:**` is optional; without it, the task commit subject is `chore: <title>`. After the last task, an optional `## Verification` section lists checks Delivery runs in order. A plan with no `### Task` headings runs without Delivery. In plan mode, proposing a plan checks its task format; `/delivery:execute` runs the plan file, so check a hand-written plan against these rules before starting.
+`**Commit:**` is optional; without it, the task commit subject is `chore: <title>`. After the last task, an optional `## Verification` section lists checks Delivery runs in order. A plan with no `### Task` headings runs without Delivery. Proposing a plan in plan mode rejects it, listing every violation, when a task heading is malformed, a task lists no files or touches several stacks, a `**Commit:**` line is empty, or a task number repeats. `/delivery:execute` runs the same check before it creates a branch or commits anything and stops with the same list; the one difference is a task without a `**Files:**` block, which `/delivery:execute` accepts and routes by asking Jev, or you (see the README).
 
 ## Branch and plan location
 
@@ -42,8 +42,10 @@ Run in a git repository on a checked-out branch. At detached HEAD, Delivery stop
 
 Each task commit carries `Delivery-Plan: <PLAN_PATH>`, `Delivery-Task: <N>`, and `Delivery-Task-Title: <title>`. If you choose to accept unresolved review findings, it also carries `Delivery-Review: accepted-with-open-findings`.
 
-To resume, run `/delivery:execute <PLAN_PATH>`. Delivery skips a task only if a commit for that exact plan path contains both its task number and exactly the same task title as the current plan. If a task number matches but the title differs (or the title trailer is missing), Delivery stops and shows the commit, task number, committed title, and plan title rather than silently treating the task as done.
+To resume, run `/delivery:execute <PLAN_PATH>`. Delivery skips a task only if a commit for that exact plan path contains both its task number and exactly the same task title as the current plan. If a task number matches but the title differs (or the title trailer is missing), Delivery stops and shows the commit, task number, committed title, and plan title rather than silently treating the task as done. The stop message names them: `Task N is committed as "<committed title>" in <commit>, but <plan> titles it "<plan title>"`.
 
 ## Review and fix rounds
 
 Every task is reviewed before its commit. Findings marked `critical` or `important` return to the same implementing agent for up to 3 fix rounds, with another review after each round. If blocking findings remain, choose `Accept and commit with open findings` or `Stop delivery`. Accepted open findings add the review trailer above; stopping leaves the delivery unfinished.
+
+When the final review saves a report, Delivery commits it alone as `docs: add review of delivery <slug>` before offering `/code-review:fix-all`. Whatever fix-all changes, including the statuses it writes into the report, stays uncommitted for you to review and commit.
