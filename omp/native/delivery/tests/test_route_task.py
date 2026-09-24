@@ -16,7 +16,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from route_task import check, layout, parse_plan, route  # noqa: E402
+from route_task import check, layout, parse_plan, route, scan_delivery_log  # noqa: E402
 
 ROUTER = SCRIPTS / "route_task.py"
 
@@ -400,6 +400,37 @@ class MessageTest(RoutingFixture):
         self.assertIn("Task 1 appears 2 times", result.stderr)
 
 
+class ScanDeliveryLogTest(unittest.TestCase):
+    def test_exact_plan_and_titles_with_conflicts(self) -> None:
+        rel = "docs/plans/plan.md"
+        titles = {1: "Orders endpoint", 2: "Docs"}
+        log = (
+            "other\0feat: other\n\nDelivery-Plan: docs/plans/plan.md.bak\n"
+            "Delivery-Task: 1\nDelivery-Task-Title: Orders endpoint\n\0\n"
+            "first\0feat: docs\n\nDelivery-Plan: docs/plans/plan.md\n"
+            "Delivery-Task: 2\nDelivery-Task-Title: Docs\n\0\n"
+            "unknown\0Delivery-Plan: docs/plans/plan.md\nDelivery-Task: 9\n"
+            "Delivery-Task-Title: Other\n\0\n"
+            "changed\0Delivery-Plan: docs/plans/plan.md\nDelivery-Task: 1\n"
+            "Delivery-Task-Title: Old name\n\0\n"
+            "missing\0Delivery-Plan: docs/plans/plan.md\nDelivery-Task: 1\n\0\n"
+            "matched\0Delivery-Plan: docs/plans/plan.md\nDelivery-Task: 1\n"
+            "Delivery-Task-Title: Orders endpoint\n\0\n"
+        )
+
+        done, conflicts, first = scan_delivery_log(log, rel, titles)
+
+        self.assertEqual(done, {1, 2})
+        self.assertEqual(conflicts, [
+            {"commit": "changed", "task": 1, "committed_title": "Old name", "plan_title": "Orders endpoint"},
+            {"commit": "missing", "task": 1, "committed_title": None, "plan_title": "Orders endpoint"},
+        ])
+        self.assertEqual(first, "first")
+
+    def test_empty_log_has_no_first_commit(self) -> None:
+        self.assertEqual(scan_delivery_log("", "docs/plans/plan.md", {1: "Orders"}), (set(), [], None))
+
+
 class DoneTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -443,20 +474,6 @@ class DoneTest(unittest.TestCase):
         self.commit(self.root, self.delivery_message(1, "Orders endpoint"))
         self.assertEqual(self.done(), {"done": [1], "conflicts": [], "base": self.initial})
 
-    def test_done_reports_changed_title_as_conflict(self) -> None:
-        sha = self.commit(self.root, self.delivery_message(1, "Old name"))
-        self.assertEqual(self.done(), {
-            "done": [],
-            "conflicts": [{"commit": sha, "task": 1, "committed_title": "Old name", "plan_title": "Orders endpoint"}],
-            "base": self.initial,
-        })
-
-    def test_done_reports_missing_title_as_conflict(self) -> None:
-        sha = self.commit(self.root, self.delivery_message(1, None))
-        self.assertEqual(self.done()["conflicts"], [
-            {"commit": sha, "task": 1, "committed_title": None, "plan_title": "Orders endpoint"},
-        ])
-
     def test_done_ignores_signature_output_from_git_log(self) -> None:
         signing_key = self.root / ".git" / "signing-key"
         subprocess.run(
@@ -494,6 +511,15 @@ class DoneTest(unittest.TestCase):
         write(self.root, "docs/plans/plan.md", "### Task 1: Rename `foo`\n")
         self.commit(self.root, self.delivery_message(1, "Rename `foo`"))
         self.assertEqual(self.done(), {"done": [1], "conflicts": [], "base": self.initial})
+
+    def test_done_preserves_unicode_line_separator_in_title(self) -> None:
+        title = "A\u2028B"
+        write(self.root, "docs/plans/plan.md", f"### Task 1: {title}\n")
+        message = self.run_router("message", str(self.root), "docs/plans/plan.md", "1")
+        self.assertEqual(message.returncode, 0, message.stderr)
+        self.commit(self.root, message.stdout)
+        self.assertEqual(self.done(), {"done": [1], "conflicts": [], "base": self.initial})
+
 
     def test_done_reports_git_failure(self) -> None:
         with tempfile.TemporaryDirectory() as elsewhere:

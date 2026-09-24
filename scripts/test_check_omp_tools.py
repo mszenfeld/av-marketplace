@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -70,6 +71,51 @@ class CheckerTest(unittest.TestCase):
 
                 self.assertEqual(result, 1)
                 self.assertIn(expected, stderr.getvalue())
+
+    def test_unreadable_tool_list_reports_configuration_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package(root, OMP_TOOLS)
+            names_file = root / "src/tools/builtin-names.ts"
+            names_file.write_text('export const BUILTIN_TOOL_NAMES: readonly string[] = ["read"];\n')
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                result = main([str(root)])
+
+            self.assertEqual(result, 2)
+            self.assertIn(f"{names_file}: BUILTIN_TOOL_NAMES not found", stderr.getvalue())
+            self.assertIn("update NAMES in scripts/check_omp_tools.py", stderr.getvalue())
+
+    def test_cli_returns_two_without_traceback_for_unreadable_tool_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package(root, OMP_TOOLS)
+            (root / "src/tools/builtin-names.ts").write_text(
+                'export const BUILTIN_TOOL_NAMES: readonly string[] = ["read"];\n'
+            )
+            result = subprocess.run(
+                [sys.executable, str(Path(__file__).with_name("check_omp_tools.py")), str(root)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("BUILTIN_TOOL_NAMES not found", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+
+
+    def test_missing_manifest_version_uses_unknown_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package(root, OMP_TOOLS)
+            (root / "package.json").write_text("{}")
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                result = main([str(root)])
+
+            self.assertEqual(result, 0)
+            self.assertEqual(stdout.getvalue(), f"OMP_TOOLS matches OMP ? ({len(OMP_TOOLS)} tools)\n")
 
     def test_missing_installation_explains_how_to_install(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

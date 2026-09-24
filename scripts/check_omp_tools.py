@@ -3,7 +3,7 @@
 
 Usage: check_omp_tools.py [<pi-coding-agent package dir>]
 Default: omp/native/delivery/node_modules/@oh-my-pi/pi-coding-agent
-Exit codes: 0 for a match, 1 for a mismatch, 2 when OMP is not installed.
+Exit codes: 0 for a match, 1 for a mismatch, 2 when OMP is not installed or its tool list cannot be read.
 """
 
 from __future__ import annotations
@@ -39,8 +39,12 @@ def main(argv: list[str]) -> int:
         return 2
 
     manifest = package / "package.json"
-    version = json.loads(manifest.read_text())["version"] if manifest.is_file() else "?"
-    installed = builtin_tool_names(names_file.read_text())
+    version = json.loads(manifest.read_text()).get("version", "?") if manifest.is_file() else "?"
+    try:
+        installed = builtin_tool_names(names_file.read_text())
+    except ValueError as error:
+        sys.stderr.write(f"{names_file}: {error}; update NAMES in scripts/check_omp_tools.py\n")
+        return 2
     if installed == OMP_TOOLS:
         sys.stdout.write(f"OMP_TOOLS matches OMP {version} ({len(OMP_TOOLS)} tools)\n")
         return 0

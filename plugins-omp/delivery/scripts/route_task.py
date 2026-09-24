@@ -272,24 +272,15 @@ def commit_message(rel: str, tasks: list[dict], number: int, open_findings: bool
     return "\n".join(lines) + "\n"
 
 
-def delivered(root: Path, rel: str, tasks: list[dict]) -> dict:
-    """Find delivered tasks by exact plan and task trailers in git history."""
-    log = subprocess.run(
-        ["git", "-C", str(root), "log", "--no-show-signature", "--topo-order", "--reverse", "-F",
-         f"--grep=Delivery-Plan: {rel}", "--format=%H%x00%B%x00"],
-        capture_output=True, text=True,
-    )
-    if log.returncode != 0:
-        raise RuntimeError(log.stderr.strip())
-
-    titles = {task["task"]: task["title"] for task in tasks}
+def scan_delivery_log(log: str, rel: str, titles: dict[int, str]) -> tuple[set[int], list[dict], str | None]:
+    """Parse git log's NUL-delimited commit bodies without I/O."""
     done: set[int] = set()
     conflicts = []
     first_commit = None
-    entries = log.stdout.split("\0")
+    entries = log.split("\0")
     for index in range(0, len(entries) - 1, 2):
         sha = entries[index].strip()
-        lines = entries[index + 1].splitlines()
+        lines = entries[index + 1].split("\n")
         if f"Delivery-Plan: {rel}" not in lines:
             continue
         if first_commit is None:
@@ -316,6 +307,22 @@ def delivered(root: Path, rel: str, tasks: list[dict]) -> dict:
                     "plan_title": titles[number],
                 })
 
+    return done, conflicts, first_commit
+
+
+def delivered(root: Path, rel: str, tasks: list[dict]) -> dict:
+    """Find delivered tasks by exact plan and task trailers in git history."""
+    log = subprocess.run(
+        ["git", "-C", str(root), "log", "--no-show-signature", "--topo-order", "--reverse", "-F",
+         f"--grep=Delivery-Plan: {rel}", "--format=%H%x00%B%x00"],
+        capture_output=True, text=True,
+    )
+    if log.returncode != 0:
+        raise RuntimeError(log.stderr.strip())
+
+    done, conflicts, first_commit = scan_delivery_log(
+        log.stdout, rel, {task["task"]: task["title"] for task in tasks},
+    )
     base_ref = f"{first_commit}^" if first_commit is not None else "HEAD"
     base = subprocess.run(
         ["git", "-C", str(root), "rev-parse", base_ref],

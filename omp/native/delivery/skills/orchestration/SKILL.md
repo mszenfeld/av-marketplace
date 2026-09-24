@@ -36,7 +36,7 @@ Run the steps in order. Every `stop` prints its message and ends the run.
    mkdir -p docs/plans
    ```
    `PLAN_PATH=$P`. With `PLAN_FILE`, run `cp "$PLAN_FILE" "$PLAN_PATH"`. Without it, `read <PLAN_SOURCE>:raw` and `write` that exact text to `PLAN_PATH`. The file stays untracked until step 10.
-8. **Plan check.** `CHECK=$(python3 "$ROUTER" check "$REPO" "$PLAN_PATH")`; a non-zero exit → stop with the router's error. When its JSON `problems` list is not empty → stop with one line per problem:
+8. **Plan check.** `CHECK=$(python3 "$ROUTER" check "$REPO" "$PLAN_PATH")`; a non-zero exit → stop with the router's error. When its JSON `tasks` is 0 → stop with `Delivery cannot run <PLAN_PATH>: it has no '### Task N: <title>' headings.` When its JSON `problems` list is not empty → stop with one line per problem:
    ```
    Delivery cannot run <PLAN_PATH>:
    - <problem>
@@ -68,8 +68,8 @@ For each not-done task, in ascending order of `N`:
 2. Act on the result:
    - `stopped` → run step 4 and end the run;
    - `skipped` → mark the todo item done and note `skipped` in the summary;
-   - `approved` or `accepted-with-open-findings` → commit the staged changes with the router's message: `python3 "$ROUTER" message "$REPO" "$PLAN_PATH" <N> | git commit -F -`; for `accepted-with-open-findings` add `--open-findings` after `<N>`. Mark the todo item done.
-   - A failed commit (for example a rejecting hook, or a router error that leaves the message empty) → print the output and stop.
+   - `approved` or `accepted-with-open-findings` → build the commit message first: `MSG=$(python3 "$ROUTER" message "$REPO" "$PLAN_PATH" <N>)`; for `accepted-with-open-findings` add `--open-findings` after `<N>`. A non-zero router exit → print the router's error and stop without committing. Otherwise commit the staged changes with `printf '%s' "$MSG" | git commit -F -`. Mark the todo item done only after the commit succeeds.
+   - A failed commit (for example a rejecting hook) → print git's output and stop.
 
 ### 3. Verification
 
