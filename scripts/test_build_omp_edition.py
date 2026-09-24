@@ -7,6 +7,7 @@ Run: python3 scripts/test_build_omp_edition.py
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -247,6 +248,19 @@ class TestGenerated(unittest.TestCase):
             with self.assertRaisesRegex(BuildError, "symlinks are not allowed"):
                 build(root / "output", source)
 
+    def test_overlaid_plugin_sources_still_reject_a_symlinked_node_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            fixture(source)
+            put(root / "global/pkg/index.js", "installed\n")
+            (source / "plugins/sample/scripts/node_modules").symlink_to(
+                root / "global", target_is_directory=True
+            )
+
+            with self.assertRaisesRegex(BuildError, "symlinks are not allowed"):
+                build(root / "output", source)
+
     def test_regeneration_rejects_symlinked_output_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -317,6 +331,37 @@ class TestNative(unittest.TestCase):
                 with self.subTest(path=rel):
                     self.assertFalse((root / "out/native" / rel).exists())
             self.assertEqual((root / "out/native/scripts/run.js").read_text(), "console.log('run')\n")
+
+    def test_native_build_skips_an_installed_node_modules(self) -> None:
+        for mode in ("linked", "installed"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                native = native_fixture(root)
+                if mode == "linked":
+                    put(root / "global/pkg/index.js", "installed\n")
+                    (native / "node_modules").symlink_to(root / "global", target_is_directory=True)
+                else:
+                    put(native / "node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js", "cli\n")
+                    (native / "node_modules/.bin").mkdir()
+                    (native / "node_modules/.bin/omp").symlink_to(
+                        "../@oh-my-pi/pi-coding-agent/dist/cli.js"
+                    )
+
+                build_native(native, root / "out", set())
+                self.assertTrue((root / "out/native/agents/worker.md").is_file())
+                self.assertFalse(os.path.lexists(root / "out/native/node_modules"))
+
+    def test_build_skips_node_modules_under_omp_native(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            fixture(source)
+            native = native_fixture(source / "omp/native")
+            put(root / "global/pkg/index.js", "installed\n")
+            (native / "node_modules").symlink_to(root / "global", target_is_directory=True)
+
+            build(root / "output", source)
+            self.assertTrue((root / "output/plugins-omp/native/agents/worker.md").is_file())
 
     def test_native_sources_reject_symlinks_even_when_the_target_is_missing(self):
         for target_exists in (True, False):

@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import filecmp
 import json
+import os
 import re
 import shutil
 import sys
@@ -275,13 +276,23 @@ def build_command(src: Path, plugin: str, preamble: str, src_root: Path) -> str:
     return render(kept, preamble.format(plugin=plugin, relpath=relpath), body)
 
 
-def reject_source_symlinks(root: Path) -> None:
-    """Reject links before any source file is opened, including linked directories."""
+NATIVE_SKIPPED_DIRS = frozenset({"node_modules"})
+
+
+def reject_source_symlinks(root: Path, skip_dirs: frozenset[str] = frozenset()) -> None:
+    """Reject links before any source file is opened, including linked directories.
+
+    Directories named in skip_dirs are neither inspected nor descended.
+    """
     if root.is_symlink():
         raise BuildError(f"{root}: symlinks are not allowed in plugin sources")
-    for path in root.rglob("*"):
-        if path.is_symlink():
-            raise BuildError(f"{path}: symlinks are not allowed in plugin sources")
+    for current, dirs, files in os.walk(root):
+        for name in (*dirs, *files):
+            if name not in skip_dirs:
+                path = Path(current) / name
+                if path.is_symlink():
+                    raise BuildError(f"{path}: symlinks are not allowed in plugin sources")
+        dirs[:] = [name for name in dirs if name not in skip_dirs]
 
 
 def guarded(path: Path, out_root: Path) -> Path:
@@ -308,7 +319,7 @@ def native_skipped(rel: Path) -> bool:
     return (
         rel.parts[0] == "tests"
         or "__pycache__" in rel.parts
-        or "node_modules" in rel.parts
+        or not NATIVE_SKIPPED_DIRS.isdisjoint(rel.parts)
         or rel.name in {"bun.lock", "bun.lockb", "package-lock.json"}
         or rel.suffix == ".pyc"
         or rel.name == ".DS_Store"
@@ -317,7 +328,7 @@ def native_skipped(rel: Path) -> bool:
 
 def build_native(src_root: Path, out_root: Path, taken: set[str]) -> dict:
     """Copy an OMP-only plugin and return its catalog entry."""
-    reject_source_symlinks(src_root)
+    reject_source_symlinks(src_root, NATIVE_SKIPPED_DIRS)
     manifest_path = src_root / ".omp-plugin" / "plugin.json"
     if not manifest_path.is_file():
         raise BuildError(f"{src_root}: missing .omp-plugin/plugin.json")
@@ -453,7 +464,7 @@ def build(dest_repo: Path, source_repo: Path = REPO) -> None:
             raise BuildError(f"{root}: symlinks are not allowed in plugin sources")
     reject_source_symlinks(source_repo / "plugins")
     reject_source_symlinks(source_repo / "omp" / "overlay")
-    reject_source_symlinks(source_repo / "omp" / "native")
+    reject_source_symlinks(source_repo / "omp" / "native", NATIVE_SKIPPED_DIRS)
     for path in (source_repo / "omp" / "preamble.md", source_repo / ".claude-plugin" / "marketplace.json"):
         if path.is_symlink():
             raise BuildError(f"{path}: symlinks are not allowed in plugin sources")
