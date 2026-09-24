@@ -65,12 +65,12 @@ NATIVE_AGENT_KEYS = {
 # Project model roles documented in README (including the plan-mode role).
 # These are user-configurable OMP aliases, not a list of OMP built-in models.
 MODEL_ROLES = {"code_review", "executor", "challenger", "analyst", "plan"}
-# Canonical built-in tool names from OMP's tools/builtin-names.ts. Custom
-# extension tools are not used by these overlays or native agent definitions.
+# OMP_TOOLS mirrors OMP's tools/builtin-names.ts; scripts/check_omp_tools.py
+# verifies the names against an installed OMP package in CI.
 OMP_TOOLS = {
     "read", "bash", "edit", "ast_grep", "ast_edit", "ask", "debug", "eval",
     "github", "glob", "grep", "find", "lsp", "checkpoint", "rewind",
-    "context_notes", "new_context", "security_scan", "task", "hub", "todo",
+    "context_notes", "new_context", "security_scan", "task", "wait", "todo",
     "web_search", "write", "memory_edit", "retain", "recall", "reflect",
     "learn", "manage_skill",
 }
