@@ -20,6 +20,9 @@ if sys.version_info < (3, 11):
 from av_config import ConfigError
 from av_config import InvalidConfig
 from qa_engine.config import Config
+from qa_engine.plan import check_plan
+from qa_engine.plan import parse_plan
+from qa_engine.plan import resolve_plan
 
 
 class UsageError(ConfigError):
@@ -57,6 +60,15 @@ def parser() -> argparse.ArgumentParser:
     accept.add_argument("--repo", type=Path, default=argparse.SUPPRESS)
     tools = commands.add_parser("tools")
     tools.add_argument("--repo", type=Path, default=argparse.SUPPRESS)
+    plan = commands.add_parser("plan")
+    plan.add_argument("--repo", type=Path, default=argparse.SUPPRESS)
+    plan_operations = plan.add_subparsers(dest="operation", required=True)
+    resolve = plan_operations.add_parser("resolve")
+    resolve.add_argument("argument", nargs="?", default="")
+    resolve.add_argument("--repo", type=Path, default=argparse.SUPPRESS)
+    check = plan_operations.add_parser("check")
+    check.add_argument("plan", type=Path)
+    check.add_argument("--repo", type=Path, default=argparse.SUPPRESS)
     return root
 
 
@@ -93,9 +105,17 @@ def execute(args: argparse.Namespace) -> tuple[dict[str, object], int]:
     repo = repository(args.repo)
     if args.command == "tools":
         return tools(), 0
+    if args.command == "plan" and args.operation == "resolve":
+        return resolve_plan(repo, args.argument), 0
     config = Config(repo)
     if args.command == "trust":
         return config.accept(args.hash), 0
+    if args.command == "plan":
+        if config.errors:
+            return config.report(), 2
+        path = args.plan if args.plan.is_absolute() else repo / args.plan
+        result = check_plan(parse_plan(path), config)
+        return result, 0 if result["ok"] else 1
     if args.operation == "preview":
         result = config.preview(read_proposal(args.proposal))
         return result, 0 if result["ok"] else 2
