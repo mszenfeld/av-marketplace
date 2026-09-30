@@ -23,6 +23,20 @@ from qa_engine.config import Config
 from qa_engine.plan import check_plan
 from qa_engine.plan import parse_plan
 from qa_engine.plan import resolve_plan
+from qa_engine.state import StateStop
+from qa_engine.state import assign_issues
+from qa_engine.state import candidates
+from qa_engine.state import dispatch_fix
+from qa_engine.state import dispatch_tester
+from qa_engine.state import end_run
+from qa_engine.state import fix_done
+from qa_engine.state import ingest
+from qa_engine.state import iteration_close
+from qa_engine.state import iteration_open
+from qa_engine.state import open_run
+from qa_engine.state import start_run
+
+STATE_COMMANDS = frozenset({"dispatch", "fix", "ingest", "issues", "candidates", "iteration"})
 
 
 class UsageError(ConfigError):
@@ -35,6 +49,16 @@ class Parser(argparse.ArgumentParser):
 
     def print_help(self, file: TextIO | None = None) -> None:
         print(json.dumps({"help": self.format_help()}), file=file)
+
+
+def repo_option(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument("--repo", type=Path, default=argparse.SUPPRESS)
+    return parser
+
+
+def run_option(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument("--run", required=True)
+    return repo_option(parser)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -69,6 +93,31 @@ def parser() -> argparse.ArgumentParser:
     check = plan_operations.add_parser("check")
     check.add_argument("plan", type=Path)
     check.add_argument("--repo", type=Path, default=argparse.SUPPRESS)
+    run = repo_option(commands.add_parser("run"))
+    run_operations = run.add_subparsers(dest="operation", required=True)
+    start = repo_option(run_operations.add_parser("start"))
+    start.add_argument("plan", type=Path)
+    start.add_argument("--takeover")
+    run_option(run_operations.add_parser("end"))
+    dispatch = run_option(commands.add_parser("dispatch"))
+    dispatch_operations = dispatch.add_subparsers(dest="operation", required=True)
+    tester = repo_option(dispatch_operations.add_parser("tester"))
+    tester.add_argument("--section", required=True, choices=["FE", "BE"])
+    tester.add_argument("--phase", required=True, choices=["baseline", "retry", "iteration", "final"])
+    repo_option(dispatch_operations.add_parser("fix")).add_argument("--qa", required=True)
+    fix = repo_option(commands.add_parser("fix"))
+    done = run_option(fix.add_subparsers(dest="operation", required=True).add_parser("done"))
+    done.add_argument("--dispatch", required=True)
+    done.add_argument("--result", required=True, choices=["fixed", "partial", "failed"])
+    results = run_option(commands.add_parser("ingest"))
+    results.add_argument("--dispatch", required=True)
+    results.add_argument("file", type=Path)
+    run_option(commands.add_parser("issues"))
+    run_option(commands.add_parser("candidates"))
+    iteration = repo_option(commands.add_parser("iteration"))
+    iteration_operations = iteration.add_subparsers(dest="operation", required=True)
+    run_option(iteration_operations.add_parser("open"))
+    run_option(iteration_operations.add_parser("close"))
     return root
 
 
@@ -101,12 +150,39 @@ def read_proposal(path: Path) -> dict[str, object]:
     return value
 
 
+def run_state(repo: Path, args: argparse.Namespace) -> dict[str, object]:
+    """Run one loop bookkeeping subcommand under the run's state lock."""
+    with open_run(repo, args.run) as run:
+        if args.command == "dispatch":
+            config = Config(repo)
+            if args.operation == "tester":
+                return dispatch_tester(run, config, args.section, args.phase)
+            return dispatch_fix(run, config, args.qa)
+        if args.command == "fix":
+            return fix_done(run, args.dispatch, args.result)
+        if args.command == "ingest":
+            path = args.file if args.file.is_absolute() else repo / args.file
+            return ingest(run, args.dispatch, path.read_text())
+        if args.command == "issues":
+            return assign_issues(run)
+        if args.command == "candidates":
+            return candidates(run)
+        return iteration_open(run) if args.operation == "open" else iteration_close(run)
+
+
 def execute(args: argparse.Namespace) -> tuple[dict[str, object], int]:
     repo = repository(args.repo)
     if args.command == "tools":
         return tools(), 0
     if args.command == "plan" and args.operation == "resolve":
         return resolve_plan(repo, args.argument), 0
+    if args.command == "run":
+        if args.operation == "end":
+            return end_run(repo, args.run), 0
+        path = args.plan if args.plan.is_absolute() else repo / args.plan
+        return start_run(Config(repo), path, args.takeover), 0
+    if args.command in STATE_COMMANDS:
+        return run_state(repo, args), 0
     config = Config(repo)
     if args.command == "trust":
         return config.accept(args.hash), 0
@@ -130,6 +206,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         result, code = execute(args)
     except (UsageError, InvalidConfig) as error:
         result, code = {"error": str(error)}, 2
+    except StateStop as error:
+        result, code = {"error": str(error), **error.details}, 1
     except ConfigError as error:
         result, code = {"error": str(error)}, 1
     except (OSError, UnicodeError):
