@@ -74,8 +74,9 @@ Plan checks derive personas and values from `$QA_NAME` or `${QA_NAME}` tokens an
 
 | Subcommand | JSON output |
 |---|---|
-| `run start <plan> [--takeover <run_id>]` | `{run, dir, sidecar, report, idempotency: "reuse"|"adopt"|"fresh"|"rebaseline"}`. |
+| `run start <plan> [--generated] [--baseline-run <old_run_id> \| --baseline-file <file>] [--takeover <run_id>]` | `{run, dir, sidecar, report, idempotency: "reuse"|"adopt"|"fresh"|"rebaseline"}`. |
 | `run end --run ID` | `{released}`; releases origin locks and deletes this run's private directory. |
+| `run stop --run ID --reason <user-abort\|config-drift\|login-failure\|plan-changed\|cleanup-error\|other> [--detail TEXT]` | `{decision: "stop", reason, detail}`; records a stop and closes any open iteration, without config drift checks. |
 | `services check --run ID` | `{up, probes[{target, path, status}]}`. |
 | `services up --run ID` | `{ran, exit}`. |
 | `services prepare --run ID` | `{ran, exit}`. |
@@ -85,6 +86,12 @@ Plan checks derive personas and values from `$QA_NAME` or `${QA_NAME}` tokens an
 | `accounts teardown --run ID` | `{deleted[], left[], unresolved[]}`. |
 
 `run start` refuses untrusted config with `trust required`. It records the effective config, its hash and its accepted trust hash in the run directory; public metadata masks literal sources, and no resolved value goes in the sidecar. It creates a mode-0700 `${TMPDIR:-/tmp}/qa-run-<run-id>/`, removes this repository's private run directories older than 24 hours and takes sorted, per-origin locks. Overlapping target sets cannot run concurrently. A live lock lasts until release or `qa.budget.minutes` + 15 minutes; explicit, approved `--takeover <holder-run-id>` also removes that holder's private directory, but its account ledger survives.
+
+`--generated` always records `auto_generated: true`, including reuse or adoption of a report without provenance. Without the flag a fresh/rebaselined sidecar records `false`; reuse keeps the sidecar's stored value, and adoption keeps the report's `- Plan provenance:` value (an older report without provenance is treated as existing). `/qa:run` passes the flag only when Step 2 generated/regenerated the selected plan in this invocation, including start retries/restarts. Summary's all-SKIP/NEED_INFO and shallow-coverage branches read this recorded value.
+
+To keep bootstrap writes out of the dirty baseline, `/qa:run` captures tracked-modified paths before Step 1 writes anything and saves a JSON array in a temporary file outside the repository. `--baseline-file <file>` uses exactly those paths as `pre_loop_dirty` and fingerprints them before fix work; it preserves config/gitignore paths already dirty before invocation. With neither baseline option, `run start` reads the current tracked tree. On repair restart, `--baseline-run <ended-run-id>` instead loads the same plan's recorded paths **and fingerprints** from its durable sidecar, so it works after `run end` deleted the private directory. A missing/mismatched baseline is an error, never permission to silently snapshot a new tree. The baseline inputs are mutually exclusive. New bootstrap-only dirt in `.av/config.toml` / `.gitignore` is excluded from both pre-existing dirt and scoped fix recovery.
+
+Every post-start stop/abort records `run stop` before report flush and teardown. `--detail` must contain only sanitized diagnostics/names/statuses, never secret values or raw recipe output. The engine masks private account/secrets values, literal source texts and environment values referenced by `env:` sources in the recorded or current config, without resolving sources; public targets/probes/policy and unrelated environment values stay readable. Whitespace is flattened to one line. Repeat calls preserve the first stop reason. A recorded stop always yields `**Result:** Stopped` with its reason/detail, regardless of PASS verdicts, and never writes new Status lines, even on a later `report --final`. Existing Status lines are preserved.
 
 `accounts provision|refresh`, `services check|up|prepare` and `dispatch` compare the current config against the run-bound config. `config changed during run` or a dispatch login failure stops the run; teardown is still mandatory. `accounts teardown`, `services down` and `run end` skip that comparison and use the recorded, previously trusted targets, recipes and down command. Cleanup placeholders use current sources only when current config is trusted; otherwise accounts stay `left`. The recorded down command needs no sources and can still run.
 
@@ -111,6 +118,8 @@ For an expected 2xx main flow returning 401/403, the engine records `auth-unveri
 
 `issues` owns key-based QA-ID allocation. Status >= 500 or `crash` forces `severity_floor: "CRITICAL"`; an unverified assertion otherwise forces LOW; other floors are `null` for the orchestrator's evidence-based severity. `candidates` owns prefilters, flags and guards. `iteration open` rehashes the plan, checks failure severity and all budgets, snapshots verdicts and increments only on `iterate`. `iteration close` compares against that snapshot and writes exactly one history row with fixes and warnings; `fix_touched_files` excludes pre-existing dirty files and `overlap` names those that also changed. Route `stop` to teardown, `final` to the final test pass and `continue` to the next open; never increment counters by hand.
 
+**Dangling-iteration rule (engine-owned):** `run stop`, `report --final` and `summary` automatically close an open iteration for bookkeeping only: the history row records `decision: "closed"` and `reason: "iteration closed at exit"` without deciding or changing `loop_end`. Only explicit `iteration close` decides progress/regression/budget routing. The CLI persists this closure before rendering/recording the exit, so even a failed final-report request does not leave an iteration open. This covers **Skip to final run**, an empty fix-set and every stop after `dispatch … fix`, recording exactly one history row, touched paths, overlap and warnings. Skip and empty fix-set leave the final verdict authoritative, not an inferred no-progress stop. A dispatched fix without `fix done` is recorded as `failed`, not an inferred success; its anti-hardcoding check still runs (or a plan-drift warning records why it could not). A later render includes the row in Loop History.
+
 ### Reports and summary
 
 | Subcommand | Output |
@@ -129,7 +138,7 @@ Optional fields are `severity_reason`, `response` and `screenshot`. Use CRITICAL
 
 The engine preserves existing `**Status:**`, `**Decision:**`, `**Decision-retired:**`, `**Verification-plan:**`, `**Decision-pin:**`, `**Dispatch:**`, `**Verification:**` and a rewritten `**Location:**` by QA token. Final write-back requires a whole-scenario PASS, never overwrites `🚫 Rejected` and never marks a partial fix as fixed.
 
-The summary's result is engine-computed: plan drift/explicit stops take priority; with failures at the severity floor, no-progress/regression stops are `Stopped`, exhausted budgets are `Budget Exhausted`, otherwise `Fail`. With no such failures it is `Pass`, except an all-SKIP/NEED_INFO human-authored plan is `Stopped`. Pass is not a claim of full verification: always relay Coverage and unlock hints for unverified or shallow coverage. Fail routes to the reported remaining issues; Budget Exhausted routes to the named config budgets and a rerun; Stopped routes to its reason before any rerun.
+The summary's result is engine-computed: plan drift/recorded stops take priority and print their reason; with failures at the severity floor, no-progress/regression stops are `Stopped`, exhausted budgets are `Budget Exhausted`, otherwise `Fail`. With no such failures it is `Pass`, except an all-SKIP/NEED_INFO human-authored plan is `Stopped`. Pass is not a claim of full verification: always relay Coverage and unlock hints for unverified or shallow coverage. Fail routes to the reported remaining issues; Budget Exhausted routes to the named config budgets and a rerun; Stopped routes to its reason before any rerun.
 
 ## Ownership boundary
 

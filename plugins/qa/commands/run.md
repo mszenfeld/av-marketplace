@@ -39,7 +39,9 @@ In OMP resolve `realpath skill://qa:engine/scripts/qa.py` and substitute the ret
 
 **Ask capability, not Bash stdin, decides interactivity.** Use `AskUserQuestion` (OMP: `ask`) for every human gate. An unavailable tool or a question the harness cannot deliver makes this invocation headless for the rest of the run. Never manufacture an answer, choose a likely option on behalf of the user, or treat an absent ask tool as consent; this fail-closed rule also applies when executing as a subagent. Do not run a TTY probe. Headless behavior is specified at each gate below; notably, `qa.policy.fix = "approve"` still tests and reports but applies no fixes.
 
-**Mandatory cleanup:** once `run start` succeeds, every stop, abort or error goes through Step 12. `config changed during run` and login failure during tester dispatch are stops: do not repair state or keep testing against drifted config. Flush a partial report without `--final` before cleanup; no new Status lines are written without an authoritative final run. Preserve the stop reason and disclose it beside the engine summary, never call an aborted or unverified run successful.
+**Mandatory stop recording and cleanup:** once `run start` succeeds, every stop, abort or error calls `run stop --run <run> --reason <reason> [--detail <safe-diagnostic>]` **before** flushing the partial report and entering Step 12. Use `user-abort` for a declined gate/interrupt, `config-drift` for `config changed during run`, `login-failure` for a tester-dispatch login failure, `plan-changed` for a plan hash mismatch, `cleanup-error` for failed teardown/down, and `other` for remaining errors, headless hard stops or engine stop decisions. Detail contains only sanitized engine diagnostics, failing probe names/statuses or a short explanation, never values, headers or raw command/recipe output; the engine flattens it to one line. A repeated stop preserves the original reason. The engine summary, not narration beside it, owns `Stopped`. Do not repair state or keep testing against drifted config. Flush without `--final`; a recorded stop cannot write new Status lines even if `--final` is requested.
+
+**Capture before bootstrap writes:** after argument validation and before Step 1 can write shared config, run `git -c core.quotePath=false diff --name-only HEAD`. Retain each full path (never whitespace-separated fields) and use Write to save a JSON array of those paths to a temporary `<baseline-file>` outside the repository, including `[]` for a clean tree. This is input to `run start --baseline-file <baseline-file>`, not a sidecar edit. It preserves pre-existing config/gitignore dirt but excludes this invocation's subsequent bootstrap writes. Keep the file through start retries; remove it after a successful start.
 
 ## Workflow
 
@@ -61,14 +63,16 @@ On `trust = new` or `changed`, show the complete masked `trust_subset` and ask o
 Run `plan resolve` with the original positional argument as one quoted operand (omit the operand when empty).
 
 - `reuse`: keep the returned path.
-- `generate`: load `qa:plan-authoring` with the returned source and safe `config` metadata. Follow its shared draft/review workflow; do not ask for permission to generate, write an inline plan or duplicate its tool probes. Use its returned path without re-globbing. Show `Generated plan: <path> — N FE, M BE` using the saved plan's scenario headings.
-- `stale`: list `changed_files`; interactive → ask once: **Regenerate** (default) / **Use existing plan**. Headless → regenerate through the same skill. A failed regeneration never falls back to the stale plan.
+- `generate`: load `qa:plan-authoring` with the returned source and safe `config` metadata. Follow its shared draft/review workflow; do not ask for permission to generate, write an inline plan or duplicate its tool probes. Use its returned path without re-globbing. Mark it **generated in this invocation** and pass `--generated` at Step 5, including start retries and repair restarts. Show `Generated plan: <path> — N FE, M BE` using the saved plan's scenario headings.
+- `stale`: list `changed_files`; interactive → ask once: **Regenerate** (default) / **Use existing plan**. Headless → regenerate through the same skill and mark it generated as above. A failed regeneration never falls back to the stale plan; choosing the existing plan does not set the generated marker.
 
 Show the authoring skill's review outcome, reason and unresolved findings. An open `blocker` → interactive: **Run anyway** / **Stop and fix the plan with /qa:create-plan**; headless or a declined gate → stop and list it. Print open concerns and continue; an unreviewed plan is never described as approved.
 
-Read the selected plan. If it has zero FE and zero BE scenarios, stop gracefully before starting a run:
+Read the selected plan. If it has zero FE and zero BE scenarios **and was just generated in Step 2**, stop gracefully before starting a run:
 
 > Generated plan has no executable FE or BE scenarios — nothing to test (e.g. a backend-only change fully covered by the unit/integration suite). Relying on that suite; not launching testers.
+
+A reused/existing plan with zero scenarios instead stops with `Error: plan <path> has no executable FE or BE scenarios.` Name the selected plan; do not reuse the generated-plan success message.
 
 ### Step 3: Check the plan against config
 
@@ -80,13 +84,7 @@ Run `plan check <plan>`.
 
 ### Step 4: Working-tree safety
 
-When `qa.policy.fix != "off"`, record the tracked-modified paths before fix work:
-
-```bash
-git -c core.quotePath=false diff --name-only HEAD
-```
-
-Treat output as `pre_loop_dirty`: one full path per line, never whitespace-separated fields. `run start` persists the recovery baseline; never write it into the sidecar yourself.
+When `qa.policy.fix != "off"`, use the tracked-modified paths captured **before Step 1**, not a new diff after config bootstrap. `run start --baseline-file <baseline-file>` persists them as `pre_loop_dirty`; never write them into the sidecar yourself. On a repair restart the engine reads the persisted first-pass baseline through `--baseline-run <ended-run-id>`, instead of re-reading the changed tree.
 
 For a non-empty set, follow `qa.policy.dirty_tree`:
 
@@ -98,10 +96,10 @@ A successful config bootstrap's own `.av/config.toml` and `.gitignore` changes a
 
 ### Step 5: Start the run
 
-Run `run start <plan>` and retain `run`, `dir`, `sidecar`, `report` and `idempotency`. Let the engine reuse/adopt/rebaseline artifacts; never copy, move or hash them yourself.
+Run `run start <plan> --baseline-file <baseline-file>` on the first pass, adding `--generated` **only** when Step 2 generated/regenerated this invocation's plan. Retain `run`, `dir`, `sidecar`, `report` and `idempotency`. On **Repair restart**, replace `--baseline-file` with `--baseline-run <ended-run-id>`; never pass both. Preserve these switches on trust retries and an approved takeover. Let the engine reuse/adopt/rebaseline artifacts and preserve stored provenance; never copy, move or hash them yourself.
 
 - `trust required`: re-read `config`, use Step 1's trust question **once**, then return to Step 3 with the selected plan kept. Headless or a second failure → stop.
-- A live origin lock: show the holder's run ID and start time; interactive → ask whether to **Take over** the interrupted run or **Stop**, then on approval use `run start <plan> --takeover <holder-run-id>`. Headless → stop, naming the holder. No blind takeover; the old account ledger must survive.
+- A live origin lock: show the holder's run ID and start time; interactive → ask whether to **Take over** the interrupted run or **Stop**, then on approval add `--takeover <holder-run-id>` to the same `run start` call, retaining its baseline and generated switches. Headless → stop, naming the holder. No blind takeover; the old account ledger must survive.
 
 After success, cleanup is compulsory even if all later work fails.
 
@@ -109,7 +107,7 @@ After success, cleanup is compulsory even if all later work fails.
 
 Run `services check --run <run>`.
 
-If probes fail and `up` is configured, ask once whether to start/prepare the configured services; `qa.policy.fix = "auto"` prints the scope and proceeds without a question, while headless with any other fix policy stops with the failing probes. Approval → `services up --run <run>`, `services prepare --run <run>`, then re-check. Track whether this run executed `up`, so only its own services are stopped later.
+If probes fail and `up` is configured, ask once whether to start/prepare the configured services; `qa.policy.fix = "auto"` prints the scope and proceeds without a question, while headless with any other fix policy records `run stop --run <run> --reason other` with the failing probes and goes to Step 12. **Decline → `run stop --run <run> --reason user-abort` with the failing probes, then Step 12; never enter repair after a decline.** Approval → `services up --run <run>`, `services prepare --run <run>`, then re-check. Track whether this run executed `up`, so only its own services are stopped later.
 
 Still down, no usable bring-up, or a lifecycle recipe error → interactive: **Config bootstrap** in `repair` mode with the error/failing probes; headless → stop with those diagnostics. A successful repair follows **Repair restart**, not an in-place continuation.
 
@@ -137,11 +135,11 @@ If there are zero failures at or above `qa.policy.min_severity`, go directly to 
 
 Otherwise loop on `iteration open --run <run>`:
 
-- `stop`: show its reason, flush a partial report without Status write-back and go to Step 12.
+- `stop`: show its reason, record `run stop --run <run> --reason <plan-changed|other> --detail <returned-reason>` (`plan-changed` for a hash mismatch, otherwise `other`), flush a partial report without Status write-back and go to Step 12.
 - `final`: Step 11, unless the reason is zero failures and no fix iteration ran (Step 9's direct teardown).
 - `iterate`: use the returned iteration number; run `candidates --run <run>`. Print every dropped QA ID with its reason; never override a guard or manufacture an eligible candidate.
 
-For `approve`, show one batch gate per iteration: candidate ID, severity, scenario, title, every `flags[]` value (including `auth` and `unverified`), configured target origins, remaining budgets and **all prior `fix done` anti-hardcoding warnings**. Use one `AskUserQuestion`: **Approve & continue** / **Skip to final run** / **Abort**. Skip → Step 11; abort → partial-report flush and Step 12; an undeliverable gate → no fix, Step 12. An empty fix-set needs no approval: go to final verification rather than opening an unbounded empty loop.
+For `approve`, show one batch gate per iteration: candidate ID, severity, scenario, title, every `flags[]` value (including `auth` and `unverified`), configured target origins, remaining budgets and **all prior `fix done` anti-hardcoding warnings**. Use one `AskUserQuestion`: **Approve & continue** / **Skip to final run** / **Abort**. Skip → Step 11; abort → `run stop --run <run> --reason user-abort`, partial-report flush and Step 12; an undeliverable gate → `run stop --run <run> --reason other --detail 'fix approval unavailable'`, no fix, Step 12. An empty fix-set needs no approval: go to final verification rather than opening an unbounded empty loop. On Skip/empty-set the engine closes the dangling iteration in `report --final`; on a stop it closes it in `run stop`, with `summary` as a final safety net. No manual history/sidecar patch is needed.
 
 For `auto`, print a non-silent scope banner with candidates, dropped guards, targets and budgets, then proceed. Interrupting the session is an abort, not success.
 
@@ -193,15 +191,15 @@ The engine writes `**Status:** ✅ Fixed` exactly once only for a whole-scenario
 
 ### Step 12: Teardown, summary and recovery
 
-On any stop/error/abort after start, first use `issues` and **Issue prose and report** to flush current observations and history without `--final`; preserved existing Status lines stay, but no new ones are written. Then, on **every** started-run exit, in order:
+On any stop/error/abort after start, first call `run stop --run <run> --reason <reason> [--detail <safe-diagnostic>]` with the reason mapping above, then use `issues` and **Issue prose and report** to flush current observations and history without `--final`; preserved existing Status lines stay, but no new ones are written. `run stop` closes any dangling iteration, including a stop after a fix dispatch: touched files, overlap, attempts and warnings reach the report. Then, on **every** started-run exit, in order:
 
 1. `accounts teardown --run <run>` — print `deleted`, `left` and `unresolved` identities; cleanup failures are visible, never silently ignored.
 2. `report --run <run> --accounts` — update only the Accounts summary line, never verdicts or Status.
 3. `services down --run <run>` if this run executed `up`.
-4. `summary --run <run>` — relay its result, counts, Coverage, warnings, unlock hints, budgets and recovery. Disclose any abort, headless fix skip or cleanup error beside it; do not recompute or upgrade its verdict.
+4. `summary --run <run>` — relay its result, stop reason/detail, counts, Coverage, warnings, unlock hints, budgets and recovery. Disclose any headless fix skip beside it; do not recompute or upgrade its verdict. The engine closes any still-open iteration before summarizing.
 5. `run end --run <run>` — release origin locks and delete the private directory.
 
-A failed cleanup operation does not suppress the remaining cleanup calls; report its diagnostics. Teardown/down use the recorded, previously trusted config even after drift. Accounts that cannot be deleted remain in the external ledger for a later trusted teardown.
+A failed cleanup operation does not suppress the remaining cleanup calls; record `run stop --run <run> --reason cleanup-error --detail <safe-diagnostic>`, flush the non-final report again, and report its diagnostics. Teardown/down use the recorded, previously trusted config even after drift. Accounts that cannot be deleted remain in the external ledger for a later trusted teardown. A prior stop reason remains the primary reason.
 
 The `qa:engine` skill owns the closed Result vocabulary, predicates and routing. Always show its machine-locatable `**Result:**` line with report/plan paths and its evidence; coverage gaps route to its unlock hints, not a claim of full verification. Budget exhaustion and stops are not success.
 
@@ -225,7 +223,7 @@ For each present section, **one engine call at a time**:
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/engine/scripts/qa.py dispatch --run <run> tester --section <FE|BE> --phase <baseline|retry|iteration|final>
 ```
 
-This logs in the section's personas again, refreshes the private channel and records the assignment. A failure stops before launching that tester. After preparing both assignments sequentially, launch `qa:fe-tester` / `qa:be-tester` in parallel with `Task(..., run_in_background: true)` when both are present. Use this exact template for each:
+This logs in the section's personas again, refreshes the private channel and records the assignment. A failure stops before launching that tester: call `run stop --run <run> --reason <reason>` (`config-drift`, `login-failure`, `plan-changed` or `other` as applicable) before Step 12. After preparing both assignments sequentially, launch `qa:fe-tester` / `qa:be-tester` in parallel with `Task(..., run_in_background: true)` when both are present. Use this exact template for each:
 
 ```text
 Plan: <plan path>
@@ -273,7 +271,7 @@ Interactive only. This is the generic `qa:env-config` detection/write contract p
 5. Approval → `config apply <proposal-file> --snapshot <preview-snapshot> --approved-hash <preview-trust-hash>`. Compare-and-swap conflicts write nothing; show the error and stop. Never retry against a new snapshot without approval. The engine alone writes `.av/config.toml` and `.gitignore` atomically and records the approved trust hash.
 6. Required missing `file:.av/secrets.local.env#NAME` entries → print **names only** to fill and stop. Never create/populate the secret file, ask for a value in chat or bypass the channel. Otherwise re-read `config` and continue at the caller's step.
 
-**Repair restart:** allow at most **one repair per failure kind per invocation**, across restarts. After a successful Step 6/7 repair, flush the current partial report, run Step 12 completely (`accounts teardown`, account report refresh, `services down` only when this run started them, `summary`, `run end`), then restart at Step 3 with the same plan and refreshed trusted config. Retain the first `pre_loop_dirty`; do not reuse the old run ID, targets, credentials or origin locks. A second failure of that kind stops with its diagnostics and still cleans up. Sources unavailable for cleanup leave ledger records visible, never hidden.
+**Repair restart:** allow at most **one repair per failure kind per invocation**, across restarts. After a successful Step 6/7 repair, record `run stop --run <run> --reason other --detail 'configuration repaired; restarting'`, flush the current partial report and run Step 12 completely (`accounts teardown`, account report refresh, `services down` only when this run started them, `summary`, `run end`). Retain the **ended run ID** as `<baseline-run>` even though `run end` deletes its private directory. Restart at Step 3 with the same plan and refreshed trusted config, then Step 5 calls `run start <plan> --baseline-run <baseline-run>` (plus `--generated` when Step 2 generated it). The durable sidecar keeps the first pass's dirty paths and fingerprints across every restart. Do not reuse the old active run ID, targets, credentials or origin locks. A second failure of that kind records a stop with its diagnostics and still cleans up. Sources unavailable for cleanup leave ledger records visible, never hidden; a failed cleanup stops rather than starting another pass.
 
 ## Modes & Safety Guards
 

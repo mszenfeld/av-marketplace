@@ -95,10 +95,10 @@ class ReportTests(unittest.TestCase):
     def cli(self, *args: str, code: int = 0) -> Json:
         return json.loads(self.invoke(*args, code=code))
 
-    def start(self) -> None:
+    def start(self, *options: str) -> None:
         config = self.cli("config")
         self.cli("trust", "accept", config["trust_hash"])
-        self.run = self.cli("run", "start", str(self.plan))
+        self.run = self.cli("run", "start", str(self.plan), *options)
         self.cli("accounts", "provision", "--run", self.run["run"])
 
     def state(self) -> Json:
@@ -130,6 +130,231 @@ class ReportTests(unittest.TestCase):
 
     def summary(self) -> str:
         return self.invoke("summary", "--run", self.run["run"])
+
+    def test_generated_all_skip_summary_and_adopted_provenance(self) -> None:
+        self.put(CONFIG.replace('fix = "approve"', 'fix = "approve"\nmutations = "deny"'), ".av/config.toml")
+        self.plan.write_text("# Test Plan\n## BE Test Scenarios" + PLAN.split("## BE Test Scenarios", 1)[1].replace("GET /", "POST /"))
+        self.start("--generated")
+        dispatch = self.cli("dispatch", "--run", self.run["run"], "tester", "--section", "BE", "--phase", "baseline")
+        skipped = outcome("SKIP", None, skip_reason="mutation-guard")
+        result = self.put("```json qa-results\n" + json.dumps({"section": "BE", "scenarios": [
+            {"id": "BE-01", **skipped, "edges": [{"n": 1, **skipped}]},
+            {"id": "BE-02", **skipped, "edges": []}]}) + "\n```\n", "result.md")
+        self.cli("ingest", "--run", self.run["run"], "--dispatch", dispatch["dispatch"], str(result))
+        self.render([])
+        self.assertTrue(self.state()["auto_generated"])
+        self.assertIn("**Result:** Pass\n", self.summary())
+        self.assertIn("backend-write-only under the mutation guard", self.summary())
+        self.cli("run", "end", "--run", self.run["run"])
+        Path(self.run["sidecar"]).unlink()
+        self.start()
+        self.assertEqual(self.run["idempotency"], "adopt")
+        self.assertTrue(self.state()["auto_generated"])
+
+    def test_user_abort_takes_precedence_over_pass_and_blocks_status_writeback(self) -> None:
+        self.start()
+        self.ingest(main=outcome("FAIL", 400))
+        self.cli("issues", "--run", self.run["run"])
+        self.render([issue("QA-001")])
+        self.ingest(phase="final")
+        stopped = self.cli("run", "stop", "--run", self.run["run"], "--reason", "user-abort",
+                           "--detail", "User declined.\nDo not continue.")
+        self.assertEqual(stopped["reason"], "user-abort")
+        self.assertEqual(stopped["detail"], "User declined. Do not continue.")
+        self.assertEqual(self.render([], final=True)["fixed"], [])
+        self.assertNotIn("**Status:**", self.text())
+        summary = self.summary()
+        self.assertIn("**Result:** Stopped\n", summary)
+        self.assertIn("user-abort", summary)
+        self.assertIn("User declined. Do not continue.", summary)
+        self.assertNotIn("No failing assertions to fix.", summary)
+
+    def test_stop_detail_masks_private_values_without_resolving_sources(self) -> None:
+        self.start()
+        directory = Path(self.run["dir"])
+        (directory / "secrets.json").write_text(json.dumps({"QA_USER_TOKEN": "private-token"}))
+        stopped = self.cli("run", "stop", "--run", self.run["run"], "--reason", "other",
+                           "--detail", "Request used private-token.\nStopped.")
+        self.assertNotIn("private-token", json.dumps(stopped))
+        self.assertNotIn("private-token", Path(self.run["sidecar"]).read_text())
+        self.assertNotIn("private-token", self.summary())
+
+    def test_stop_detail_preserves_public_probes_and_unreferenced_environment_values(self) -> None:
+        self.env.update(UNRELATED_FLAG="1", UNRELATED_ZERO="0", UNRELATED_BOOL="true")
+        self.start()
+        detail = "services declined; failing probes: api /api/v1/health 502, web / 503; http://localhost:8000 down"
+        stopped = self.cli("run", "stop", "--run", self.run["run"], "--reason", "other", "--detail", detail)
+        self.assertEqual(stopped["detail"], detail)
+        self.assertIn("- Stop detail: " + detail, self.summary())
+
+    def test_stop_detail_masks_only_private_values_and_configured_sources_after_drift(self) -> None:
+        self.env.update(AV_OLD_SECRET="recorded-secret", AV_NEW_SECRET="current-secret", UNRELATED_FLAG="1")
+        self.put(CONFIG.replace("[qa.defaults]", '[env.secrets]\nold = "env:AV_OLD_SECRET"\n[qa.defaults]'),
+                 ".av/config.toml")
+        self.put('[env.values]\nname = "literal:private-literal"\n', ".av/local.toml")
+        self.start()
+        directory = Path(self.run["dir"])
+        (directory / "accounts.private.json").write_text(json.dumps({"accounts": [{"token": "account-secret"}]}))
+        self.put(CONFIG.replace("[qa.defaults]", '[env.secrets]\nnew = "env:AV_NEW_SECRET"\n[qa.defaults]'),
+                 ".av/config.toml")
+        detail = "api /api/v1/health 502 recorded-secret current-secret private-literal account-secret"
+        stopped = self.cli("run", "stop", "--run", self.run["run"], "--reason", "config-drift", "--detail", detail)
+        self.assertEqual(stopped["detail"], "api /api/v1/health 502 *** *** *** ***")
+        self.assertIn("- Stop detail: api /api/v1/health 502 *** *** *** ***", self.summary())
+
+    def test_repair_bootstrap_edits_are_excluded_from_fix_recovery(self) -> None:
+        self.put(".av/local.toml\n", ".gitignore")
+        self.git("add", ".av/config.toml", ".gitignore")
+        self.git("commit", "-qm", "configuration")
+        self.start()
+        old_run = self.run["run"]
+        self.cli("run", "stop", "--run", old_run, "--reason", "other", "--detail", "repair services")
+        self.cli("run", "end", "--run", old_run)
+        self.assertFalse(Path(self.run["dir"]).exists())
+
+        self.put(CONFIG + "\n# repaired service recipe\n", ".av/config.toml")
+        self.put(".av/local.toml\n.av/secrets.local.env\n", ".gitignore")
+        self.start("--baseline-run", old_run)
+        self.ingest(main=outcome("FAIL", 400))
+        self.cli("issues", "--run", self.run["run"])
+        self.render([issue("QA-001")])
+        self.cli("iteration", "open", "--run", self.run["run"])
+        self.cli("dispatch", "--run", self.run["run"], "fix", "--qa", "QA-001")
+        self.put("name = 'fixed items'\n", "src/app.py")
+        closed = self.cli("iteration", "close", "--run", self.run["run"])
+        self.assertEqual(closed["fix_touched_files"], ["src/app.py"])
+        self.assertEqual(closed["overlap"], [])
+        recovery = next(line for line in self.summary().splitlines() if "git restore --" in line)
+        self.assertIn("git restore -- src/app.py", recovery)
+        self.assertNotIn(".av/config.toml", recovery)
+        self.assertNotIn(".gitignore", recovery)
+
+    def test_exit_closes_dangling_fix_and_keeps_recovery_history_and_warnings(self) -> None:
+        for exit_kind in ("stop", "final", "summary"):
+            with self.subTest(exit_kind=exit_kind):
+                self.start()
+                self.ingest(main=outcome("FAIL", 400))
+                self.cli("issues", "--run", self.run["run"])
+                self.render([issue("QA-001")])
+                self.cli("iteration", "open", "--run", self.run["run"])
+                self.cli("dispatch", "--run", self.run["run"], "fix", "--qa", "QA-001")
+                self.put("name = 'fixed items'\n", "src/app.py")
+                if exit_kind == "stop":
+                    self.cli("run", "stop", "--run", self.run["run"], "--reason", "user-abort")
+                elif exit_kind == "final":
+                    self.ingest(phase="final")
+                    self.render([], final=True)
+                else:
+                    self.summary()
+                state = self.state()
+                self.assertIsNone(state["open_iteration"])
+                self.assertEqual(state["fix_touched_files"], ["src/app.py"])
+                history = [row for row in state["iterations"] if row["iteration"] == 1]
+                self.assertEqual(len(history), 1)
+                self.assertEqual(history[0]["attempted_fixes"], ["QA-001"])
+                self.assertEqual(history[0]["fix_results"], {"QA-001": "failed"})
+                self.render([])
+                self.assertIn("| 1 | BE-01 |", self.text())
+                self.summary()
+                self.assertEqual(sum(row["iteration"] == 1 for row in self.state()["iterations"]), 1)
+                self.cli("run", "end", "--run", self.run["run"])
+                self.put("name = 'items'\n", "src/app.py")
+
+    def test_stop_after_fix_records_overlap_and_pending_hardcoding_warning(self) -> None:
+        self.plan.write_text(PLAN.replace("- **Expected:** 200 items returned.",
+                                         '- **Request payload:** {"name": "sample-item"}\n'
+                                         "- **Expected:** 200 items returned."))
+        self.put("name = 'user edit'\n", "src/app.py")
+        self.start()
+        self.ingest(main=outcome("FAIL", 400))
+        self.cli("issues", "--run", self.run["run"])
+        self.render([issue("QA-001")])
+        self.cli("iteration", "open", "--run", self.run["run"])
+        self.cli("dispatch", "--run", self.run["run"], "fix", "--qa", "QA-001")
+        self.put("name = 'sample-item'\n", "src/app.py")
+        self.cli("run", "stop", "--run", self.run["run"], "--reason", "config-drift")
+        self.render([])
+        state = self.state()
+        self.assertEqual(state["fix_touched_files"], [])
+        self.assertEqual(state["iterations"][0]["result"]["overlap"], ["src/app.py"])
+        self.assertIn("Possible hardcoding", state["iterations"][0]["warnings"][0])
+        self.assertIn("Possible hardcoding", self.text())
+
+    def test_plan_changed_stop_closes_a_pending_fix_without_status_lines(self) -> None:
+        self.start()
+        self.ingest(main=outcome("FAIL", 400))
+        self.cli("issues", "--run", self.run["run"])
+        self.render([issue("QA-001")])
+        self.cli("iteration", "open", "--run", self.run["run"])
+        self.cli("dispatch", "--run", self.run["run"], "fix", "--qa", "QA-001")
+        self.put("name = 'fixed items'\n", "src/app.py")
+        self.plan.write_text(PLAN + "\nChanged notes\n")
+        self.cli("run", "stop", "--run", self.run["run"], "--reason", "plan-changed")
+        self.render([], final=True)
+        self.assertIsNone(self.state()["open_iteration"])
+        self.assertEqual(self.state()["fix_touched_files"], ["src/app.py"])
+        self.assertIn("| 1 | BE-01 |", self.text())
+        self.assertNotIn("**Status:**", self.text())
+        self.assertIn("**Result:** Stopped\n", self.summary())
+
+    def test_failing_final_report_still_closes_the_pending_iteration(self) -> None:
+        self.start()
+        self.ingest(main=outcome("FAIL", 400))
+        self.cli("issues", "--run", self.run["run"])
+        self.render([issue("QA-001")])
+        self.cli("iteration", "open", "--run", self.run["run"])
+        self.cli("dispatch", "--run", self.run["run"], "fix", "--qa", "QA-001")
+        self.put("name = 'fixed items'\n", "src/app.py")
+        self.render([], final=True, code=1)
+        self.assertIsNone(self.state()["open_iteration"])
+        self.assertEqual(self.state()["fix_touched_files"], ["src/app.py"])
+        self.render([])
+        self.assertIn("| 1 | BE-01 |", self.text())
+        self.assertNotIn("**Status:**", self.text())
+
+    def test_empty_iteration_closes_on_final_without_fabricating_fix_attempts(self) -> None:
+        self.start()
+        self.ingest(main=outcome("FAIL", 400))
+        self.cli("issues", "--run", self.run["run"])
+        self.render([issue("QA-001")])
+        self.cli("iteration", "open", "--run", self.run["run"])
+        self.ingest(phase="final")
+        self.render([], final=True)
+        self.assertIsNone(self.state()["open_iteration"])
+        row = self.state()["iterations"][0]
+        self.assertEqual(row["attempted_fixes"], [])
+        self.assertEqual(row["fix_results"], {})
+        self.assertEqual(row["now_passing"], ["BE-01"])
+        self.assertIn("| 1 | BE-01 | BE-01 |", self.text())
+
+    def test_exit_closure_does_not_turn_a_skipped_fix_into_a_stop(self) -> None:
+        for exit_kind in ("final", "summary"):
+            for regression in (False, True):
+                with self.subTest(exit_kind=exit_kind, regression=regression):
+                    self.start()
+                    self.ingest(main=outcome("FAIL", 400))
+                    self.cli("issues", "--run", self.run["run"])
+                    self.render([issue("QA-001")])
+                    self.cli("iteration", "open", "--run", self.run["run"])
+                    self.ingest(phase="final", main=outcome("FAIL", 400),
+                                second=outcome("FAIL", 400) if regression else outcome())
+                    self.cli("issues", "--run", self.run["run"])
+                    entries = [issue("QA-002")] if regression else []
+                    if exit_kind == "final":
+                        self.render(entries, final=True)
+                    else:
+                        self.summary()
+                        self.render(entries)
+                    summary = self.summary()
+                    state = self.state()
+                    text = self.text()
+                    self.cli("run", "end", "--run", self.run["run"])
+                    self.assertIsNone(state["open_iteration"])
+                    self.assertIsNone(state["loop_end"])
+                    self.assertIn("| 1 | BE-01 |", text)
+                    self.assertIn("**Result:** Fail\n", summary)
+                    self.assertNotIn("- Stop reason:", summary)
+                    self.assertIn("- Regressions: " + ("1" if regression else "0"), summary)
 
     def test_issue_blocks_and_assertions_follow_fix_consumers(self) -> None:
         self.start()

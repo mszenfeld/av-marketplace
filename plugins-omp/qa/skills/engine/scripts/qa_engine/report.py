@@ -38,6 +38,7 @@ from qa_engine.state import SEVERITIES
 from qa_engine.state import Run
 from qa_engine.state import StateStop
 from qa_engine.state import failures_at_floor
+from qa_engine.state import iteration_close
 from qa_engine.state import scenario_kind
 
 JSON = dict[str, Any]
@@ -302,6 +303,10 @@ def _history(run: Run, previous: str, final: bool) -> list[str]:
 
 def render_report(run: Run, issues: Path, *, final: bool = False) -> JSON:
     """Merge issue prose in plan order; only an authoritative final PASS closes issues."""
+    if final and run.state["open_iteration"] is not None:
+        iteration_close(run, decide=False)
+    # An explicit abort cannot become verification through a later --final call.
+    final = final and (run.state["loop_end"] or {}).get("decision") != "stop"
     plan = run.plan(strict=final)
     previous = run.report_text()
     blocks = _blocks(previous)
@@ -319,7 +324,9 @@ def render_report(run: Run, issues: Path, *, final: bool = False) -> JSON:
     verdicts = _verdicts(run, plan)
     fixed = _final(run, plan, blocks, verdicts) if final else []
     lines = [f"# Test Report: {run.state['topic']}", "", "## Summary", _counts(verdicts),
-             f"- Plan: {run.state['plan_path']}", f"- Date: {run.state['created']}", f"- Duration: {_elapsed(run)}s", accounts_line(run)]
+             f"- Plan: {run.state['plan_path']}",
+             "- Plan provenance: " + ("auto-generated" if run.state["auto_generated"] else "existing"),
+             f"- Date: {run.state['created']}", f"- Duration: {_elapsed(run)}s", accounts_line(run)]
     gaps = _gaps(run)
     if gaps:
         lines.extend(["", "## Setup gaps", *gaps])
@@ -424,6 +431,8 @@ def _unlock(run: Run, plan: Plan, verdicts: Mapping[str, str]) -> list[str]:
 
 def render_summary(run: Run) -> str:
     """Render the severity-floor result, advisory coverage, unlocks and scoped recovery."""
+    if run.state["open_iteration"] is not None:
+        iteration_close(run, decide=False)
     plan = run.plan(strict=False)
     verdicts = _verdicts(run, plan)
     elapsed = max(0, int(time.time() - run.record["started"]))
@@ -437,8 +446,14 @@ def render_summary(run: Run) -> str:
     lines = ["## Loop Summary", "", f"**Result:** {result}", "", "**Final Status:**", _counts(verdicts),
              f"- Fixed (Status written): {fixed}", f"- Remaining unfixed: {remaining}", f"- Warnings: {len(warnings)} (anti-hardcoding)",
              f"- Regressions: {len(regressions)}", "", *coverage, ""]
+    if result == "Stopped":
+        end = run.state["loop_end"] or {}
+        reason = end.get("reason") or ("plan changed mid-run (hash mismatch)" if not run.plan_unchanged() else "no executable verifier")
+        lines.append(f"- Stop reason: {reason}")
+        if end.get("detail"):
+            lines.append(f"- Stop detail: {end['detail']}")
     all_unverified = bool(verdicts) and all(verdict in {"skip", "need-info"} for verdict in verdicts.values())
-    if all_unverified:
+    if all_unverified and (run.state["loop_end"] or {}).get("decision") != "stop":
         if run.state["auto_generated"]:
             if all(run.state["scenario_reason"].get(sid) == "mutation-guard" for sid in verdicts):
                 lines.append("Auto-generated plan is backend-write-only under the mutation guard — nothing executable here; rely on the unit/integration suite.")
@@ -446,7 +461,7 @@ def render_summary(run: Run) -> str:
                 lines.append("Warning: All scenarios skipped or need setup for tooling/parse/prerequisite reasons, not mutation-guard — coverage is zero; verify the generated plan, Setup gaps and tool availability.")
         else:
             lines.append("Error: No executable verifier — cannot gate (all scenarios marked SKIP or NEED_INFO). Check your test plan, Setup gaps and tool availability.")
-    elif not failures_at_floor(run):
+    elif result != "Stopped" and not failures_at_floor(run):
         if shallow and run.state["auto_generated"]:
             lines.append("All assertions passed, but coverage is shallow — no feature behavior was exercised (see Coverage). Low-confidence green: the plan was auto-generated and may not reflect runtime auth/setup.")
         else:

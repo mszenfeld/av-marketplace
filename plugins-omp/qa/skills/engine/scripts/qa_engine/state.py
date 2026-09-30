@@ -40,6 +40,7 @@ from av_config import atomic_write
 from av_config import canonical_hash
 from av_config import mask
 from av_config import parse_origin
+from av_config import source_subset
 from qa_engine.config import Config
 from qa_engine.accounts import refresh
 from qa_engine.plan import FIELD
@@ -76,6 +77,7 @@ KINDS = frozenset({"credentials", "service", "fixture", "tool"})
 FAILING = frozenset({"FAIL", "AUTH"})
 SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 SANITY_PATHS = frozenset({"/health", "/healthz", "/openapi.json", "/version", "/", "/docs", "/api/docs"})
+STOP_REASONS = frozenset({"user-abort", "config-drift", "login-failure", "plan-changed", "cleanup-error", "other"})
 PAYLOAD_FIELDS = frozenset({"payload", "request payload", "body", "request body"})
 STALE_SECONDS = 24 * 3600
 LOCK_GRACE_MINUTES = 15
@@ -177,6 +179,7 @@ class Run:
         """Repository-relative paths the loop itself writes, never counted as fix edits."""
         paths = {Path(self.record["sidecar"]), Path(self.record["report"])}
         paths |= {path.with_suffix(".bak") for path in paths}
+        paths |= {self.repo / path for path in self.record.get("bootstrap_dirty", [])}
         return {_relative(self.repo, path) for path in paths}
 
 
@@ -272,7 +275,10 @@ def default_lock_directory() -> Path:
     return home / "av-marketplace/qa-locks"
 
 
-def start_run(config: Config, plan_path: Path, takeover: str | None = None) -> JSON:
+def start_run(
+    config: Config, plan_path: Path, takeover: str | None = None, *,
+    generated: bool = False, baseline_run: str | None = None, baseline_file: Path | None = None,
+) -> JSON:
     """Create a run and its sidecar, rolling back locks and directory on failure."""
     if config.errors:
         raise InvalidConfig("invalid configuration; run the config subcommand for its errors")
@@ -290,6 +296,15 @@ def start_run(config: Config, plan_path: Path, takeover: str | None = None) -> J
         raise ConfigError("plan is not readable")
     plan = parse_plan(plan_path)
     effective = effective_config(config)
+    pre_loop = _restart_baseline(repo, plan, baseline_run) if baseline_run is not None else None
+    if baseline_file is not None:
+        names = _load_json(baseline_file)
+        if not isinstance(names, list) or any(
+            not isinstance(name, str) or not name or Path(name).is_absolute() or ".." in Path(name).parts
+            for name in names
+        ):
+            raise InvalidConfig("baseline file must contain a JSON array of repository-relative paths")
+        pre_loop = {name: _fingerprint(repo / name) for name in names}
     origins = sorted({_origin_text(url) for url in config.targets.values()})
     now = time.time()
     tmp = _tmp_root()
@@ -305,13 +320,16 @@ def start_run(config: Config, plan_path: Path, takeover: str | None = None) -> J
         }
         for displaced in locks.acquire(origins, holder, now, takeover):
             _remove_run_directory(displaced)
-        pre_loop = _dirty(repo)
-        idempotency, sidecar, report, state = _prepare_sidecar(repo, plan, plan_hash, run_id, sorted(pre_loop))
+        start_dirty = _dirty(repo)
+        if pre_loop is None:
+            pre_loop = start_dirty
+        idempotency, sidecar, report, state = _prepare_sidecar(repo, plan, plan_hash, run_id, pre_loop, generated)
         record = {
             "run_id": run_id, "repo": str(repo), "plan": str(plan_path), "plan_sha256": plan_hash,
             "started": now, "sidecar": str(sidecar), "report": str(report), "config": mask(effective),
             "config_hash": canonical_hash(effective), "trust_hash": config.trust_hash, "origins": origins,
             "locks": str(locks.directory), "pre_loop": pre_loop,
+            "bootstrap_dirty": sorted((set(start_dirty) - set(pre_loop)) & {".av/config.toml", ".gitignore"}),
         }
         _write_json(directory / "run.json", record, 0o600)
         (directory / "results").mkdir(mode=0o700)
@@ -341,9 +359,72 @@ def end_run(repo: Path, run_id: str) -> JSON:
     return {"released": released}
 
 
+def _restart_baseline(repo: Path, plan: Plan, run_id: str) -> dict[str, str]:
+    """Read the ended pass's fingerprints from its durable sidecar, not its deleted directory."""
+    if not RUN_ID.fullmatch(run_id):
+        raise InvalidConfig("invalid baseline run id")
+    path = repo / "docs/testing/reports" / f"{_topic(plan.path)}-loop-state.json"
+    stored = _load_json(path)
+    if not isinstance(stored, dict) or stored.get("run_id") != run_id:
+        raise StateStop("baseline run is unavailable for this plan")
+    baseline = stored.get("pre_loop")
+    if not isinstance(baseline, dict) or any(not isinstance(name, str) or not isinstance(value, str) for name, value in baseline.items()):
+        raise StateStop("baseline run has no recorded dirty fingerprints")
+
+    return baseline
+
+
+def _stop_hidden(run: Run) -> set[str]:
+    """Collect private values and configured sources without resolving or executing them."""
+    hidden: set[str] = set()
+
+    def remember(value: object) -> None:
+        if isinstance(value, str) and value:
+            hidden.add(value)
+            hidden.add(json.dumps(value, ensure_ascii=False)[1:-1])
+        elif isinstance(value, Mapping):
+            for item in value.values():
+                remember(item)
+        elif isinstance(value, list):
+            for item in value:
+                remember(item)
+
+    for config in (run.record["config"], Config(run.repo).data):
+        for source in source_subset(config).values():
+            if isinstance(source, str):
+                if source.startswith("literal:") and source != "literal:***":
+                    remember(source[8:])
+                elif source.startswith("env:"):
+                    remember(os.environ.get(source[4:]))
+    for name in ("accounts.private.json", "secrets.json"):
+        remember(_load_json(run.directory / name))
+
+    return hidden
+
+
+def stop_run(run: Run, reason: str, detail: str | None = None) -> JSON:
+    """Close pending fix work and record a sanitized explicit stop, without config drift checks."""
+    if reason not in STOP_REASONS:
+        raise InvalidConfig("invalid stop reason")
+    if run.state["open_iteration"] is not None:
+        iteration_close(run, decide=False)
+    end = run.state["loop_end"] or {}
+    if end.get("decision") == "stop":
+        return end
+    sanitized = detail or ""
+    if sanitized:
+        for value in sorted(_stop_hidden(run), key=len, reverse=True):
+            sanitized = sanitized.replace(value, "***")
+        sanitized = " ".join(sanitized.split())
+    end = {"decision": "stop", "reason": reason, "detail": sanitized}
+    run.state["loop_end"] = end
+
+    return end
+
+
 @contextmanager
-def open_run(repo: Path, run_id: str) -> Iterator[Run]:
-    """Load a run under its state lock; the sidecar is saved only if the body succeeds."""
+def open_run(repo: Path, run_id: str, *, close_iteration: bool = False) -> Iterator[Run]:
+    """Load locked state; exit closure persists even if the subsequent operation fails."""
     directory = run_directory(run_id)
     if not _owned_directory(directory):
         raise StateStop("unknown run; start one with run start")
@@ -359,6 +440,9 @@ def open_run(repo: Path, run_id: str) -> Iterator[Run]:
         if state["run_id"] != run_id:
             raise StateStop("the sidecar belongs to another run")
         run = Run(repo, run_id, directory, record, state)
+        if close_iteration and state["open_iteration"] is not None:
+            iteration_close(run, decide=False)
+            _write_json(sidecar, state)
         before = json.dumps(state, sort_keys=True)
         yield run
         if json.dumps(state, sort_keys=True) != before:
@@ -610,14 +694,24 @@ def iteration_open(run: Run) -> JSON:
     return {"decision": "iterate", "iteration": iteration + 1, "reason": "failures remain at or above min_severity"}
 
 
-def iteration_close(run: Run) -> JSON:
-    """Steps 3f-3i: compare with the open snapshot and commit exactly one history row."""
+def iteration_close(run: Run, *, decide: bool = True) -> JSON:
+    """Commit one history row; exit closures collect recovery without deciding the loop end."""
     state = run.state
     opened = state["open_iteration"]
     if opened is None:
         if state["iterations"]:
             return cast(JSON, state["iterations"][-1]["result"])
         raise StateStop("no iteration is open")
+    fixes = [
+        record for record in state["dispatches"].values()
+        if record.get("kind") == "fix" and record.get("iteration") == opened["iteration"]
+    ]
+    for record in fixes:
+        if record["result"] is None:
+            warnings = _hardcoding_warnings(run, record) if run.plan_unchanged() else [
+                f"{record['qa']}: Anti-hardcoding check unavailable: plan changed mid-run"
+            ]
+            record.update(result="failed", warnings=warnings)
 
     snapshot: dict[str, str] = opened["snapshot"]
     current: dict[str, str] = state["current"]
@@ -630,7 +724,9 @@ def iteration_close(run: Run) -> JSON:
     overlap = sorted(path for path, fingerprint in pre_loop.items() if dirty.get(path) != fingerprint and path not in artifacts)
     state["fix_touched_files"] = touched
 
-    if not run.plan_unchanged():
+    if not decide:
+        decision, reason = "closed", "iteration closed at exit"
+    elif not run.plan_unchanged():
         decision, reason = "continue", "plan changed mid-run; the next iteration open stops"
     elif regressions:
         decision, reason = "final", f"scenario regression detected: {', '.join(regressions)}"
@@ -640,10 +736,6 @@ def iteration_close(run: Run) -> JSON:
         exhausted = _budget_exhausted(run)
         decision, reason = ("final", exhausted) if exhausted is not None else ("continue", "progress this iteration")
 
-    fixes = [
-        record for record in state["dispatches"].values()
-        if record.get("kind") == "fix" and record.get("iteration") == opened["iteration"]
-    ]
     result = {
         "decision": decision, "reason": reason, "now_passing": now_passing, "regressions": regressions,
         "fix_touched_files": touched, "overlap": overlap,
@@ -662,7 +754,7 @@ def iteration_close(run: Run) -> JSON:
         "result": result,
     })
     state["open_iteration"] = None
-    if decision == "final":
+    if decision == "final" and (state["loop_end"] or {}).get("decision") != "stop":
         state["loop_end"] = {"decision": decision, "reason": reason}
 
     return result
@@ -1088,7 +1180,9 @@ def _location(value: str | None) -> str | None:
     return tokens[0] if tokens else None
 
 
-def _prepare_sidecar(repo: Path, plan: Plan, plan_hash: str, run_id: str, pre_loop_dirty: list[str]) -> tuple[str, Path, Path, JSON]:
+def _prepare_sidecar(
+    repo: Path, plan: Plan, plan_hash: str, run_id: str, pre_loop: dict[str, str], generated: bool,
+) -> tuple[str, Path, Path, JSON]:
     """Resolve the four idempotency cases (loop.md Step 1.2) and build the run's sidecar."""
     reports = repo / "docs/testing/reports"
     topic = _topic(plan.path)
@@ -1116,7 +1210,9 @@ def _prepare_sidecar(repo: Path, plan: Plan, plan_hash: str, run_id: str, pre_lo
         idempotency = "adopt"
         report = newest
         carried = {"scenario_issues": {}, "issue_assertion": {}}
-        for qa, block in _issue_blocks(newest.read_text()).items():
+        prior_text = newest.read_text()
+        carried["auto_generated"] = bool(re.search(r"^- Plan provenance: auto-generated$", prior_text, re.MULTILINE))
+        for qa, block in _issue_blocks(prior_text).items():
             if block.scenario is not None:
                 carried["scenario_issues"].setdefault(block.scenario, []).append(qa)
         _reconstruct(carried, report, plan)
@@ -1129,11 +1225,14 @@ def _prepare_sidecar(repo: Path, plan: Plan, plan_hash: str, run_id: str, pre_lo
         "topic": topic, "created": datetime.now().astimezone().date().isoformat(), "run_id": run_id,
         "scenario_issues": {}, "issue_assertion": {}, "scenario_kind": {}, "scenario_reason": {},
         "unverified_issues": [], "auth_gated_issues": [], "need_info": {}, "baseline": {}, "current": {},
-        "assertions": {}, "auto_generated": False, "pre_loop_dirty": pre_loop_dirty, "fix_touched_files": [],
+        "assertions": {}, "auto_generated": generated, "pre_loop_dirty": sorted(pre_loop), "pre_loop": pre_loop,
+        "fix_touched_files": [],
         "dispatch_count": 0, "dispatches": {}, "iteration": 0, "open_iteration": None, "loop_end": None,
         "iterations": [],
     }
     state.update(carried)
+    if generated:
+        state["auto_generated"] = True
 
     return idempotency, sidecar, report, state
 

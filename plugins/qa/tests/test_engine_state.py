@@ -132,6 +132,67 @@ class StateTests(unittest.TestCase):
         self.report(run, severity="CRITICAL")
         return run
 
+    def test_generated_provenance_is_kept_when_reusing_a_plan(self) -> None:
+        run = self.cli("run", "start", str(self.plan), "--generated")
+        self.assertTrue(self.sidecar(run)["auto_generated"])
+        self.cli("run", "end", "--run", run["run"])
+        reused = self.start()
+        self.assertTrue(self.sidecar(reused)["auto_generated"])
+        self.cli("run", "end", "--run", reused["run"])
+
+        Path(reused["sidecar"]).unlink()
+        fresh = self.start()
+        self.assertFalse(self.sidecar(fresh)["auto_generated"])
+        self.cli("run", "end", "--run", fresh["run"])
+        existing = self.cli("run", "start", str(self.plan), "--generated")
+        self.assertTrue(self.sidecar(existing)["auto_generated"])
+
+    def test_generated_flag_overrides_legacy_report_adoption(self) -> None:
+        self.put("# QA Report\n", "docs/testing/reports/2026-09-29-state-report.md")
+        run = self.cli("run", "start", str(self.plan), "--generated")
+        self.assertEqual(run["idempotency"], "adopt")
+        self.assertTrue(self.sidecar(run)["auto_generated"])
+
+    def test_repair_restart_keeps_baseline_after_old_directory_is_deleted(self) -> None:
+        self.put(".av/local.toml\n", ".gitignore")
+        self.git("add", ".av/config.toml", ".gitignore")
+        self.git("commit", "-qm", "configuration")
+        self.put("name = 'user edit'\n", "src/app.py")
+        run = self.start()
+        original = json.loads((Path(run["dir"]) / "run.json").read_text())["pre_loop"]
+        self.assertEqual(self.sidecar(run)["pre_loop_dirty"], ["src/app.py"])
+        self.cli("run", "end", "--run", run["run"])
+        self.assertFalse(Path(run["dir"]).exists())
+
+        self.put(BASE + "\n# repaired service recipe\n", ".av/config.toml")
+        self.put(".av/local.toml\n.av/secrets.local.env\n", ".gitignore")
+        self.put("name = 'later edit'\n", "src/app.py")
+        restarted = self.cli("run", "start", str(self.plan), "--baseline-run", run["run"])
+        self.assertEqual(self.sidecar(restarted)["pre_loop_dirty"], ["src/app.py"])
+        record = json.loads((Path(restarted["dir"]) / "run.json").read_text())
+        self.assertEqual(record["pre_loop"], original)
+
+    def test_initial_baseline_excludes_bootstrap_writes_not_user_config_dirt(self) -> None:
+        self.put(".av/local.toml\n", ".gitignore")
+        self.git("add", ".av/config.toml", ".gitignore")
+        self.git("commit", "-qm", "configuration")
+        baseline = self.put(json.dumps(["src/app.py"]), "baseline.json")
+        self.put("name = 'user edit'\n", "src/app.py")
+        self.put(BASE + "\n# bootstrap addition\n", ".av/config.toml")
+        self.put(".av/local.toml\n.av/secrets.local.env\n", ".gitignore")
+        run = self.cli("run", "start", str(self.plan), "--baseline-file", str(baseline))
+        self.assertEqual(self.sidecar(run)["pre_loop_dirty"], ["src/app.py"])
+        self.cli("run", "end", "--run", run["run"])
+
+        baseline.write_text(json.dumps([".av/config.toml", "src/app.py"]))
+        run = self.cli("run", "start", str(self.plan), "--baseline-file", str(baseline))
+        self.assertEqual(self.sidecar(run)["pre_loop_dirty"], [".av/config.toml", "src/app.py"])
+
+    def test_missing_restart_baseline_fails_without_starting_a_run(self) -> None:
+        result = self.cli("run", "start", str(self.plan), "--baseline-run", "deadbeef", code=1)
+        self.assertIn("baseline", result["error"])
+        self.assertFalse(list(self.root.glob("qa-run-*")))
+
     def test_private_run_records_and_releases_origin_locks(self) -> None:
         run = self.start()
         directory = Path(run["dir"])

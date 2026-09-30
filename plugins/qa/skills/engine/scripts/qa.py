@@ -30,6 +30,7 @@ from qa_engine.plan import resolve_plan
 from qa_engine.report import refresh_accounts
 from qa_engine.report import render_report
 from qa_engine.report import render_summary
+from qa_engine.state import STOP_REASONS
 from qa_engine.state import StateStop
 from qa_engine.state import assign_issues
 from qa_engine.state import candidates
@@ -43,6 +44,7 @@ from qa_engine.state import iteration_close
 from qa_engine.state import iteration_open
 from qa_engine.state import open_run
 from qa_engine.state import start_run
+from qa_engine.state import stop_run
 
 STATE_COMMANDS = frozenset({"dispatch", "fix", "ingest", "issues", "candidates", "iteration", "accounts", "services", "report"})
 
@@ -106,7 +108,14 @@ def parser() -> argparse.ArgumentParser:
     start = repo_option(run_operations.add_parser("start"))
     start.add_argument("plan", type=Path)
     start.add_argument("--takeover")
+    start.add_argument("--generated", action="store_true")
+    baseline = start.add_mutually_exclusive_group()
+    baseline.add_argument("--baseline-run")
+    baseline.add_argument("--baseline-file", type=Path)
     run_option(run_operations.add_parser("end"))
+    stop = run_option(run_operations.add_parser("stop"))
+    stop.add_argument("--reason", required=True, choices=sorted(STOP_REASONS))
+    stop.add_argument("--detail")
     dispatch = run_option(commands.add_parser("dispatch"))
     dispatch_operations = dispatch.add_subparsers(dest="operation", required=True)
     tester = repo_option(dispatch_operations.add_parser("tester"))
@@ -171,7 +180,7 @@ def read_proposal(path: Path) -> dict[str, object]:
 
 def run_state(repo: Path, args: argparse.Namespace) -> dict[str, object]:
     """Run one loop bookkeeping subcommand under the run's state lock."""
-    with open_run(repo, args.run) as run:
+    with open_run(repo, args.run, close_iteration=args.command == "report" and args.final) as run:
         if args.command == "report":
             if args.accounts:
                 if args.final:
@@ -214,13 +223,20 @@ def execute(args: argparse.Namespace) -> tuple[dict[str, object] | str, int]:
     if args.command == "plan" and args.operation == "resolve":
         return resolve_plan(repo, args.argument), 0
     if args.command == "summary":
-        with open_run(repo, args.run) as run:
+        with open_run(repo, args.run, close_iteration=True) as run:
             return render_summary(run), 0
     if args.command == "run":
         if args.operation == "end":
             return end_run(repo, args.run), 0
+        if args.operation == "stop":
+            with open_run(repo, args.run, close_iteration=True) as run:
+                return stop_run(run, args.reason, args.detail), 0
         path = args.plan if args.plan.is_absolute() else repo / args.plan
-        return start_run(Config(repo), path, args.takeover), 0
+        baseline = args.baseline_file
+        if baseline is not None and not baseline.is_absolute():
+            baseline = repo / baseline
+        return start_run(Config(repo), path, args.takeover, generated=args.generated,
+                         baseline_run=args.baseline_run, baseline_file=baseline), 0
     if args.command in STATE_COMMANDS:
         return run_state(repo, args), 0
     config = Config(repo)
