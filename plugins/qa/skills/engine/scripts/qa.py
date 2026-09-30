@@ -27,6 +27,9 @@ from qa_engine.services import services
 from qa_engine.plan import check_plan
 from qa_engine.plan import parse_plan
 from qa_engine.plan import resolve_plan
+from qa_engine.report import refresh_accounts
+from qa_engine.report import render_report
+from qa_engine.report import render_summary
 from qa_engine.state import StateStop
 from qa_engine.state import assign_issues
 from qa_engine.state import candidates
@@ -41,7 +44,7 @@ from qa_engine.state import iteration_open
 from qa_engine.state import open_run
 from qa_engine.state import start_run
 
-STATE_COMMANDS = frozenset({"dispatch", "fix", "ingest", "issues", "candidates", "iteration", "accounts", "services"})
+STATE_COMMANDS = frozenset({"dispatch", "fix", "ingest", "issues", "candidates", "iteration", "accounts", "services", "report"})
 
 
 class UsageError(ConfigError):
@@ -128,6 +131,12 @@ def parser() -> argparse.ArgumentParser:
         actions = group.add_subparsers(dest="operation", required=True)
         for operation in action_names:
             run_option(actions.add_parser(operation))
+    report = run_option(commands.add_parser("report"))
+    report_input = report.add_mutually_exclusive_group(required=True)
+    report_input.add_argument("--issues", type=Path)
+    report_input.add_argument("--accounts", action="store_true")
+    report.add_argument("--final", action="store_true")
+    run_option(commands.add_parser("summary"))
     return root
 
 
@@ -163,6 +172,13 @@ def read_proposal(path: Path) -> dict[str, object]:
 def run_state(repo: Path, args: argparse.Namespace) -> dict[str, object]:
     """Run one loop bookkeeping subcommand under the run's state lock."""
     with open_run(repo, args.run) as run:
+        if args.command == "report":
+            if args.accounts:
+                if args.final:
+                    raise UsageError("--accounts cannot be combined with --final")
+                return refresh_accounts(run)
+            path = args.issues if args.issues.is_absolute() else repo / args.issues
+            return render_report(run, path, final=args.final)
         if args.command in {"accounts", "services"}:
             config = Config(repo)
             if args.operation not in {"teardown", "down"}:
@@ -191,12 +207,15 @@ def run_state(repo: Path, args: argparse.Namespace) -> dict[str, object]:
         return iteration_open(run) if args.operation == "open" else iteration_close(run)
 
 
-def execute(args: argparse.Namespace) -> tuple[dict[str, object], int]:
+def execute(args: argparse.Namespace) -> tuple[dict[str, object] | str, int]:
     repo = repository(args.repo)
     if args.command == "tools":
         return tools(), 0
     if args.command == "plan" and args.operation == "resolve":
         return resolve_plan(repo, args.argument), 0
+    if args.command == "summary":
+        with open_run(repo, args.run) as run:
+            return render_summary(run), 0
     if args.command == "run":
         if args.operation == "end":
             return end_run(repo, args.run), 0
@@ -234,7 +253,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, UnicodeError):
         # File/process errors may contain paths or values in their details.
         result, code = {"error": "engine I/O operation failed"}, 1
-    print(json.dumps(result, sort_keys=True))
+    if isinstance(result, str):
+        print(result, end="" if result.endswith("\n") else "\n")
+    else:
+        print(json.dumps(result, sort_keys=True))
     return code
 
 

@@ -595,7 +595,7 @@ def iteration_open(run: Run) -> JSON:
         return {"decision": "iterate", "iteration": iteration, "reason": "iteration already open"}
     if state["loop_end"] is not None:
         return {"decision": state["loop_end"]["decision"], "iteration": iteration, "reason": state["loop_end"]["reason"]}
-    if not _failures_at_floor(run):
+    if not failures_at_floor(run):
         return {"decision": "final", "iteration": iteration, "reason": "no failures at or above min_severity"}
     exhausted = _budget_exhausted(run)
     if exhausted is not None:
@@ -868,7 +868,7 @@ def _drop_reason(
     return None
 
 
-def _failures_at_floor(run: Run) -> bool:
+def failures_at_floor(run: Run) -> bool:
     """Whether a failing scenario has an issue at or above ``min_severity``.
 
     An issue whose severity is not rendered yet counts, so a missing report
