@@ -4,7 +4,7 @@
 directory and takes one lock per target origin. Loop-critical state lives in
 the sidecar ``docs/testing/reports/<topic>-loop-state.json`` so it survives the
 orchestrator's many tool calls; every mutation happens under the run's state
-lock. Nothing here resolves a value source: records hold persona names,
+lock. Account refresh uses the private channel; records hold persona names,
 scenario IDs, file fingerprints and masked config, never credential values.
 """
 from __future__ import annotations
@@ -41,6 +41,7 @@ from av_config import canonical_hash
 from av_config import mask
 from av_config import parse_origin
 from qa_engine.config import Config
+from qa_engine.accounts import refresh
 from qa_engine.plan import FIELD
 from qa_engine.plan import PERSONA_FIELD
 from qa_engine.plan import TOKEN
@@ -364,8 +365,8 @@ def open_run(repo: Path, run_id: str) -> Iterator[Run]:
             _write_json(sidecar, state)
 
 
-def dispatch_tester(run: Run, config: Config, section: str, phase: str, authenticated: Sequence[str] = ()) -> JSON:
-    """Record a section assignment; ``authenticated`` lists personas logged in for it."""
+def dispatch_tester(run: Run, config: Config, section: str, phase: str) -> JSON:
+    """Log in section personas before recording a tester assignment."""
     check_drift(run, config)
     state = run.state
     plan = run.plan()
@@ -381,6 +382,7 @@ def dispatch_tester(run: Run, config: Config, section: str, phase: str, authenti
     scenarios = {scenario.id: scenario for scenario in plan.scenarios}
     guarded = [sid for sid in cast(list[str], check_plan(plan, config)["guarded"]) if sid in ids]
     edges = {sid: len(scenarios[sid].edges) for sid in ids}
+    authenticated = refresh(run, config, section)
     dispatch = _record_dispatch(state, {
         "kind": "tester", "section": section, "phase": phase, "scenarios": ids, "edges": edges,
         "guarded": guarded, "authenticated": sorted(set(authenticated)),
@@ -388,7 +390,7 @@ def dispatch_tester(run: Run, config: Config, section: str, phase: str, authenti
     })
 
     return {
-        "dispatch": dispatch, "scenarios": ids, "edges": edges, "guarded": guarded, "refreshed": [],
+        "dispatch": dispatch, "scenarios": ids, "edges": edges, "guarded": guarded, "refreshed": authenticated,
         "dispatch_count": state["dispatch_count"], "budget_left": _budget_left(run),
     }
 

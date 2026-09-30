@@ -31,12 +31,9 @@ personas = ["user"]
 email = "literal:qa@test.local"
 password = "env:QA_TEST_PASSWORD"
 [qa.accounts.login]
-kind = "http"
-target = "api"
-method = "POST"
-path = "/login"
-expect = [200]
-token = ".token"
+kind = "command"
+run = 'printf "{\\"token\\":\\"state-test-token\\"}"'
+outputs = ["token"]
 '''
 PLAN = '''# Test Plan
 ## FE Test Scenarios
@@ -101,7 +98,10 @@ class StateTests(unittest.TestCase):
         self.cli("trust", "accept", config["trust_hash"])
 
     def start(self, **kwargs: object) -> dict[str, object]:
-        return self.cli("run", "start", str(self.plan), **kwargs)
+        result = self.cli("run", "start", str(self.plan), **kwargs)
+        if kwargs.get("code", 0) == 0:
+            self.cli("accounts", "provision", "--run", result["run"])
+        return result
 
     def sidecar(self, run: dict[str, object]) -> dict[str, object]:
         return json.loads(Path(run["sidecar"]).read_text())
@@ -286,6 +286,7 @@ class StateTests(unittest.TestCase):
                 self.cli("run", "end", "--run", run["run"])
 
     def test_all_verdict_precedence_rules(self) -> None:
+        self.plan.write_text(PLAN.replace("- **Headers:** Authorization: Bearer $QA_USER_TOKEN\n", ""))
         cases = [(outcome("FAIL", 500), outcome("NEED_INFO", kind="tool", missing=["jq"]), "fail"),
                  (outcome("FAIL", 401), outcome("FAIL", 500), "fail"),
                  (outcome("PASS"), outcome("NEED_INFO", kind="fixture", missing=["upload"]), "need-info"),
@@ -313,6 +314,7 @@ class StateTests(unittest.TestCase):
         self.assertEqual(self.sidecar(run)["scenario_kind"], {"FE-01": "feature", "BE-01": "feature", "BE-02": "sanity"})
 
     def test_authentication_record_controls_main_flow_not_edge_failure(self) -> None:
+        self.plan.write_text(PLAN.replace("- **Headers:** Authorization: Bearer $QA_USER_TOKEN\n", ""))
         run = self.start()
         self.ingest(run, self.dispatch(run), outcome("FAIL", 401), outcome("FAIL", 500))
         assigned = self.cli("issues", "--run", run["run"])["assign"]
@@ -330,10 +332,7 @@ class StateTests(unittest.TestCase):
                 run = self.start()
                 dispatch = self.dispatch(run)
                 state = self.sidecar(run)
-                self.assertEqual(state["dispatches"][dispatch["dispatch"]]["authenticated"], [])
-                # Task 4 fills the same record after its fresh login succeeds.
-                state["dispatches"][dispatch["dispatch"]]["authenticated"] = ["user"]
-                Path(run["sidecar"]).write_text(json.dumps(state))
+                self.assertEqual(state["dispatches"][dispatch["dispatch"]]["authenticated"], ["user"])
                 self.assertEqual(self.ingest(run, dispatch, outcome("FAIL", 401))["verdicts"]["BE-01"], "fail")
                 self.cli("issues", "--run", run["run"])
                 self.report(run)

@@ -9,7 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-from typing import TextIO
+from typing import NoReturn
 
 # Check before importing tomllib or any engine module, so older interpreters
 # receive the actionable version error rather than an import traceback.
@@ -20,12 +20,17 @@ if sys.version_info < (3, 11):
 from av_config import ConfigError
 from av_config import InvalidConfig
 from qa_engine.config import Config
+from qa_engine.accounts import provision
+from qa_engine.accounts import refresh
+from qa_engine.accounts import teardown
+from qa_engine.services import services
 from qa_engine.plan import check_plan
 from qa_engine.plan import parse_plan
 from qa_engine.plan import resolve_plan
 from qa_engine.state import StateStop
 from qa_engine.state import assign_issues
 from qa_engine.state import candidates
+from qa_engine.state import check_drift
 from qa_engine.state import dispatch_fix
 from qa_engine.state import dispatch_tester
 from qa_engine.state import end_run
@@ -36,7 +41,7 @@ from qa_engine.state import iteration_open
 from qa_engine.state import open_run
 from qa_engine.state import start_run
 
-STATE_COMMANDS = frozenset({"dispatch", "fix", "ingest", "issues", "candidates", "iteration"})
+STATE_COMMANDS = frozenset({"dispatch", "fix", "ingest", "issues", "candidates", "iteration", "accounts", "services"})
 
 
 class UsageError(ConfigError):
@@ -44,11 +49,11 @@ class UsageError(ConfigError):
 
 
 class Parser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> NoReturn:
         raise UsageError("invalid command arguments; use --help")
 
-    def print_help(self, file: TextIO | None = None) -> None:
-        print(json.dumps({"help": self.format_help()}), file=file)
+    def format_help(self) -> str:
+        return json.dumps({"help": super().format_help()}) + "\n"
 
 
 def repo_option(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -118,6 +123,11 @@ def parser() -> argparse.ArgumentParser:
     iteration_operations = iteration.add_subparsers(dest="operation", required=True)
     run_option(iteration_operations.add_parser("open"))
     run_option(iteration_operations.add_parser("close"))
+    for command, action_names in (("accounts", ("provision", "refresh", "teardown")), ("services", ("check", "up", "prepare", "down"))):
+        group = repo_option(commands.add_parser(command))
+        actions = group.add_subparsers(dest="operation", required=True)
+        for operation in action_names:
+            run_option(actions.add_parser(operation))
     return root
 
 
@@ -153,6 +163,17 @@ def read_proposal(path: Path) -> dict[str, object]:
 def run_state(repo: Path, args: argparse.Namespace) -> dict[str, object]:
     """Run one loop bookkeeping subcommand under the run's state lock."""
     with open_run(repo, args.run) as run:
+        if args.command in {"accounts", "services"}:
+            config = Config(repo)
+            if args.operation not in {"teardown", "down"}:
+                check_drift(run, config)
+            if args.command == "services":
+                return services(run, config, args.operation)
+            if args.operation == "provision":
+                return provision(run, config)
+            if args.operation == "refresh":
+                return {"refreshed": refresh(run, config)}
+            return teardown(run, config)
         if args.command == "dispatch":
             config = Config(repo)
             if args.operation == "tester":
