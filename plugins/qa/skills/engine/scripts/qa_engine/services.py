@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import ExitStack
-from http.client import HTTPException
-import json
 import os
 import re
 import signal
@@ -13,49 +11,19 @@ from tempfile import TemporaryFile
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import cast
-from urllib.error import HTTPError
-from urllib.error import URLError
-from urllib.request import HTTPRedirectHandler
-from urllib.request import ProxyHandler
 from urllib.request import Request
-from urllib.request import build_opener
 
-from av_config import ConfigError
-from av_config import ValueSources
-from av_config import atomic_write
-from av_config import flatten
-from av_config import is_loopback
-from qa_engine.config import PLACEHOLDER
+from av_config.errors import ConfigError
+from av_config.files import atomic_write
+from qa_engine.common import write_json
 from qa_engine.config import Config
 from qa_engine.config import mapping
+from qa_engine.recipes import PLACEHOLDER
+from qa_engine.recipes import http_request
+from qa_engine.secrets import SecretSet
 
 if TYPE_CHECKING:
-    from qa_engine.state import Run
-
-SHELL_VARIABLE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?:[^}]*\})|([A-Za-z_][A-Za-z0-9_]*))")
-
-
-class NoRedirect(HTTPRedirectHandler):
-    """Keep credentials on the configured origin, even on a redirect response."""
-
-    def redirect_request(self, req: Request, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
-        return None
-
-
-def http_request(request: Request) -> tuple[int, bytes, list[str]]:
-    """Return status/body/cookies without following redirects or echoing payloads."""
-    try:
-        response = build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=30)
-    except HTTPError as error:
-        response = error
-    except (URLError, OSError, HTTPException, ValueError) as error:
-        raise ConfigError("HTTP recipe or probe unavailable") from error
-
-    try:
-        with response:
-            return response.code, response.read(), response.headers.get_all("Set-Cookie", [])
-    except (OSError, HTTPException) as error:
-        raise ConfigError("HTTP recipe or probe response unavailable") from error
+    from qa_engine.models import Run
 
 
 def require_trust(config: Config) -> None:
@@ -73,21 +41,8 @@ class Runtime:
         self.config = config
         self.cache: dict[str, str] = {}
         self.resolving: set[str] = set()
-        self.hidden: set[str] = {value for value in os.environ.values() if value}
+        self.secrets = SecretSet(run.directory, mapping(run.record.get("config")), config.data, minimum_length=4)
         self.logs: list[tuple[str, str]] = []
-        self.sources = ValueSources(run.repo, plugin_prefix="QA_")
-        self.remember(flatten(config.data))
-        for value in flatten(config.data).values():
-            if isinstance(value, str) and value.startswith("literal:"):
-                self.hidden.add(value[8:])
-        for name in ("accounts.private.json", "secrets.json"):
-            private = run.directory / name
-            if private.exists():
-                try:
-                    value = json.loads(private.read_text())
-                except (OSError, UnicodeError, ValueError) as error:
-                    raise ConfigError(f"{name}: private state unavailable") from error
-                self.remember(value)
 
     def __enter__(self) -> Runtime:
         return self
@@ -97,61 +52,42 @@ class Runtime:
             return
         path = self.run.directory / "engine.log"
         previous = path.read_text() if path.exists() else ""
-        hidden = sorted(self.hidden, key=len, reverse=True)
         entries: list[str] = []
         for label, output in self.logs:
-            for value in hidden:
-                if value:
-                    output = output.replace(value, "***")
-            entries.append(f"{label}: {output[-8192:]}\n")
+            output = self.secrets.mask(output)
+            entries.append(f"{label}: {output[-2048:]}\n")
         text = "".join(entries)
         atomic_write(path, (previous + text).encode(), 0o600)
 
-    def remember(self, value: object) -> None:
-        if isinstance(value, str) and value:
-            self.hidden.add(value)
-            self.hidden.add(json.dumps(value, ensure_ascii=False)[1:-1])
-        elif isinstance(value, Mapping):
-            for item in value.values():
-                self.remember(item)
-        elif isinstance(value, list):
-            for item in value:
-                self.remember(item)
+    def log_command(self, label: str, code: int, stdout: str, stderr: str) -> None:
+        """Keep successful output out of logs; mask failures before truncation."""
+        self.logs.append((label, stdout + stderr if code else f"exit 0, {len(stdout.splitlines())} lines"))
 
     def resolve(self, source: str, key: str) -> str:
         if key in self.cache:
             return self.cache[key]
         require_trust(self.config)
-        local = self.config.provenance.get(key) == ".av/local.toml"
-        secret = key.startswith("env.secrets.") or key.endswith(".password")
-        literal_allowed = key == "env.database.password" and is_loopback(str(self.config.database.get("host", "")))
-        problem = self.sources.validate(source, key, local=local, secret=secret, literal_allowed=literal_allowed)
-        if problem:
-            raise ConfigError(f"{key}: {problem}")
         if key in self.resolving:
             raise ConfigError(f"{key}: cyclic source dependency")
         self.resolving.add(key)
         try:
-            if source.startswith("cmd:"):
-                command = source[4:]
-                environ = self.command_environment(command)
-                code, stdout, stderr = self.shell(command, environ, key, timeout=30)
-                if code:
-                    self.logs.append((key, "***"))
-                    raise ConfigError(f"{key}: command source failed")
-                value = stdout.rstrip("\n")
-                if not value:
-                    self.logs.append((key, "***"))
-                    raise ConfigError(f"{key}: empty cmd source")
-                self.remember(value)
-                self.logs.append((key, stdout + stderr))
-            else:
-                value = self.sources.resolve(source, key, trusted=True, local=local, secret=secret, literal_allowed=literal_allowed)
+            value = self.config.shared.resolve(source, key, trusted=True, execute=self._run_source)
             self.cache[key] = value
-            self.remember(value)
+            self.secrets.remember(value)
             return value
         finally:
             self.resolving.remove(key)
+
+    def _run_source(self, command: str, key: str) -> str:
+        """Execute a source with transitive inputs and masked engine-log capture."""
+        dependencies = mapping(self.config.env.get("source_env")).get(key, [])
+        environ = self.command_environment(cast(list[str], dependencies))
+        code, stdout, stderr = self.shell(command, environ, key, timeout=30)
+        if code:
+            self.logs.append((key, "***"))
+            raise ConfigError(f"{key}: command source failed")
+        self.log_command(key, code, stdout, stderr)
+        return stdout
 
     def named(self, kind: str, name: str) -> str:
         table = self.config.values if kind == "value" else mapping(self.config.env.get("secrets"))
@@ -180,15 +116,12 @@ class Runtime:
             return [self.substitute(item, identity) for item in value]
         return value
 
-    def command_environment(self, command: str) -> dict[str, str]:
+    def command_environment(self, dependencies: list[str]) -> dict[str, str]:
         environ = dict(os.environ)
-        names = {a or b for a, b in SHELL_VARIABLE.findall(command)}
-        for name in self.config.values:
-            if f"QA_{name.upper()}" in names:
-                environ[f"QA_{name.upper()}"] = self.named("value", name)
-        for name in mapping(self.config.env.get("secrets")):
-            if f"AV_{name}" in names:
-                environ[f"AV_{name}"] = self.named("secret", name)
+        for dependency in dependencies:
+            kind, name = dependency.split(".", 1)
+            variable = f"QA_{name.upper()}" if kind == "value" else f"AV_{name}"
+            environ[variable] = self.named(kind, name)
         return environ
 
     def shell(self, command: str, environ: Mapping[str, str], label: str, *,
@@ -246,13 +179,14 @@ def services(run: Run, config: Config, operation: str) -> dict[str, object]:
         code = 0
         for command in commands:
             # Teardown runs the already-trusted command even after config repair.
-            environ = dict(os.environ) if operation == "down" else runtime.command_environment(command)
+            dependencies = mapping(settings.get("env")).get(operation, [])
+            environ = dict(os.environ) if operation == "down" else runtime.command_environment(cast(list[str], dependencies))
             if operation == "up":
                 run.record["services_up"] = True
-                atomic_write(run.directory / "run.json", json.dumps(run.record).encode(), 0o600)
+                write_json(run.directory / "run.json", run.record, 0o600)
             code, stdout, stderr = runtime.shell(command, environ, f"services {operation}",
                                                  timeout=float(run.budget["minutes"]) * 60, file_output=True)
-            runtime.logs.append((f"services {operation}", stdout + stderr))
+            runtime.log_command(f"services {operation}", code, stdout, stderr)
             if code:
                 raise ConfigError(f"services {operation}: command failed (exit {code})")
         return {"ran": True, "exit": code}

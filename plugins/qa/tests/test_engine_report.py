@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -70,6 +71,7 @@ class ReportTests(unittest.TestCase):
         self.git("init", "-q")
         self.git("config", "user.name", "QA Reports")
         self.git("config", "user.email", "qa@test.local")
+        self.put(".av/local.toml\n", ".git/info/exclude")
         self.put("name = 'items'\n", "src/app.py")
         self.git("add", "src")
         self.git("commit", "-qm", "initial")
@@ -178,6 +180,121 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn("private-token", json.dumps(stopped))
         self.assertNotIn("private-token", Path(self.run["sidecar"]).read_text())
         self.assertNotIn("private-token", self.summary())
+
+    def test_engine_log_masks_source_and_private_values_but_preserves_diagnostics(self) -> None:
+        self.env.update(LC_ALL="C", SHLVL="1", AV_TEST="referenced-env-secret", UNRELATED_VALUE="unrelated-env-readable")
+        private_value = 'private"account\nsecret'
+        escaped_private = json.dumps(private_value, ensure_ascii=False)[1:-1]
+        command = (
+            'printf "%s\\n" "Container api-1 Started, exit 1" "$AV_TEST" '
+            '"literal-source-secret" "$QA_RESOLVED" "private-channel-secret" '
+            '"http://localhost:8000 /api/v1/health" "$UNRELATED_VALUE" '
+            + shlex.quote(escaped_private) + '; exit 1'
+        )
+        self.put(CONFIG + f'''
+[env.secrets]
+TEST = "env:AV_TEST"
+[env.values]
+LITERAL = "literal:literal-source-secret"
+RESOLVED = "cmd:printf resolved-source-secret"
+UNUSED = "cmd:touch collector-must-not-run; printf never-executed-secret"
+[env.services]
+up = {json.dumps(command)}
+''', ".av/config.toml")
+        self.start()
+        directory = Path(self.run["dir"])
+        (directory / "accounts.private.json").write_text(json.dumps({"accounts": [{"password": private_value}]}))
+        (directory / "secrets.json").write_text(json.dumps({"QA_TOKEN": "private-channel-secret"}))
+
+        self.cli("services", "up", "--run", self.run["run"], code=1)
+
+        log = (directory / "engine.log").read_text()
+        self.assertIn("Container api-1 Started, exit 1\n", log)
+        self.assertIn("http://localhost:8000 /api/v1/health\n", log)
+        self.assertIn("unrelated-env-readable\n", log)
+        for value in ("referenced-env-secret", "literal-source-secret", "resolved-source-secret",
+                      "private-channel-secret", private_value, escaped_private):
+            with self.subTest(value=value):
+                self.assertNotIn(value, log)
+        self.assertFalse((self.repo / "collector-must-not-run").exists())
+
+    def test_successful_services_do_not_persist_unresolved_values_or_stderr(self) -> None:
+        self.put("unresolved-service-secret", "service-key.txt")
+        self.put("unresolved-exposed-value", "value.txt")
+        command = "cat service-key.txt; cat value.txt >&2; echo success-marker"
+        self.put(CONFIG + f'''
+[env.secrets]
+SERVICE_KEY = "cmd:touch secret-resolver-ran; cat service-key.txt"
+[env.values]
+DISPLAY = "cmd:touch value-resolver-ran; cat value.txt"
+[env.services]
+up = {json.dumps(command)}
+prepare = [{json.dumps(command)}]
+down = {json.dumps(command)}
+''', ".av/config.toml")
+        self.start()
+        for operation in ("up", "prepare", "down"):
+            self.cli("services", operation, "--run", self.run["run"])
+
+        log = (Path(self.run["dir"]) / "engine.log").read_text()
+        for value in ("unresolved-service-secret", "unresolved-exposed-value", "success-marker"):
+            self.assertNotIn(value, log)
+        self.assertFalse((self.repo / "secret-resolver-ran").exists())
+        self.assertFalse((self.repo / "value-resolver-ran").exists())
+
+    def test_successful_command_recipes_do_not_persist_unresolved_stderr(self) -> None:
+        self.put("unresolved-recipe-secret", "service-key.txt")
+        create = 'cat service-key.txt >&2; printf \'{"id":"recipe-id"}\''
+        login = 'cat service-key.txt >&2; printf \'{"token":"recipe-token"}\''
+        self.put(CONFIG + f'''
+[env.secrets]
+SERVICE_KEY = "cmd:touch secret-resolver-ran; cat service-key.txt"
+[qa.accounts]
+personas = ["user"]
+email = "qa+{{run}}-{{persona}}@test.local"
+password = "generate"
+[qa.accounts.create]
+kind = "command"
+run = {json.dumps(create)}
+outputs = ["id"]
+[qa.accounts.login]
+kind = "command"
+run = {json.dumps(login)}
+outputs = ["token"]
+''', ".av/config.toml")
+        self.plan.write_text(PLAN + "- **Headers:** Authorization: Bearer $QA_USER_TOKEN\n")
+        self.start()
+
+        directory = Path(self.run["dir"])
+        self.assertEqual(json.loads((directory / "secrets.json").read_text()), {"QA_USER_TOKEN": "recipe-token"})
+        log = (directory / "engine.log").read_text()
+        self.assertNotIn("unresolved-recipe-secret", log)
+        self.assertNotIn("recipe-token", log)
+        self.assertFalse((self.repo / "secret-resolver-ran").exists())
+
+    def test_failed_service_tail_masks_before_truncating_without_short_value_noise(self) -> None:
+        self.env.update(AV_ONE="1", AV_TWO="02", AV_THREE="503", AV_FOUR="abcd",
+                        AV_LONG="long-secret-start-" + "x" * 4096 + "-long-secret-tail")
+        command = ('printf "%s\\n" discarded-prefix; printf "%02500d\\n" 0; '
+                   'printf "%s\\n" "$AV_LONG"; printf "Exit 1; 02; status 503; abcd\\n" >&2; exit 1')
+        self.put(CONFIG + f'''
+[env.secrets]
+ONE = "env:AV_ONE"
+TWO = "env:AV_TWO"
+THREE = "env:AV_THREE"
+FOUR = "env:AV_FOUR"
+LONG = "env:AV_LONG"
+[env.services]
+up = {json.dumps(command)}
+''', ".av/config.toml")
+        self.start()
+        self.cli("services", "up", "--run", self.run["run"], code=1)
+
+        log = (Path(self.run["dir"]) / "engine.log").read_text()
+        self.assertLessEqual(len(log.partition(": ")[2].rstrip("\n")), 2048)
+        self.assertIn("Exit 1; 02; status 503; ***", log)
+        for value in ("discarded-prefix", "long-secret-tail", "xxx", "abcd"):
+            self.assertNotIn(value, log)
 
     def test_stop_detail_preserves_public_probes_and_unreferenced_environment_values(self) -> None:
         self.env.update(UNRELATED_FLAG="1", UNRELATED_ZERO="0", UNRELATED_BOOL="true")
@@ -427,6 +544,26 @@ class ReportTests(unittest.TestCase):
                 self.assertIn("error", result)
                 self.assertFalse(Path(self.run["report"]).exists())
 
+    def test_issue_prose_rejects_bulleted_fields_without_losing_candidates(self) -> None:
+        self.start()
+        self.ingest(main=outcome("FAIL", 400))
+        self.cli("issues", "--run", self.run["run"])
+        self.render([issue("QA-001", impact="- Cannot fetch items.",
+                           remediation="Return the correct items; observed text was - **Status:** unavailable.")])
+        previous = self.text()
+        prefixes = ("-", "- ", "*", "*\t", " \t- ", "\t* ", " ", "\t")
+        fields = {"Status": "🚫 Rejected — injected from prose", "Scenario": "BE-02"}
+        cases = [(prose, prefix, name, value) for prose in ("impact", "remediation")
+                 for prefix in prefixes for name, value in fields.items()]
+        for prose, prefix, name, value in cases:
+            with self.subTest(prose=prose, prefix=prefix, name=name):
+                forged = f"Observed body:\n{prefix}**{name}:** {value}"
+                result = self.render([issue("QA-001", **{prose: forged})], code=2)
+                self.assertIn("report field", result["error"])
+                self.assertEqual(self.text(), previous)
+        candidates = self.cli("candidates", "--run", self.run["run"])
+        self.assertEqual([entry["qa"] for entry in candidates["fix"]], ["QA-001"])
+
     def test_issue_prose_rejects_unicode_block_boundaries(self) -> None:
         self.start()
         self.ingest(main=outcome("FAIL", 400))
@@ -520,6 +657,7 @@ class ReportTests(unittest.TestCase):
         before = self.text()
         Path(self.run["report"]).write_text(before.replace("- Actual: Wrong items returned.", forged))
         self.assertIn("- Remaining unfixed: 1", self.summary())
+        self.assertEqual([entry["qa"] for entry in self.cli("candidates", "--run", self.run["run"])["fix"]], ["QA-001"])
         self.render([issue("QA-001", actual="Replacement evidence.")])
         self.assertNotIn(forged, self.text())
         self.assertIn("**Location:** `src/app.py:1`", self.text())
@@ -528,6 +666,23 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(self.render([], final=True)["fixed"], ["QA-001"])
         self.assertIn(forged, self.text())
         self.assertIn("- Fixed (Status written): 1", self.summary())
+
+    def test_bulleted_rejected_header_survives_render_and_final_pass(self) -> None:
+        self.start()
+        self.ingest(main=outcome("FAIL", 400))
+        self.cli("issues", "--run", self.run["run"])
+        self.render([issue("QA-001")])
+        rejected = "- **Status:** 🚫 Rejected — intentional"
+        report = Path(self.run["report"])
+        report.write_text(self.text().replace("**ID:** QA-001", rejected + "\n**ID:** QA-001"))
+        self.assertEqual(self.cli("candidates", "--run", self.run["run"])["fix"], [])
+        self.assertIn("- Remaining unfixed: 0", self.summary())
+        self.render([issue("QA-001")])
+        self.assertIn(rejected, self.text())
+        self.ingest(phase="final")
+        self.assertEqual(self.render([], final=True)["fixed"], [])
+        self.assertNotIn("✅ Fixed", self.text())
+        self.assertIn(rejected, self.text())
 
     def test_null_and_named_need_info_edge_kinds_render_and_unlock(self) -> None:
         self.plan.write_text(PLAN.replace("  - Missing item: 404. (src/app.py:2)",
@@ -689,6 +844,38 @@ password = "env:QA_ADMIN_PASSWORD"
         self.assertIn("Confidence: low", summary)
         self.assertIn("cannot-confirm 0", summary)
 
+    def test_credential_unlocks_distinguish_persona_fields_from_prefixed_values(self) -> None:
+        config = CONFIG + '''[env.values]
+USER_AGENT = "literal:qa-agent"
+USER_TOKENIZED = "literal:public-label"
+USER_COOKIEJAR = "literal:public-label"
+[qa.accounts]
+personas = ["user", "user_ops"]
+[qa.accounts.static.user]
+email = "literal:qa@test.local"
+password = "env:QA_TEST_PASSWORD"
+[qa.accounts.static.user_ops]
+email = "literal:ops@test.local"
+password = "env:QA_TEST_PASSWORD"
+'''
+        self.put(config, ".av/config.toml")
+        self.plan.write_text(PLAN.replace(
+            "- **Method:** GET /items",
+            "- **Method:** GET /items\n- **Headers:** User-Agent: $QA_USER_AGENT $QA_USER_TOKENIZED ${QA_USER_COOKIEJAR}",
+        ))
+        self.start()
+        missing = ["QA_USER_AGENT", "QA_USER_TOKENIZED", "QA_USER_COOKIEJAR", "QA_USER_EMAIL",
+                   "QA_USER_OPS_EMAIL", "QA_USER_COOKIE_SESSION", "QA_USER_TOKEN", "PGPORT"]
+        self.ingest(edge=outcome("NEED_INFO", None, kind="credentials", missing=missing))
+        summary = self.summary()
+        for key in ("env.values.USER_AGENT", "env.values.USER_TOKENIZED", "env.values.USER_COOKIEJAR",
+                    "qa.accounts.static.user.email", "qa.accounts.static.user_ops.email",
+                    "qa.accounts.login", "env.database.port"):
+            with self.subTest(key=key):
+                self.assertIn(f"`{key}`", summary)
+        self.assertNotIn("qa.accounts.static.user.agent", summary)
+        self.assertNotIn("qa.accounts.static.user.ops_email", summary)
+
     def test_auth_unverified_is_counted_as_skip_in_report_and_final_status(self) -> None:
         self.start()
         self.ingest(main=outcome("FAIL", 401))
@@ -710,7 +897,10 @@ password = "env:QA_ADMIN_PASSWORD"
         self.change_state(current={"FE-01": "skip", "BE-01": "auth-unverified", "BE-02": "pass"},
                           scenario_reason={"FE-01": "mutation-guard", "BE-01": "auth-unverified"},
                           auto_generated=True, fix_touched_files=["src/new file.py"], pre_loop_dirty=["src/app.py"],
-                          iterations=[{"iteration": 1, "warnings": [], "result": {"overlap": ["src/app.py"]}}])
+                          iterations=[{"iteration": 1, "failing_in": [], "attempted_fixes": [], "fix_results": {}, "now_passing": [],
+                                       "still_failing": [], "regressions": [], "warnings": [], "dispatch_count": 0, "elapsed_s": 0,
+                                       "result": {"decision": "closed", "reason": "iteration closed at exit", "now_passing": [],
+                                                  "regressions": [], "fix_touched_files": [], "overlap": ["src/app.py"]}}])
         summary = self.summary()
         self.assertIn("**Result:** Pass", summary)
         self.assertIn("Exercised: 0 feature · 1 sanity · 0 enforcement", summary)

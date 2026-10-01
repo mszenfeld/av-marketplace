@@ -14,8 +14,14 @@ import tempfile
 from threading import Thread
 import unittest
 from urllib.parse import parse_qs
+from urllib.request import Request
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/engine/scripts"
+sys.path.insert(0, str(SCRIPTS))
+
+from av_config.errors import ConfigError
+from qa_engine.recipes import http_request
+
 PLAN = '''# Test Plan
 ## BE Test Scenarios
 ### BE-01: Authenticated request
@@ -52,6 +58,9 @@ class AccountHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         payload = {name: values[0] for name, values in parse_qs(raw.decode()).items()} if self.headers.get("Content-Type") == "application/x-www-form-urlencoded" else json.loads(raw)
         self.server.events.append((self.path, payload))
+        if self.server.mode == "unavailable":
+            self.close_connection = True
+            return
         if self.path == "/create":
             if self.headers.get("x-key") != "admin-secret":
                 self.reply(403, {})
@@ -97,6 +106,7 @@ class AccountTests(unittest.TestCase):
                     "AV_ADMIN": "admin-secret", "AV_LOGIN": "login-value", "AV_UNUSED": "unused-secret"}
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
         subprocess.run(["git", "-c", "user.name=QA", "-c", "user.email=qa@test.local", "commit", "--allow-empty", "-qm", "fixture"], cwd=self.repo, check=True)
+        self.put(".av/local.toml\n", ".git/info/exclude")
         self.server = AccountServer()
         thread = Thread(target=self.server.serve_forever, daemon=True)
         thread.start()
@@ -186,6 +196,17 @@ expect = [204]
     def shell_channel(self, directory: Path) -> dict[str, str]:
         return dict(shlex.split(line)[1].split("=", 1) for line in (directory / "secrets.env").read_text().splitlines())
 
+    def test_cleartext_request_rejected_before_sending_credentials(self) -> None:
+        request = Request(
+            f"http://localhost.:{self.server.server_port}/create",
+            data=json.dumps({"password": "generated-test-password"}).encode(),
+            headers={"x-key": "admin-secret", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(ConfigError):
+            http_request(request)
+        self.assertEqual(self.server.events, [])
+
     def test_token_only_lifecycle_across_processes_and_private_state(self) -> None:
         run, directory = self.start()
         self.cli("accounts", "provision", "--run", run)
@@ -273,6 +294,13 @@ password = "literal:db-secret"
                 self.cli("run", "end", "--run", run)
                 (self.root / "state/av-marketplace/qa-accounts.json").unlink()
 
+    def test_unavailable_create_service_is_not_an_invalid_request(self) -> None:
+        self.server.mode = "unavailable"
+        run, _ = self.start()
+        result = self.cli("accounts", "provision", "--run", run, code=1, timeout=5)
+        self.assertIn("unavailable", result["error"])
+        self.assertNotIn("invalid HTTP request", result["error"])
+
     def test_required_missing_output_does_not_write_or_dispatch(self) -> None:
         self.server.mode = "missing"
         run, directory = self.start()
@@ -286,6 +314,22 @@ password = "literal:db-secret"
         self.assertEqual(before, (directory / "secrets.env").read_bytes())
         sidecar = json.loads(next((self.repo / "docs/testing/reports").glob("*-loop-state.json")).read_text())
         self.assertEqual(sidecar["dispatch_count"], 0)
+
+    def test_shared_literal_password_provisions_and_reaches_create_and_login(self) -> None:
+        password = "Pass-1234!"
+        self.put(self.config.replace('password = "generate"', f'password = "literal:{password}"'), ".av/config.toml")
+        self.plan.write_text(PLAN + '- **Steps:** $QA_USER_PASSWORD\n')
+        self.assertEqual(self.cli("config")["state"], "ok")
+        self.trust()
+        run, directory = self.start()
+        self.cli("accounts", "provision", "--run", run)
+        self.assertEqual([payload["password"] for path, payload in self.server.events if path in {"/create", "/login"}],
+                         [password, password])
+        self.assertEqual(self.channel(directory)["QA_USER_PASSWORD"], password)
+        self.assertEqual(json.loads((directory / "accounts.private.json").read_text())["user"]["password"], password)
+        self.assertNotIn(password, json.dumps(self.ledger()))
+        self.cli("accounts", "teardown", "--run", run)
+        self.cli("run", "end", "--run", run)
 
     def test_loader_fails_closed_and_shell_quotes_password_and_cookies(self) -> None:
         self.plan.write_text(PLAN + '- **Steps:** $QA_USER_PASSWORD $QA_USER_COOKIE $QA_USER_COOKIE_HOST_SESSION $QA_USER_COOKIE_CONNECT_SID\n')
@@ -389,6 +433,48 @@ down = "touch recorded-down"
                 self.cli("run", "end", "--run", current)
                 (self.root / "state/av-marketplace/qa-accounts.json").unlink()
 
+    def test_delegated_command_delete_keeps_pending_identity_without_id_unresolved(self) -> None:
+        self.put('touch delete-helper-ran\n', "scripts/delete-user.sh")
+        config = self.config[:self.config.index("[qa.accounts.create]")] + '''[qa.accounts.create]
+kind="command"
+run="exit 1"
+[qa.accounts.login]
+kind="command"
+run="printf '{\\"token\\":\\"command-token\\"}'"
+outputs=["token"]
+[qa.accounts.delete]
+kind="command"
+run="sh scripts/delete-user.sh"
+'''
+        self.put(config, ".av/config.toml")
+        self.trust()
+        run, _ = self.start()
+        self.cli("accounts", "provision", "--run", run, code=1)
+        result = self.cli("accounts", "teardown", "--run", run)
+        self.assertEqual(result, {"deleted": [], "left": [], "unresolved": ["user"]})
+        self.assertFalse((self.repo / "delete-helper-ran").exists())
+        self.assertEqual(self.ledger()[0]["status"], "pending")
+
+    def test_delegated_login_resolves_declared_dependencies_without_exposing_them(self) -> None:
+        self.put('test "$QA_LOGIN" = login-value && test "$AV_admin" = admin-secret && '
+                 'printf \'{"token":"command-token"}\'\n', "scripts/login.sh")
+        config = self.config[:self.config.index("[qa.accounts.login]")]
+        config = config.replace('ADMIN =', 'admin =').replace('{secret.ADMIN}', '{secret.admin}')
+        config += '''[qa.accounts.login]
+kind="command"
+run="sh scripts/login.sh"
+env=["value.LOGIN", "secret.admin"]
+outputs=["token"]
+'''
+        self.env["QA_LOGIN"] = "stale-inherited-value"
+        self.put(config, ".av/config.toml")
+        self.trust()
+        run, directory = self.start()
+        self.cli("accounts", "provision", "--run", run)
+        self.assertEqual(self.dispatch(run)["refreshed"], ["user"])
+        self.assertEqual(self.channel(directory), {"QA_USER_TOKEN": "command-token"})
+        self.assertFalse((self.repo / "unused-source-ran").exists())
+
     def test_static_command_recipes_and_delete_environment(self) -> None:
         self.config = '''version=1
 [env.targets]
@@ -403,9 +489,12 @@ password="generate"
 kind="command"
 run="printf '{\\"id\\":\\"command-id\\"}'"
 outputs=["id"]
+[qa.accounts.confirm]
+kind="command"
+run="test \\\"$QA_ID\\\" = command-id && touch confirmed"
 [qa.accounts.login]
 kind="command"
-run="test -n \\\"$QA_EMAIL\\\" && test -n \\\"$QA_PASSWORD\\\" && printf '{\\"token\\":\\"command-token\\"}'"
+run="test -f confirmed && test -n \\\"$QA_EMAIL\\\" && test -n \\\"$QA_PASSWORD\\\" && printf '{\\"token\\":\\"command-token\\"}'"
 outputs={token=true}
 [qa.accounts.delete]
 kind="command"
@@ -434,8 +523,11 @@ run="test -z \\\"${QA_PASSWORD+x}\\\" && test \\\"$QA_ID\\\" = command-id && tou
         self.assertTrue(any(e["key"] == "qa.accounts.delete.path" for e in report["errors"]))
 
     def test_transitive_command_sources_resolve_in_each_process_without_exposing_dependencies(self) -> None:
-        config = self.config.replace('ADMIN = "env:AV_ADMIN"', 'ADMIN = \'cmd:echo admin >> source-count; printf "%s" "$QA_ADMIN_VALUE"\'')
-        config = config.replace('LOGIN = "env:AV_LOGIN"', 'LOGIN = \'cmd:echo login >> source-count; printf "%s" "$QA_LOGIN_INPUT"\'\nADMIN_VALUE = "env:AV_ADMIN"\nLOGIN_INPUT = "env:AV_LOGIN"')
+        self.put('echo admin >> source-count; printf "%s" "$QA_ADMIN_VALUE"\n', "scripts/admin-source.sh")
+        self.put('echo login >> source-count; printf "%s" "$QA_LOGIN_INPUT"\n', "scripts/login-source.sh")
+        config = self.config.replace('ADMIN = "env:AV_ADMIN"', 'ADMIN = "cmd:sh scripts/admin-source.sh"')
+        config = config.replace('LOGIN = "env:AV_LOGIN"', 'LOGIN = "cmd:sh scripts/login-source.sh"\nADMIN_VALUE = "env:AV_ADMIN"\nLOGIN_INPUT = "env:AV_LOGIN"')
+        config += '[env.source_env]\n"env.secrets.ADMIN"=["value.ADMIN_VALUE"]\n"env.values.LOGIN"=["value.LOGIN_INPUT"]\n'
         self.put(config, ".av/config.toml")
         self.trust()
         run, directory = self.start()
@@ -490,10 +582,13 @@ run="test -z \\\"${QA_PASSWORD+x}\\\" && test \\\"$QA_ID\\\" = command-id && tou
     def test_services_resolve_needed_values_and_down_only_after_up(self) -> None:
         config = self.config + '''[env.services]
 health=["api:/health"]
-up='test "$QA_LOGIN" = "$AV_LOGIN"; touch up'
-prepare=['test "$QA_LOGIN" = "$AV_LOGIN"; touch prepared']
+up='sh scripts/service.sh up'
+prepare=['sh scripts/service.sh prepared']
 down="touch down"
+env={up=["value.LOGIN", "secret.ADMIN"], prepare=["value.LOGIN", "secret.ADMIN"]}
 '''
+        self.put('test "$QA_LOGIN" = login-value && test "$AV_ADMIN" = admin-secret || exit 1\n'
+                 'touch "$1"\n', "scripts/service.sh")
         self.put(config, ".av/config.toml")
         self.trust()
         run, directory = self.start()
@@ -533,7 +628,6 @@ down="kill $(cat service.pid)"
             self.assertEqual(self.cli("services", "up", "--run", run, timeout=5), {"ran": True, "exit": 0})
             os.kill(int(pid_file.read_text()), 0)
             log = (directory / "engine.log").read_text()
-            self.assertIn("started", log)
             self.assertNotIn("admin-secret", log)
             self.cli("services", "down", "--run", run)
         finally:

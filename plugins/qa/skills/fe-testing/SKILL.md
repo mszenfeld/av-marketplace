@@ -16,7 +16,7 @@ For each FE scenario from the test plan:
 4. **Execute edge cases** — run each edge case as a sub-test
 5. **Record result** — PASS/FAIL/SKIP/NEED_INFO with details
 
-The C11 dispatch supplies `Plan:`, `Run dir:`, `Secrets file:`, `Secrets JSON:`, `Redact names file:`, `Targets:` (named origins and the default target for FE), `Database:` and `Guarded:`, followed by `FE Test Scenarios:` in plan order. Do not parse the plan's optional `## Setup` notes. A scenario in `Guarded:` is `SKIP — mutation-guard`; execute none of its preconditions, main flow or edges. Credentials and exposed values come only from the engine's C3 run-directory channel; FE never uses the database connection names.
+The `/qa:run` tester dispatch supplies `Plan:`, `Run dir:`, `Secrets file:`, `Secrets JSON:`, `Redact names file:`, `Targets:` (named origins and the default target for FE), `Database:` and `Guarded:`, followed by `FE Test Scenarios:` in plan order. Do not parse the plan's optional `## Setup` notes. A scenario in `Guarded:` is `SKIP — mutation-guard`; execute none of its preconditions, main flow or edges. Credentials and exposed values come only from the engine's run-directory channel; FE never uses the database connection names.
 
 ## Tester scope
 
@@ -84,7 +84,7 @@ browser_press_key(key: "Tab")
 
 Never print exposed values, headers, cookies or tokens in results, quoted snapshots, screenshots' descriptions or artifacts. Read needed names only from the dispatch's run directory; never use the inherited process environment as a fallback. Do not read `.env`, `.env.*`, `docker-compose*.yml`, framework config, engine-private secrets or account state for values. Never mint a token to satisfy a prerequisite: the engine provisions accounts and refreshes login credentials before dispatch. A login endpoint is tested only when that action is explicitly in the scenario.
 
-Only C3 exposed `QA_` names may be checked, filled or typed: persona `QA_<PERSONA>_EMAIL`, `_PASSWORD`, `_ID`, `_TOKEN`, `_COOKIE`, `_COOKIE_<NAME>` and configured `QA_<VALUE>` entries. An unexposed/unsupported name is a config/plan gap, not `NEED_INFO kind=credentials`; never touch another source and refuse the step with `SKIP — cannot-confirm: name not exposed by the engine`, naming the identifier only. An exposed name that is empty in the channel is `NEED_INFO kind=credentials`, normally prevented by the engine before dispatch. If a main-flow name is empty, run none of its steps or edges; an edge-only gap remains on that edge without changing the main-flow status. An unreadable/invalid channel is `NEED_INFO kind=tool`, naming `secrets.json`, `load.sh` or `secrets.env`. Fill only after the current page passes the exact origin/userinfo guard under Navigation.
+Only exposed `QA_` names may be checked, filled or typed: persona `QA_<PERSONA>_EMAIL`, `_PASSWORD`, `_ID`, `_TOKEN`, `_COOKIE`, `_COOKIE_<NAME>` and configured `QA_<VALUE>` entries. An unexposed/unsupported name is a config/plan gap, not `NEED_INFO kind=credentials`; never touch another source and refuse the step with `SKIP — cannot-confirm: name not exposed by the engine`, naming the identifier only. An exposed name that is empty in the channel is `NEED_INFO kind=credentials`, normally prevented by the engine before dispatch. If a main-flow name is empty, run none of its steps or edges; an edge-only gap remains on that edge without changing the main-flow status. An unreadable/invalid channel is `NEED_INFO kind=tool`, naming `secrets.json`, `load.sh` or `secrets.env`. Fill only after the current page passes the exact origin/userinfo guard under Navigation.
 
 - **OMP browser:** The **JavaScript** `eval` cell runs on Bun. Read the dispatch's `Secrets JSON:` with `await Bun.file('<run-dir>/secrets.json').json()` inside the fill cell, then validate **all names needed by that cell before any fill**. An unreadable/invalid file or empty needed name throws before filling; catch file errors without returning their raw text. Never use `process.env` or a Python cell for credentials, and never return/log the secrets object or values. OMP's eval status line still renders `fill` arguments as JSON literals (`qa.fill("aria/Password", "<value>")`), so the filled value reaches the session transcript.
 - **Claude Code Playwright MCP:** In each credential-read Bash call, source the loader with **all names needed for the fill step before any `printf`**, for example:
@@ -270,7 +270,7 @@ If a missing prerequisite blocks the main flow, do not run edge cases; return ex
 
 An edge-only gap stays on the edge line; never change the main-flow status because of an edge-only gap. `SKIP` covers scenarios inapplicable to this stack, mutation-guard marks, out-of-harness steps, or harness errors with unknown outcomes.
 
-After the human-readable results, end the answer with exactly one C8 block:
+After the human-readable results, end the answer with exactly one `qa-results` block:
 
 ```json qa-results
 {"section": "FE", "scenarios": [

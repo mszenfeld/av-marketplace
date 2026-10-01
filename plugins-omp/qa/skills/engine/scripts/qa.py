@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
+from collections.abc import Mapping
 from collections.abc import Sequence
 import json
 from pathlib import Path
@@ -17,8 +19,8 @@ if sys.version_info < (3, 11):
     print(json.dumps({"error": f"Error: the qa engine needs Python 3.11 or newer (found {sys.version_info.major}.{sys.version_info.minor})"}))
     raise SystemExit(2)
 
-from av_config import ConfigError
-from av_config import InvalidConfig
+from av_config.errors import ConfigError
+from av_config.errors import InvalidConfig
 from qa_engine.config import Config
 from qa_engine.accounts import provision
 from qa_engine.accounts import refresh
@@ -30,23 +32,25 @@ from qa_engine.plan import resolve_plan
 from qa_engine.report import refresh_accounts
 from qa_engine.report import render_report
 from qa_engine.report import render_summary
-from qa_engine.state import STOP_REASONS
-from qa_engine.state import StateStop
-from qa_engine.state import assign_issues
-from qa_engine.state import candidates
-from qa_engine.state import check_drift
-from qa_engine.state import dispatch_fix
-from qa_engine.state import dispatch_tester
-from qa_engine.state import end_run
-from qa_engine.state import fix_done
-from qa_engine.state import ingest
-from qa_engine.state import iteration_close
-from qa_engine.state import iteration_open
-from qa_engine.state import open_run
-from qa_engine.state import start_run
-from qa_engine.state import stop_run
+from qa_engine.runs import STOP_REASONS
+from qa_engine.runs import RunStartOptions
+from qa_engine.models import Run
+from qa_engine.models import StateStop
+from qa_engine.issues import assign_issues
+from qa_engine.candidates import candidates
+from qa_engine.runs import check_drift
+from qa_engine.dispatch import dispatch_fix
+from qa_engine.dispatch import dispatch_tester
+from qa_engine.runs import end_run
+from qa_engine.dispatch import fix_done
+from qa_engine.results import ingest
+from qa_engine.iterations import iteration_close
+from qa_engine.iterations import iteration_open
+from qa_engine.runs import open_run
+from qa_engine.runs import start_run
+from qa_engine.runs import stop_run
 
-STATE_COMMANDS = frozenset({"dispatch", "fix", "ingest", "issues", "candidates", "iteration", "accounts", "services", "report"})
+CommandResult = Mapping[str, object] | str
 
 
 class UsageError(ConfigError):
@@ -72,80 +76,92 @@ def run_option(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
 
 def parser() -> argparse.ArgumentParser:
-    root = Parser(description="QA engine (JSON output)")
-    root.add_argument("--repo", type=Path)
+    root = repo_option(Parser(description="QA engine (JSON output)"))
+    root.set_defaults(repo=None, close_iteration=False)
     commands = root.add_subparsers(dest="command", required=True)
-    config = commands.add_parser("config")
-    config.add_argument("--repo", type=Path, default=argparse.SUPPRESS)
+    config = repo_option(commands.add_parser("config"))
+    config.set_defaults(handler=_execute_config)
     operations = config.add_subparsers(dest="operation")
-    preview = operations.add_parser("preview")
+    preview = repo_option(operations.add_parser("preview"))
+    preview.set_defaults(handler=_execute_preview)
     preview.add_argument("proposal", type=Path)
-    preview.add_argument("--repo", type=Path, default=argparse.SUPPRESS)
-    apply = operations.add_parser("apply")
+    apply = repo_option(operations.add_parser("apply"))
+    apply.set_defaults(handler=_execute_apply)
     apply.add_argument("proposal", type=Path)
     apply.add_argument("--snapshot", required=True)
     apply.add_argument("--approved-hash", required=True)
-    apply.add_argument("--repo", type=Path, default=argparse.SUPPRESS)
-    trust = commands.add_parser("trust")
-    trust.add_argument("--repo", type=Path, default=argparse.SUPPRESS)
+    trust = repo_option(commands.add_parser("trust"))
     trust_operations = trust.add_subparsers(dest="operation", required=True)
-    accept = trust_operations.add_parser("accept")
+    accept = repo_option(trust_operations.add_parser("accept"))
+    accept.set_defaults(handler=_execute_trust)
     accept.add_argument("hash")
-    accept.add_argument("--repo", type=Path, default=argparse.SUPPRESS)
-    tools = commands.add_parser("tools")
-    tools.add_argument("--repo", type=Path, default=argparse.SUPPRESS)
-    plan = commands.add_parser("plan")
-    plan.add_argument("--repo", type=Path, default=argparse.SUPPRESS)
+    repo_option(commands.add_parser("tools")).set_defaults(handler=_execute_tools)
+    plan = repo_option(commands.add_parser("plan"))
     plan_operations = plan.add_subparsers(dest="operation", required=True)
-    resolve = plan_operations.add_parser("resolve")
+    resolve = repo_option(plan_operations.add_parser("resolve"))
+    resolve.set_defaults(handler=_execute_plan_resolve)
     resolve.add_argument("argument", nargs="?", default="")
-    resolve.add_argument("--repo", type=Path, default=argparse.SUPPRESS)
-    check = plan_operations.add_parser("check")
+    check = repo_option(plan_operations.add_parser("check"))
+    check.set_defaults(handler=_execute_plan_check)
     check.add_argument("plan", type=Path)
-    check.add_argument("--repo", type=Path, default=argparse.SUPPRESS)
     run = repo_option(commands.add_parser("run"))
     run_operations = run.add_subparsers(dest="operation", required=True)
     start = repo_option(run_operations.add_parser("start"))
+    start.set_defaults(handler=_execute_run_start)
     start.add_argument("plan", type=Path)
     start.add_argument("--takeover")
     start.add_argument("--generated", action="store_true")
     baseline = start.add_mutually_exclusive_group()
     baseline.add_argument("--baseline-run")
     baseline.add_argument("--baseline-file", type=Path)
-    run_option(run_operations.add_parser("end"))
+    run_option(run_operations.add_parser("end")).set_defaults(handler=_execute_run_end)
     stop = run_option(run_operations.add_parser("stop"))
+    stop.set_defaults(handler=run_state, state_handler=_state_stop, close_iteration=True)
     stop.add_argument("--reason", required=True, choices=sorted(STOP_REASONS))
     stop.add_argument("--detail")
     dispatch = run_option(commands.add_parser("dispatch"))
+    dispatch.set_defaults(handler=run_state)
     dispatch_operations = dispatch.add_subparsers(dest="operation", required=True)
     tester = repo_option(dispatch_operations.add_parser("tester"))
+    tester.set_defaults(state_handler=_state_dispatch_tester)
     tester.add_argument("--section", required=True, choices=["FE", "BE"])
     tester.add_argument("--phase", required=True, choices=["baseline", "retry", "iteration", "final"])
-    repo_option(dispatch_operations.add_parser("fix")).add_argument("--qa", required=True)
+    dispatch_fix_parser = repo_option(dispatch_operations.add_parser("fix"))
+    dispatch_fix_parser.set_defaults(state_handler=_state_dispatch_fix)
+    dispatch_fix_parser.add_argument("--qa", required=True)
     fix = repo_option(commands.add_parser("fix"))
     done = run_option(fix.add_subparsers(dest="operation", required=True).add_parser("done"))
+    done.set_defaults(handler=run_state, state_handler=_state_fix_done)
     done.add_argument("--dispatch", required=True)
     done.add_argument("--result", required=True, choices=["fixed", "partial", "failed"])
     results = run_option(commands.add_parser("ingest"))
+    results.set_defaults(handler=run_state, state_handler=_state_ingest)
     results.add_argument("--dispatch", required=True)
     results.add_argument("file", type=Path)
-    run_option(commands.add_parser("issues"))
-    run_option(commands.add_parser("candidates"))
+    run_option(commands.add_parser("issues")).set_defaults(handler=run_state, state_handler=_state_issues)
+    run_option(commands.add_parser("candidates")).set_defaults(handler=run_state, state_handler=_state_candidates)
     iteration = repo_option(commands.add_parser("iteration"))
+    iteration.set_defaults(handler=run_state)
     iteration_operations = iteration.add_subparsers(dest="operation", required=True)
-    run_option(iteration_operations.add_parser("open"))
-    run_option(iteration_operations.add_parser("close"))
-    for command, action_names in (("accounts", ("provision", "refresh", "teardown")), ("services", ("check", "up", "prepare", "down"))):
-        group = repo_option(commands.add_parser(command))
-        actions = group.add_subparsers(dest="operation", required=True)
-        for operation in action_names:
-            run_option(actions.add_parser(operation))
+    run_option(iteration_operations.add_parser("open")).set_defaults(state_handler=_state_iteration_open)
+    run_option(iteration_operations.add_parser("close")).set_defaults(state_handler=_state_iteration_close)
+    accounts = repo_option(commands.add_parser("accounts"))
+    accounts.set_defaults(handler=run_state)
+    account_operations = accounts.add_subparsers(dest="operation", required=True)
+    for operation, handler in (("provision", _state_provision), ("refresh", _state_refresh), ("teardown", _state_teardown)):
+        run_option(account_operations.add_parser(operation)).set_defaults(state_handler=handler)
+    service = repo_option(commands.add_parser("services"))
+    service.set_defaults(handler=run_state, state_handler=_state_services)
+    service_operations = service.add_subparsers(dest="operation", required=True)
+    for operation in ("check", "up", "prepare", "down"):
+        run_option(service_operations.add_parser(operation))
     report = run_option(commands.add_parser("report"))
+    report.set_defaults(handler=run_state, state_handler=_state_report)
     report_input = report.add_mutually_exclusive_group(required=True)
     report_input.add_argument("--issues", type=Path)
     report_input.add_argument("--accounts", action="store_true")
     report.add_argument("--final", action="store_true")
-    run_option(commands.add_parser("summary"))
+    run_option(commands.add_parser("summary")).set_defaults(handler=run_state, state_handler=_state_summary, close_iteration=True)
     return root
 
 
@@ -178,82 +194,139 @@ def read_proposal(path: Path) -> dict[str, object]:
     return value
 
 
-def run_state(repo: Path, args: argparse.Namespace) -> dict[str, object]:
-    """Run one loop bookkeeping subcommand under the run's state lock."""
-    with open_run(repo, args.run, close_iteration=args.command == "report" and args.final) as run:
-        if args.command == "report":
-            if args.accounts:
-                if args.final:
-                    raise UsageError("--accounts cannot be combined with --final")
-                return refresh_accounts(run)
-            path = args.issues if args.issues.is_absolute() else repo / args.issues
-            return render_report(run, path, final=args.final)
-        if args.command in {"accounts", "services"}:
-            config = Config(repo)
-            if args.operation not in {"teardown", "down"}:
-                check_drift(run, config)
-            if args.command == "services":
-                return services(run, config, args.operation)
-            if args.operation == "provision":
-                return provision(run, config)
-            if args.operation == "refresh":
-                return {"refreshed": refresh(run, config)}
-            return teardown(run, config)
-        if args.command == "dispatch":
-            config = Config(repo)
-            if args.operation == "tester":
-                return dispatch_tester(run, config, args.section, args.phase)
-            return dispatch_fix(run, config, args.qa)
-        if args.command == "fix":
-            return fix_done(run, args.dispatch, args.result)
-        if args.command == "ingest":
-            path = args.file if args.file.is_absolute() else repo / args.file
-            return ingest(run, args.dispatch, path.read_text())
-        if args.command == "issues":
-            return assign_issues(run)
-        if args.command == "candidates":
-            return candidates(run)
-        return iteration_open(run) if args.operation == "open" else iteration_close(run)
+def run_state(repo: Path, args: argparse.Namespace) -> tuple[CommandResult, int]:
+    """Run the parser-selected bookkeeping handler under the run's state lock."""
+    handler: Callable[[Run, argparse.Namespace], CommandResult] = args.state_handler
+    with open_run(repo, args.run, close_iteration=args.close_iteration or getattr(args, "final", False)) as run:
+        return handler(run, args), 0
 
 
-def execute(args: argparse.Namespace) -> tuple[dict[str, object] | str, int]:
-    repo = repository(args.repo)
-    if args.command == "tools":
-        return tools(), 0
-    if args.command == "plan" and args.operation == "resolve":
-        return resolve_plan(repo, args.argument), 0
-    if args.command == "summary":
-        with open_run(repo, args.run, close_iteration=True) as run:
-            return render_summary(run), 0
-    if args.command == "run":
-        if args.operation == "end":
-            return end_run(repo, args.run), 0
-        if args.operation == "stop":
-            with open_run(repo, args.run, close_iteration=True) as run:
-                return stop_run(run, args.reason, args.detail), 0
-        path = args.plan if args.plan.is_absolute() else repo / args.plan
-        baseline = args.baseline_file
-        if baseline is not None and not baseline.is_absolute():
-            baseline = repo / baseline
-        return start_run(Config(repo), path, args.takeover, generated=args.generated,
-                         baseline_run=args.baseline_run, baseline_file=baseline), 0
-    if args.command in STATE_COMMANDS:
-        return run_state(repo, args), 0
+def _state_report(run: Run, args: argparse.Namespace) -> Mapping[str, object]:
+    if args.accounts:
+        if args.final:
+            raise UsageError("--accounts cannot be combined with --final")
+        return refresh_accounts(run)
+    path = args.issues if args.issues.is_absolute() else run.repo / args.issues
+    return render_report(run, path, final=args.final)
+
+
+def _state_summary(run: Run, args: argparse.Namespace) -> str:
+    return render_summary(run)
+
+
+def _state_provision(run: Run, args: argparse.Namespace) -> Mapping[str, object]:
+    config = Config(run.repo)
+    check_drift(run, config)
+    return provision(run, config)
+
+
+def _state_refresh(run: Run, args: argparse.Namespace) -> Mapping[str, object]:
+    config = Config(run.repo)
+    check_drift(run, config)
+    return {"refreshed": refresh(run, config)}
+
+
+def _state_teardown(run: Run, args: argparse.Namespace) -> Mapping[str, object]:
+    return teardown(run, Config(run.repo))
+
+
+def _state_services(run: Run, args: argparse.Namespace) -> Mapping[str, object]:
+    config = Config(run.repo)
+    if args.operation != "down":
+        check_drift(run, config)
+    return services(run, config, args.operation)
+
+
+def _state_dispatch_tester(run: Run, args: argparse.Namespace) -> Mapping[str, object]:
+    return dispatch_tester(run, Config(run.repo), args.section, args.phase)
+
+
+def _state_dispatch_fix(run: Run, args: argparse.Namespace) -> Mapping[str, object]:
+    return dispatch_fix(run, Config(run.repo), args.qa)
+
+
+def _state_fix_done(run: Run, args: argparse.Namespace) -> Mapping[str, object]:
+    return fix_done(run, args.dispatch, args.result)
+
+
+def _state_ingest(run: Run, args: argparse.Namespace) -> Mapping[str, object]:
+    path = args.file if args.file.is_absolute() else run.repo / args.file
+    return ingest(run, args.dispatch, path.read_text())
+
+
+def _state_issues(run: Run, args: argparse.Namespace) -> Mapping[str, object]:
+    return assign_issues(run)
+
+
+def _state_candidates(run: Run, args: argparse.Namespace) -> Mapping[str, object]:
+    return candidates(run)
+
+
+def _state_iteration_open(run: Run, args: argparse.Namespace) -> Mapping[str, object]:
+    return iteration_open(run)
+
+
+def _state_iteration_close(run: Run, args: argparse.Namespace) -> Mapping[str, object]:
+    return iteration_close(run)
+
+
+def _state_stop(run: Run, args: argparse.Namespace) -> Mapping[str, object]:
+    return stop_run(run, args.reason, args.detail)
+
+
+def _execute_run_start(repo: Path, args: argparse.Namespace) -> tuple[Mapping[str, object], int]:
+    path = args.plan if args.plan.is_absolute() else repo / args.plan
+    baseline = args.baseline_file
+    if baseline is not None and not baseline.is_absolute():
+        baseline = repo / baseline
+    options = RunStartOptions(
+        takeover=args.takeover, generated=args.generated, baseline_run=args.baseline_run, baseline_file=baseline,
+    )
+    return start_run(Config(repo), path, options), 0
+
+
+def _execute_run_end(repo: Path, args: argparse.Namespace) -> tuple[Mapping[str, object], int]:
+    return end_run(repo, args.run), 0
+
+
+def _execute_plan_resolve(repo: Path, args: argparse.Namespace) -> tuple[dict[str, object], int]:
+    return resolve_plan(repo, args.argument), 0
+
+
+def _execute_plan_check(repo: Path, args: argparse.Namespace) -> tuple[dict[str, object], int]:
     config = Config(repo)
-    if args.command == "trust":
-        return config.accept(args.hash), 0
-    if args.command == "plan":
-        if config.errors:
-            return config.report(), 2
-        path = args.plan if args.plan.is_absolute() else repo / args.plan
-        result = check_plan(parse_plan(path), config)
-        return result, 0 if result["ok"] else 1
-    if args.operation == "preview":
-        result = config.preview(read_proposal(args.proposal))
-        return result, 0 if result["ok"] else 2
-    if args.operation == "apply":
-        return config.apply(read_proposal(args.proposal), args.snapshot, args.approved_hash), 0
+    if config.errors:
+        return config.report(), 2
+    path = args.plan if args.plan.is_absolute() else repo / args.plan
+    result = check_plan(parse_plan(path), config)
+    return result, 0 if result["ok"] else 1
+
+
+def _execute_config(repo: Path, args: argparse.Namespace) -> tuple[dict[str, object], int]:
+    config = Config(repo)
     return config.report(), 2 if config.errors else 0
+
+
+def _execute_preview(repo: Path, args: argparse.Namespace) -> tuple[dict[str, object], int]:
+    result = Config(repo).preview(read_proposal(args.proposal))
+    return result, 0 if result["ok"] else 2
+
+
+def _execute_apply(repo: Path, args: argparse.Namespace) -> tuple[dict[str, object], int]:
+    return Config(repo).apply(read_proposal(args.proposal), args.snapshot, args.approved_hash), 0
+
+
+def _execute_trust(repo: Path, args: argparse.Namespace) -> tuple[dict[str, object], int]:
+    return Config(repo).accept(args.hash), 0
+
+
+def _execute_tools(repo: Path, args: argparse.Namespace) -> tuple[dict[str, object], int]:
+    return tools(), 0
+
+
+def execute(args: argparse.Namespace) -> tuple[CommandResult, int]:
+    handler: Callable[[Path, argparse.Namespace], tuple[CommandResult, int]] = args.handler
+    return handler(repository(args.repo), args)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

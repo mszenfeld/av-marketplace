@@ -33,7 +33,7 @@ Except for a successful `summary`, stdout is exactly one JSON object. Read it an
 | `1` | Domain stop, normally `{"error": "<reason>"}` with optional diagnostic fields. `plan check` instead returns its complete `ok: false` gaps/guard result. | Route the stop or gaps through `/qa:run`; after `run start`, still run teardown. Never patch state to bypass the stop. |
 | `2` | Usage error or invalid config. `config` lists every validation error with its file/key; preview validation returns `ok: false` and `errors`. Other failures return `{"error": "<reason>"}`. | Show the error; do not run a config recipe. `/qa:create-plan` may author with `Config: none` when `config` returned a recognized non-`ok` state. |
 
-Sources are validated, not executed, by `config`. Resolution happens only after trust, through accounts, services and tester dispatch. Errors name keys/sources, never their values. Command and recipe output tails belong in the run's redacted `engine.log`, not in the orchestrator's answer.
+Sources are validated, not executed, by `config`. Resolution happens only after trust, through accounts, services and tester dispatch. Errors name keys/sources, never their values. Successful commands log only exit/line-count summaries. Failure output belongs only in the engine-private `engine.log`, never in the orchestrator's answer: unresolved or short values may remain in its masked tails. Do not read the log into the transcript.
 
 ## Subcommands and JSON shapes
 
@@ -43,11 +43,14 @@ The shapes below name object fields; `[]` means an array, `{}` a map, `?` an opt
 
 | Subcommand | JSON output |
 |---|---|
-| `config` | `{state, errors[], warnings[], provenance{}, trust, trust_hash, trust_subset, targets{}, defaults{}, policy{}, budget{}, services{health[], up, prepare[], down}, personas[], static_personas[], values[], exposed[], database}`. On invalid config the metadata after `trust_subset` may be absent. |
+| `config` | `{state, errors[], warnings[], provenance{}, trust, trust_hash, trust_subset, targets{}, defaults{}, policy{}, budget{}, services{health[], up, prepare[], down, env{up[], prepare[]}}, personas[], static_personas[], values[], exposed[], database}`. Optional service keys are absent when not configured. On invalid config the metadata after `trust_subset` may be absent. |
 | `trust accept <hash>` | `{trusted: hash}`. Exit 1 if the current trust subset hashes differently. |
-| `config preview <proposal>` | `{ok, errors[], diff, trust_subset, trust_hash, snapshot}`. Writes nothing. |
+| `config preview <proposal>` | `{ok, errors[], diff, gitignore_add[]?, trust_subset, trust_hash, snapshot}`. Writes nothing. |
 | `config apply <proposal> --snapshot S --approved-hash H` | `{applied}`. Uses the preview's snapshot and approved hash. |
 | `tools` | `{curl, jq, perl_json_pp, psql, mysql, sqlite3, httpie}`; every field is a boolean. Browser availability requires a separate browser probe. |
+
+- `gitignore_add` is present only when `ok` is true.
+- When `ok` is true, `diff` is a unified-diff string of the masked, parsed config and any `.gitignore` additions; config comments are enforced by the section guard, not shown in the diff. Otherwise, `diff` is `[]`.
 
 `state` is `missing-file`, `missing-table`, `invalid` or `ok`. `trust` is `not-required`, `new`, `trusted` or `changed`; only `trusted`/`not-required` permits `run start`. `provenance` identifies `.av/config.toml` or `.av/local.toml` for effective keys. `values` and `exposed` contain names only; `database` is masked metadata or `null`. Show `trust_subset` for the one trust question, not the raw config or a source's output.
 
@@ -57,7 +60,7 @@ The shapes below name object fields; `[]` means an array, `{}` a map, `?` an opt
 {"config_text": "<full proposed .av/config.toml>", "gitignore_add": [".av/local.toml", ".av/secrets.local.env"], "allowed_keys": ["<keys this transaction may change>"]}
 ```
 
-Preview validates the merged proposal, treating `gitignore_add` paths as ignored. Only `allowed_keys` may change; other table sections, including comments, remain byte-identical. Its opaque `snapshot` captures the current config and `.gitignore` bytes. Apply aborts without writes if either differs from that snapshot; otherwise it writes both atomically, revalidates and records trust only if the result hashes to `H`. A failed validation/hash check restores the original bytes only while the files still equal the engine's own writes; concurrent edits are left intact and reported as a conflict. Never apply without the preview approval.
+Preview accepts only the exact `.av/local.toml` and `.av/secrets.local.env` strings in `gitignore_add`; other paths, negations and wildcards are rejected. It validates the merged proposal, treating those paths as ignored. Its `diff` includes the masked config changes and every `.gitignore` addition, without unrelated existing ignore-file context; show the complete diff before approval. Only `allowed_keys` may change; other table sections, including comments, remain byte-identical. Its opaque `snapshot` captures the current config and `.gitignore` bytes. Apply aborts without writes if either differs from that snapshot; otherwise it writes both atomically, revalidates and records trust only if the result hashes to `H`. A failed validation/hash check restores the original bytes only while the files still equal the engine's own writes; concurrent edits are left intact and reported as a conflict. Never apply without the preview approval.
 
 ### Plans
 
@@ -69,6 +72,8 @@ Preview validates the merged proposal, treating `gitignore_add` paths as ignored
 An existing argument path is reused; a change source requests generation. With no argument, resolution selects the newest plan whose Source `Branch:` matches the current branch, otherwise generation. Detached HEAD generates. A selected plan is stale if its Source `Head:` is not an ancestor of HEAD, or the intervening diff touches a file outside `docs/`; `changed_files` explains that decision.
 
 Plan checks derive personas and values from `$QA_NAME` or `${QA_NAME}` tokens anywhere in scenarios, including preconditions and edges. They check persona field capabilities, scenario/default target names, every absolute URL's exact origin, DB checks and the mutation policy. Unknown names are config gaps, not a tester's runtime credential request. `off_target` entries identify the scenario, origin and reason; `guarded` and `exempt` are scenario IDs. Guards include writes in data preconditions: `deny` guards all writes; `rejections-only` exempts only grounded, rejection-only scenarios without other writes; `allow` guards nothing.
+
+The parser keeps original scenario blocks and assertion text for testers and reports. Preconditions remain part of the action, credential and URL scans; citation tags stay in assertion text but are excluded when extracting HTTP statuses. Neither needs a separate parsed metadata field. Exact-origin plan checks use the shared `av_config.origins.parse_origin` normalizer directly.
 
 ### Run, services and accounts
 
@@ -91,7 +96,9 @@ Plan checks derive personas and values from `$QA_NAME` or `${QA_NAME}` tokens an
 
 To keep bootstrap writes out of the dirty baseline, `/qa:run` captures tracked-modified paths before Step 1 writes anything and saves a JSON array in a temporary file outside the repository. `--baseline-file <file>` uses exactly those paths as `pre_loop_dirty` and fingerprints them before fix work; it preserves config/gitignore paths already dirty before invocation. With neither baseline option, `run start` reads the current tracked tree. On repair restart, `--baseline-run <ended-run-id>` instead loads the same plan's recorded paths **and fingerprints** from its durable sidecar, so it works after `run end` deleted the private directory. A missing/mismatched baseline is an error, never permission to silently snapshot a new tree. The baseline inputs are mutually exclusive. New bootstrap-only dirt in `.av/config.toml` / `.gitignore` is excluded from both pre-existing dirt and scoped fix recovery.
 
-Every post-start stop/abort records `run stop` before report flush and teardown. `--detail` must contain only sanitized diagnostics/names/statuses, never secret values or raw recipe output. The engine masks private account/secrets values, literal source texts and environment values referenced by `env:` sources in the recorded or current config, without resolving sources; public targets/probes/policy and unrelated environment values stay readable. Whitespace is flattened to one line. Repeat calls preserve the first stop reason. A recorded stop always yields `**Result:** Stopped` with its reason/detail, regardless of PASS verdicts, and never writes new Status lines, even on a later `report --final`. Existing Status lines are preserved.
+Engine logs and `run stop` details use `SecretSet`: collect literal values and environment values referenced by `env:` sources in the recorded or current config, plus strings in private account/secrets state. Collection never resolves file/command sources or executes commands. Runtime adds resolved source values and account recipe outputs as they become available. Mask raw and JSON-escaped strings longest-first; public targets/probes/policy and unrelated environment values stay readable. Engine logs mask only known values of at least four characters, then truncate each failure entry to its last 2048 characters; successful sources, services and command recipes retain only exit/line-count summaries, not stdout/stderr. Only values known to the writing process are masked: unresolved configured values, undeclared secrets and shorter values may remain in failure tails. Treat `engine.log` as engine-private, not transcript-safe. Stop details still mask known secrets of any length before flattening.
+
+Every post-start stop/abort records `run stop` before report flush and teardown. `--detail` must contain only sanitized diagnostics/names/statuses, never secret values or raw recipe output. Whitespace is flattened to one line after masking. Repeat calls preserve the first stop reason. A recorded stop always yields `**Result:** Stopped` with its reason/detail, regardless of PASS verdicts, and never writes new Status lines, even on a later `report --final`. Existing Status lines are preserved.
 
 `accounts provision|refresh`, `services check|up|prepare` and `dispatch` compare the current config against the run-bound config. `config changed during run` or a dispatch login failure stops the run; teardown is still mandatory. `accounts teardown`, `services down` and `run end` skip that comparison and use the recorded, previously trusted targets, recipes and down command. Cleanup placeholders use current sources only when current config is trusted; otherwise accounts stay `left`. The recorded down command needs no sources and can still run.
 
@@ -136,7 +143,11 @@ The orchestrator writes **only issue prose** as a separate JSON list, using IDs 
 
 Optional fields are `severity_reason`, `response` and `screenshot`. Use CRITICAL beyond a mechanical floor only with `severity_reason: "security-bypass"|"data-loss"` and supporting evidence in `actual`. `report` rejects unassigned IDs, a lowered mechanical CRITICAL, an unsupported CRITICAL or an unverified issue raised above LOW without >= 500/crash. It copies Expected with its grounding tag and Refutation itself; never fabricate those in issue prose. An empty list is valid when there are no new issue prose entries.
 
+Issue prose cannot contain a standalone `**Name:**` report-field line, including `-`/`*` bullet prefixes and leading spaces or tabs. Quote such app output inline instead. Validation uses the shared report-field grammar and rejects the issue list before replacing an existing report, so prose cannot supply Status or Scenario metadata.
+
 The engine preserves existing `**Status:**`, `**Decision:**`, `**Decision-retired:**`, `**Verification-plan:**`, `**Decision-pin:**`, `**Dispatch:**`, `**Verification:**` and a rewritten `**Location:**` by QA token. Final write-back requires a whole-scenario PASS, never overwrites `🚫 Rejected` and never marks a partial fix as fixed.
+
+Status, Location and decision metadata are read only before `**Category:**`; bare fields and `-`/`*` bullet-prefixed fields use the same grammar in candidates, adoption, summaries and final write-back. Body text that resembles those fields cannot override header metadata. Scenario, Problem and Remediation are read from the full issue block.
 
 The summary's result is engine-computed: plan drift/recorded stops take priority and print their reason; with failures at the severity floor, no-progress/regression stops are `Stopped`, exhausted budgets are `Budget Exhausted`, otherwise `Fail`. With no such failures it is `Pass`, except an all-SKIP/NEED_INFO human-authored plan is `Stopped`. Pass is not a claim of full verification: always relay Coverage and unlock hints for unverified or shallow coverage. Fail routes to the reported remaining issues; Budget Exhausted routes to the named config budgets and a rerun; Stopped routes to its reason before any rerun.
 

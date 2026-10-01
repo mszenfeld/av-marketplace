@@ -349,7 +349,7 @@ After the review, if issues were found and the report was saved, the review sugg
 
 **Recommended workflow (local review):**
 
-1. Run `/review` and save the report. Optionally run `/qa:run` if you also have a QA test plan — when both reports exist, `/fix-report` (no argument) auto-merges them into a single checklist.
+1. Run `/review` and save the report. Optionally run `/qa:run` (it reuses the branch's QA plan or generates one) — when both reports exist, `/fix-report` (no argument) auto-merges them into a single checklist.
 2. Fix using one of these methods:
    - `/fix-report` — auto-merge mode: fixes issues from the newest review report and the newest QA report in one pass
    - `/fix-all` — bulk-fix every unfixed `auto`-policy issue across the newest review + QA reports after one yes/no confirmation

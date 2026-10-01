@@ -119,10 +119,8 @@ class PlanTests(unittest.TestCase):
         self.assertEqual([item.id for item in plan.scenarios], ["FE-01", "BE-01", "BE-02"])
         frontend, create, profile = plan.scenarios
         self.assertEqual(frontend.target, "web")
-        self.assertIn("POST /api/v1/cvs", frontend.preconditions)
         self.assertEqual((create.method, create.path), ("POST", "/api/v1/cvs"))
         self.assertEqual(create.expected.statuses, [201])
-        self.assertEqual(create.expected.grounding, ["src/api/cvs.py:201"])
         self.assertEqual([edge.statuses for edge in create.edges], [[422], [401]])
         self.assertEqual(create.tokens, ["QA_USER_TOKEN", "QA_USER_ID"])
         self.assertIn("SELECT COUNT(id)", create.db_check)
@@ -442,7 +440,6 @@ outputs = {token = true, cookies = ["sessionid"]}
 """
         parsed = parse_plan(self.plan(body))
         self.assertEqual(parsed.scenarios[0].expected.statuses, [404])
-        self.assertEqual(parsed.scenarios[0].expected.grounding, ["src/api.py:404"])
         result = check_plan(parsed, self.config())
         self.assertEqual(result["guarded"], [])
         self.assertEqual(result["exempt"], ["BE-01"])

@@ -182,7 +182,7 @@ Before saving the plan, verify:
 - [ ] No placeholder text (TBD, TODO, fill in later)
 - [ ] `## Source` records the current checkout `Branch:` and `Head:`
 - [ ] `## Setup`, if present, holds only optional human notes; targets, values, database connections and bring-up are config-owned
-- [ ] Every credential and exposed value uses a C3 `$QA_NAME` or `${QA_NAME}` token, never a literal secret, a non-`QA_` name or a placeholder such as `TOKEN`
+- [ ] Every credential and exposed value uses a `$QA_NAME` or `${QA_NAME}` token, never a literal secret, a non-`QA_` name or a placeholder such as `TOKEN`
 - [ ] Every absolute URL anywhere in a scenario, including Expected and edge cases, is on a config target origin; off-target response URLs are asserted by separate components, not literal URLs. Request/page paths have `- **Target:** <name>` where the section default does not apply
 - [ ] Missing config names remain explicit; a missing target is named with relative paths, not an absolute URL on an unknown origin
 - [ ] Each scenario creates its required data as its persona through browser (UI) actions for FE or API/HTTP requests for BE; only data the app cannot create requires an external fixture

@@ -31,7 +31,7 @@ Config:
 none
 ```
 
-Do not bootstrap, extend or repair config here. With `none`, the planner writes C3-compatible `$QA_…` names and target names grounded in repository evidence, never literal credentials or guesses at their values. `/qa:run` checks the plan and fills missing configuration through its own `plan check` flow. Plan authoring does not require config trust because it executes no config recipe or value source.
+Do not bootstrap, extend or repair config here. With `none`, the planner writes `$QA_…` names and target names grounded in repository evidence, never literal credentials or guesses at their values. `/qa:run` checks the plan and fills missing configuration through its own `plan check` flow. Plan authoring does not require config trust because it executes no config recipe or value source.
 
 ## Workflow
 

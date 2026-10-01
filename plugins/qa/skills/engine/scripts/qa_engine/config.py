@@ -2,39 +2,43 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-import math
 from pathlib import Path
 import re
 from typing import cast
 
-from av_config import InvalidConfig
-from av_config import ConfigTransaction
-from av_config import Configuration
-from av_config import TrustStore
-from av_config import canonical_hash
-from av_config import flatten
-from av_config import mask
-from av_config import source_subset
+from av_config.errors import InvalidConfig
+from av_config.transaction import ConfigTransaction
+from av_config.files import Configuration
+from av_config.trust import TrustStore
+from av_config.trust import canonical_hash
+from av_config.sources import mask
+from av_config.sources import source_subset
+from qa_engine.recipes import PLACEHOLDER
+from qa_engine.recipes import Recipe
+from qa_engine.recipes import build_recipe
+from qa_engine.recipes import cookie_name
 
 PERSONA = re.compile(r"[a-z][a-z0-9_]*\Z")
-PLACEHOLDER = re.compile(r"(?<!\$)\{([^{}]+)\}")
-EXTRACTOR = re.compile(r"\.[A-Za-z_][A-Za-z0-9_]*(?:\[\d+\])?(?:\.[A-Za-z_][A-Za-z0-9_]*(?:\[\d+\])?)*\Z")
+VALUE_SOURCE_KEYS = re.compile(r"(?:env\.(?:secrets|values)\.[A-Za-z_][A-Za-z0-9_]*|env\.database\.password|qa\.accounts\.password|qa\.accounts\.static\.[a-z][a-z0-9_]*\.(?:email|password|id))")
 POLICY = {"fix": "approve", "mutations": "rejections-only", "disposable_data": False, "min_severity": "LOW", "dirty_tree": "ask"}
 BUDGET = {"iterations": 3, "dispatches": 50, "minutes": 30}
 DATABASE_NAMES = {
-    "postgres": ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGPASSWORD"],
-    "mysql": ["MYSQL_HOST", "MYSQL_TCP_PORT", "MYSQL_USER", "MYSQL_DATABASE", "MYSQL_PWD"],
-    "sqlite": ["SQLITE_DB"],
+    "postgres": {"PGHOST": "host", "PGPORT": "port", "PGUSER": "user", "PGDATABASE": "name", "PGPASSWORD": "password"},
+    "mysql": {"MYSQL_HOST": "host", "MYSQL_TCP_PORT": "port", "MYSQL_USER": "user", "MYSQL_DATABASE": "name", "MYSQL_PWD": "password"},
+    "sqlite": {"SQLITE_DB": "path"},
 }
-
-
-def cookie_name(name: str) -> str:
-    """Normalize a cookie name for its tester environment variable."""
-    return re.sub(r"[^A-Z0-9]+", "_", name.upper()).strip("_")
 
 
 def mapping(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
+
+
+def _persona_names(value: object) -> bool:
+    if not isinstance(value, list):
+        return False
+    if not all(isinstance(name, str) and PERSONA.fullmatch(name) for name in value):
+        return False
+    return len(set(value)) == len(value)
 
 
 class Config:
@@ -58,6 +62,7 @@ class Config:
         self.env = mapping(self.data.get("env"))
         self.targets = cast(dict[str, str], mapping(self.env.get("targets")))
         self.accounts = mapping(self.qa.get("accounts"))
+        self.recipes: dict[str, Recipe] = {}
         self.defaults = mapping(self.qa.get("defaults"))
         self.policy = {**POLICY, **mapping(self.qa.get("policy"))}
         self.budget = {**BUDGET, **mapping(self.qa.get("budget"))}
@@ -110,10 +115,22 @@ class Config:
     def _validate_accounts(self) -> None:
         validator = self.shared
         validator.keys(self.accounts, {"personas", "email", "password", "create", "confirm", "login", "delete", "static"}, "qa.accounts")
-        if "personas" in self.accounts:
-            raw = self.accounts["personas"]
-            if not isinstance(raw, list) or any(not isinstance(name, str) or not PERSONA.fullmatch(name) for name in raw) or len(set(self.personas)) != len(self.personas):
-                validator.error("qa.accounts.personas", "expected distinct lower-case persona names")
+        self._validate_account_templates()
+        if "static" in self.accounts:
+            validator.table(self.accounts["static"], "qa.accounts.static")
+        for persona, value in self.static.items():
+            self._validate_static_account(persona, value)
+        for name in ("create", "confirm", "login", "delete"):
+            if name in self.accounts:
+                data = validator.table(self.accounts[name], f"qa.accounts.{name}")
+                recipe = build_recipe(data, name, self)
+                if recipe is not None:
+                    self.recipes[name] = recipe
+
+    def _validate_account_templates(self) -> None:
+        validator = self.shared
+        if "personas" in self.accounts and not _persona_names(self.accounts["personas"]):
+            validator.error("qa.accounts.personas", "expected distinct lower-case persona names")
         if "email" in self.accounts:
             template = self.accounts["email"]
             if not isinstance(template, str) or not template:
@@ -122,140 +139,37 @@ class Config:
                 validator.error("qa.accounts.email", "unsupported email placeholder")
         if "password" in self.accounts and self.accounts["password"] != "generate":
             validator.source(self.accounts["password"], "qa.accounts.password")
-        if "static" in self.accounts:
-            validator.table(self.accounts["static"], "qa.accounts.static")
-        for persona, value in self.static.items():
-            prefix = f"qa.accounts.static.{persona}"
-            if not PERSONA.fullmatch(persona):
-                validator.error(prefix, "invalid persona name")
-            account = validator.table(value, prefix)
-            validator.keys(account, {"email", "password", "id"}, prefix)
-            for key in ("email", "password"):
-                if key not in account:
-                    validator.error(f"{prefix}.{key}", "required account source")
-                else:
-                    validator.source(account[key], f"{prefix}.{key}", secret=key == "password")
-            if "id" in account:
-                validator.source(account["id"], f"{prefix}.id")
-        for name in ("create", "confirm", "login", "delete"):
-            if name in self.accounts:
-                recipe = validator.table(self.accounts[name], f"qa.accounts.{name}")
-                self._validate_recipe(recipe, name)
 
-    def _validate_recipe(self, recipe: Mapping[str, object], name: str) -> None:
+    def _validate_static_account(self, persona: str, value: object) -> None:
         validator = self.shared
-        prefix = f"qa.accounts.{name}"
-        kind = recipe.get("kind")
-        if kind == "http":
-            validator.keys(recipe, {"kind", "target", "method", "path", "headers", "json", "form", "expect", "conflict", "id", "token", "cookies"}, prefix)
-            target = recipe.get("target")
-            if not isinstance(target, str) or target not in self.targets:
-                validator.error(f"{prefix}.target", "undefined target")
-            if recipe.get("method") not in ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
-                validator.error(f"{prefix}.method", "expected an HTTP method")
-            path = recipe.get("path")
-            if not isinstance(path, str) or not path.startswith("/") or path.startswith("//") or "\\" in path or "#" in path:
-                validator.error(f"{prefix}.path", "expected a target-relative request path")
-            for key in ("expect", "conflict"):
-                if key not in recipe and key == "conflict":
-                    continue
-                codes = recipe.get(key)
-                if not isinstance(codes, list) or not codes or any(type(code) is not int or not 100 <= cast(int, code) <= 599 for code in codes):
-                    validator.error(f"{prefix}.{key}", "expected HTTP status codes")
-            for key in ("headers", "form", "json"):
-                if key in recipe:
-                    body = validator.table(recipe[key], f"{prefix}.{key}")
-                    if key in {"headers", "form"}:
-                        for field, value in body.items():
-                            if not isinstance(value, str):
-                                validator.error(f"{prefix}.{key}.{field}", "expected a string")
-                    else:
-                        self._validate_json(body, f"{prefix}.{key}")
-            if "json" in recipe and "form" in recipe:
-                validator.error(prefix, "json and form are mutually exclusive")
-            for key in ("id", "token"):
-                extractor = recipe.get(key)
-                if key in recipe and (not isinstance(extractor, str) or not EXTRACTOR.fullmatch(extractor)):
-                    validator.error(f"{prefix}.{key}", "expected a dotted JSON extractor")
-            if "cookies" in recipe:
-                self._validate_cookies(recipe["cookies"], f"{prefix}.cookies")
-            for key, item in flatten(recipe, prefix).items():
-                self._validate_placeholders(item, key, name)
-        elif kind == "command":
-            validator.keys(recipe, {"kind", "run", "outputs"}, prefix)
-            if not isinstance(recipe.get("run"), str) or not recipe.get("run"):
-                validator.error(f"{prefix}.run", "expected a non-empty command")
-            outputs = recipe.get("outputs", {})
-            if isinstance(outputs, list):
-                if any(item not in ("id", "token") for item in outputs):
-                    validator.error(f"{prefix}.outputs", "unsupported command output")
-            elif isinstance(outputs, dict):
-                validator.keys(outputs, {"id", "token", "cookies"}, f"{prefix}.outputs")
-                for key in ("id", "token"):
-                    if key in outputs and outputs[key] is not True:
-                        validator.error(f"{prefix}.outputs.{key}", "expected true")
-                if "cookies" in outputs:
-                    self._validate_cookies(outputs["cookies"], f"{prefix}.outputs.cookies")
+        prefix = f"qa.accounts.static.{persona}"
+        if not PERSONA.fullmatch(persona):
+            validator.error(prefix, "invalid persona name")
+        account = validator.table(value, prefix)
+        validator.keys(account, {"email", "password", "id"}, prefix)
+        for key in ("email", "password"):
+            if key not in account:
+                validator.error(f"{prefix}.{key}", "required account source")
             else:
-                validator.error(f"{prefix}.outputs", "expected an output declaration")
-        else:
-            validator.error(f"{prefix}.kind", "expected http or command")
-
-    def _validate_json(self, value: object, key: str) -> None:
-        if isinstance(value, dict):
-            for field, item in value.items():
-                self._validate_json(item, f"{key}.{field}")
-        elif isinstance(value, list):
-            for index, item in enumerate(value):
-                self._validate_json(item, f"{key}.{index}")
-        elif not isinstance(value, (str, int, float, bool)) or isinstance(value, float) and not math.isfinite(value):
-            self.shared.error(key, "expected a JSON-compatible value")
-
-    def _validate_placeholders(self, value: object, key: str, recipe: str) -> None:
-        if isinstance(value, list):
-            for item in value:
-                self._validate_placeholders(item, key, recipe)
-        elif isinstance(value, dict):
-            for field, item in value.items():
-                self._validate_placeholders(item, f"{key}.{field}", recipe)
-        if not isinstance(value, str):
-            return
-        for placeholder in PLACEHOLDER.findall(value):
-            if placeholder == "password" and recipe == "delete":
-                self.shared.error(key, "delete cannot use a password placeholder")
-            elif placeholder.startswith("secret."):
-                if placeholder[7:] not in mapping(self.env.get("secrets")):
-                    self.shared.error(key, "placeholder names an undefined secret")
-            elif placeholder.startswith("value."):
-                if placeholder[6:] not in self.values:
-                    self.shared.error(key, "placeholder names an undefined value")
-            elif placeholder not in {"email", "password", "persona", "run", "id"}:
-                self.shared.error(key, "unsupported recipe placeholder")
-
-    def _validate_cookies(self, cookies: object, key: str) -> None:
-        if not isinstance(cookies, list) or not cookies or any(not isinstance(cookie, str) or not cookie or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", cookie) or not cookie_name(cookie) for cookie in cookies):
-            self.shared.error(key, "expected cookie names")
-            return
-        normalized = [cookie_name(cookie) for cookie in cookies]
-        if len(normalized) != len(set(normalized)):
-            self.shared.error(key, "cookie names collide after normalization")
+                validator.source(account[key], f"{prefix}.{key}", secret=key == "password")
+        if "id" in account:
+            validator.source(account["id"], f"{prefix}.id")
 
     def persona_fields(self, persona: str) -> set[str]:
         """Return the fields this persona can actually supply to a tester."""
         if persona not in self.personas and persona not in self.static:
             return set()
         fields = {"EMAIL", "PASSWORD"}
-        create = mapping(self.accounts.get("create"))
+        create = self.recipes.get("create")
         static = mapping(self.static.get(persona))
-        outputs = create.get("outputs", {})
-        if (persona in self.static and "id" in static) or (persona not in self.static and ("id" in create or isinstance(outputs, (dict, list)) and "id" in outputs)):
+        if (persona in self.static and "id" in static) or (persona not in self.static and create is not None and "id" in create.outputs):
             fields.add("ID")
-        login = mapping(self.accounts.get("login"))
-        outputs = login.get("outputs", {})
-        if "token" in login or isinstance(outputs, (dict, list)) and "token" in outputs:
+        login = self.recipes.get("login")
+        outputs = login.outputs if login is not None else {}
+        if "token" in outputs:
             fields.add("TOKEN")
-        cookies = login.get("cookies", mapping(outputs).get("cookies", []))
-        if isinstance(cookies, list) and cookies:
+        cookies = outputs.get("cookies", [])
+        if cookies:
             fields.add("COOKIE")
             fields.update(f"COOKIE_{cookie_name(cookie)}" for cookie in cookies if isinstance(cookie, str))
         return fields
@@ -294,13 +208,13 @@ class Config:
 
     def report(self) -> dict[str, object]:
         """Return JSON-safe metadata, never source results or secret literals."""
-        report: dict[str, object] = {"state": self.state, "errors": self.errors, "warnings": self.warnings, "provenance": self.provenance, "trust": self.trust, "trust_hash": self.trust_hash, "trust_subset": mask(self.trust_subset)}
+        report: dict[str, object] = {"state": self.state, "errors": self.errors, "warnings": self.warnings, "provenance": self.provenance, "trust": self.trust, "trust_hash": self.trust_hash, "trust_subset": mask(self.trust_subset, VALUE_SOURCE_KEYS)}
         if self.errors:
             return report
         exposed = [f"QA_{persona.upper()}_{field}" for persona in sorted(set(self.personas) | self.static.keys()) for field in sorted(self.persona_fields(persona))]
         exposed.extend(f"QA_{name.upper()}" for name in self.values)
         exposed.extend(DATABASE_NAMES.get(cast(str, self.database.get("kind")), []))
-        report.update({"targets": self.targets, "defaults": self.defaults, "policy": self.policy, "budget": self.budget, "services": mask({"health": [], "up": None, "prepare": [], "down": None, **self.services}), "personas": self.personas, "static_personas": self.static_personas, "values": sorted(self.values), "exposed": sorted(exposed), "database": mask(self.database) if self.database else None})
+        report.update({"targets": self.targets, "defaults": self.defaults, "policy": self.policy, "budget": self.budget, "services": {"health": [], "up": None, "prepare": [], "down": None, **self.services}, "personas": self.personas, "static_personas": self.static_personas, "values": sorted(self.values), "exposed": sorted(exposed), "database": mask(self.database, VALUE_SOURCE_KEYS, "env.database") if self.database else None})
         return report
 
     def accept(self, approved_hash: str) -> dict[str, object]:
@@ -315,7 +229,7 @@ class Config:
     def _transaction(self) -> ConfigTransaction:
         def validate(text: str, ignore: str) -> dict[str, object]:
             return Config(self.repo, state_home=self.state_home, config_text=text, gitignore_text=ignore).report()
-        return ConfigTransaction(self.repo, validate, self.accept)
+        return ConfigTransaction(self.repo, validate, self.accept, value_source_keys=VALUE_SOURCE_KEYS)
 
     def preview(self, proposal: Mapping[str, object]) -> dict[str, object]:
         return self._transaction().preview(proposal)

@@ -13,6 +13,8 @@ Only remaining failures inherit the loop's budget or no-progress stop reason.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable
+from collections.abc import Iterator
 from collections.abc import Mapping
 from datetime import datetime
 import json
@@ -22,63 +24,96 @@ import shlex
 import time
 from typing import Any
 
-from av_config import InvalidConfig
-from av_config import atomic_write
+from av_config.errors import InvalidConfig
+from av_config.files import atomic_write
 from qa_engine.accounts import ledger
-from qa_engine.accounts import read_object
+from qa_engine.common import BLOCK_END
+from qa_engine.common import LOOP_HISTORY
+from qa_engine.common import METADATA_FIELDS
+from qa_engine.common import REPORT_FIELD
+from qa_engine.common import SEVERITIES
+from qa_engine.common import assertion_keys
+from qa_engine.common import plan_assertion
+from qa_engine.common import read_object
+from qa_engine.common import report_blocks
+from qa_engine.common import report_field
+from qa_engine.common import report_fields
+from qa_engine.common import report_header
 from qa_engine.config import Config
-from qa_engine.plan import Assertion
+from qa_engine.config import DATABASE_NAMES
 from qa_engine.plan import Plan
-from qa_engine.plan import Scenario
-from qa_engine.state import ASSERTION_KEY
-from qa_engine.state import BLOCK_END
-from qa_engine.state import ISSUE_HEADING
-from qa_engine.state import LOOP_HISTORY
-from qa_engine.state import SEVERITIES
-from qa_engine.state import Run
-from qa_engine.state import StateStop
-from qa_engine.state import failures_at_floor
-from qa_engine.state import iteration_close
-from qa_engine.state import scenario_kind
+from qa_engine.plan import persona_token
+from qa_engine.plan import run_plan
+from qa_engine.models import Run
+from qa_engine.models import StateStop
+from qa_engine.schema import TesterDispatch
+from qa_engine.candidates import failures_at_floor
+from qa_engine.iterations import iteration_close
+from qa_engine.iterations import record_final
+from qa_engine.verdicts import scenario_kind
 
 JSON = dict[str, Any]
 VERDICTS = ("pass", "fail", "skip", "need-info")
 LABELS = {"pass": "Pass", "fail": "Fail", "skip": "Skip", "need-info": "Need info", "auth-unverified": "Auth-unverified"}
 DECISION_FIELDS = ("Decision", "Decision-retired", "Verification-plan", "Decision-pin", "Dispatch", "Verification")
-PROTECTED = re.compile(r"^\*\*(Status|Location|Decision|Decision-retired|Verification-plan|Decision-pin|Dispatch|Verification):\*\*[^\n]*$", re.MULTILINE)
-PROSE_FIELD = re.compile(r"^\*\*[\w-]+:\*\*")
 ACCOUNTS = re.compile(r"^- Accounts:[^\n]*$", re.MULTILINE)
 SUMMARY = re.compile(r"^## Summary[ \t]*\n.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+REQUIRED_ISSUE_FIELDS = frozenset({"qa", "title", "severity", "location", "actual", "impact", "remediation"})
+OPTIONAL_ISSUE_FIELDS = frozenset({"severity_reason", "response", "screenshot"})
+HEADING_FIELDS = ("qa", "title", "severity", "location")
+PROSE_FIELDS = ("actual", "impact", "remediation", "response", "screenshot")
 
 
-def _blocks(text: str) -> dict[str, str]:
-    blocks: dict[str, str] = {}
-    for match in ISSUE_HEADING.finditer(text):
-        end = BLOCK_END.search(text, match.end())
-        blocks.setdefault(match[2], text[match.start():end.start() if end else len(text)].rstrip())
-    return blocks
+def _multiline(entry: JSON, fields: tuple[str, ...]) -> bool:
+    return any("\n" in entry[name] or "\r" in entry[name] or len(entry[name].splitlines()) > 1 for name in fields if name in entry)
 
 
-def _header(block: str) -> str:
-    return re.split(r"^\*\*Category:\*\*", block, maxsplit=1, flags=re.MULTILINE)[0]
+def _prose_lines(entry: JSON) -> Iterator[str]:
+    for name in PROSE_FIELDS:
+        if name in entry:
+            yield from entry[name].splitlines()
 
 
-def _field(block: str, field: str) -> str | None:
-    match = re.search(rf"^\*\*{re.escape(field)}:\*\*[^\n]*$", _header(block), re.MULTILINE)
-    return match[0] if match else None
+ENTRY_RULES: tuple[tuple[Callable[[JSON], bool], str], ...] = (
+    (lambda entry: any(not entry[name].strip() for name in REQUIRED_ISSUE_FIELDS - {"impact"}), "required issue text is empty"),
+    (lambda entry: _multiline(entry, HEADING_FIELDS), "heading and location must occupy one line"),
+    (lambda entry: "`" in entry["location"] or any(BLOCK_END.search(line) for line in _prose_lines(entry)), "prose cannot contain report block boundaries"),
+    (lambda entry: any(REPORT_FIELD.search(line.lstrip(" \t")) for line in _prose_lines(entry)), "prose cannot contain report field lines"),
+    (lambda entry: _multiline(entry, ("actual", "response", "screenshot")), "actual, response and screenshot must occupy one line"),
+    (lambda entry: entry["severity"] not in SEVERITIES, "unknown severity"),
+)
 
 
-def _assertion(plan: Plan, key: str) -> tuple[Scenario, Assertion]:
-    match = ASSERTION_KEY.fullmatch(key)
-    if match is not None:
-        for scenario in plan.scenarios:
-            if scenario.id == match[1]:
-                if match[2] is None:
-                    return scenario, scenario.expected
-                number = int(match[2])
-                if number <= len(scenario.edges):
-                    return scenario, scenario.edges[number - 1]
-    raise InvalidConfig("issues: assertion is not in the run's plan")
+def _validate_issue(entry: object, run: Run, entries: Mapping[str, JSON]) -> JSON:
+    if not isinstance(entry, dict) or not REQUIRED_ISSUE_FIELDS <= entry.keys() or entry.keys() - REQUIRED_ISSUE_FIELDS - OPTIONAL_ISSUE_FIELDS:
+        raise InvalidConfig("issues: invalid issue fields")
+    if any(not isinstance(item, str) for item in entry.values()):
+        raise InvalidConfig("issues: every issue field must be text")
+    if entry["qa"] not in run.state["issue_assertion"]:
+        raise InvalidConfig("issues: QA id was not assigned")
+    if entry["qa"] in entries:
+        raise InvalidConfig("issues: duplicate QA id")
+    for broken, message in ENTRY_RULES:
+        if broken(entry):
+            raise InvalidConfig(f"issues: {message}")
+    return entry
+
+
+def _validate_issue_severity(entry: JSON, run: Run, plan: Plan) -> None:
+    key = run.state["issue_assertion"][entry["qa"]]
+    _, assertion = plan_assertion(plan, key)
+    record = run.state["assertions"].get(key)
+    observed = record["observed_status"] if record is not None else None
+    critical = (record is not None and record["crash"]) or (observed is not None and observed >= 500)
+    severity = entry["severity"]
+    if critical:
+        if severity != "CRITICAL":
+            raise InvalidConfig("issues: observed server error or crash requires CRITICAL")
+        return
+    if assertion.unverified and severity != "LOW":
+        raise InvalidConfig("issues: an unverified assertion cannot exceed LOW")
+    if severity == "CRITICAL" and entry.get("severity_reason") not in {"security-bypass", "data-loss"}:
+        raise InvalidConfig("issues: CRITICAL requires security-bypass or data-loss evidence in actual")
 
 
 def _read_issues(path: Path, run: Run, plan: Plan) -> dict[str, JSON]:
@@ -89,57 +124,25 @@ def _read_issues(path: Path, run: Run, plan: Plan) -> dict[str, JSON]:
     if not isinstance(value, list):
         raise InvalidConfig("issues: expected a JSON list")
     entries: dict[str, JSON] = {}
-    required = {"qa", "title", "severity", "location", "actual", "impact", "remediation"}
-    optional = {"severity_reason", "response", "screenshot"}
-    for entry in value:
-        if not isinstance(entry, dict) or not required <= entry.keys() or entry.keys() - required - optional:
-            raise InvalidConfig("issues: invalid issue fields")
-        if any(not isinstance(item, str) for item in entry.values()):
-            raise InvalidConfig("issues: every issue field must be text")
-        qa = entry["qa"]
-        if qa not in run.state["issue_assertion"]:
-            raise InvalidConfig("issues: QA id was not assigned")
-        if qa in entries:
-            raise InvalidConfig("issues: duplicate QA id")
-        if any(not entry[name].strip() for name in required - {"impact"}):
-            raise InvalidConfig("issues: required issue text is empty")
-        if any("\n" in entry[name] or "\r" in entry[name] or len(entry[name].splitlines()) > 1 for name in ("qa", "title", "severity", "location")):
-            raise InvalidConfig("issues: heading and location must occupy one line")
-        if "`" in entry["location"] or any(BLOCK_END.search(line) for name in ("actual", "impact", "remediation", "response", "screenshot") if name in entry for line in entry[name].splitlines()):
-            raise InvalidConfig("issues: prose cannot contain report block boundaries")
-        if any(PROSE_FIELD.search(line) for name in ("actual", "impact", "remediation", "response", "screenshot") if name in entry for line in entry[name].splitlines()):
-            raise InvalidConfig("issues: prose cannot contain report field lines")
-        if any("\n" in entry[name] or "\r" in entry[name] or len(entry[name].splitlines()) > 1 for name in ("actual", "response", "screenshot") if name in entry):
-            raise InvalidConfig("issues: actual, response and screenshot must occupy one line")
-        severity = entry["severity"]
-        if severity not in SEVERITIES:
-            raise InvalidConfig("issues: unknown severity")
-        key = run.state["issue_assertion"][qa]
-        _, assertion = _assertion(plan, key)
-        result = run.state["assertions"].get(key, {})
-        observed = result.get("observed_status")
-        critical = result.get("crash", False) or (isinstance(observed, int) and observed >= 500)
-        if critical and severity != "CRITICAL":
-            raise InvalidConfig("issues: observed server error or crash requires CRITICAL")
-        if not critical and assertion.unverified and severity != "LOW":
-            raise InvalidConfig("issues: an unverified assertion cannot exceed LOW")
-        if severity == "CRITICAL" and not critical and entry.get("severity_reason") not in {"security-bypass", "data-loss"}:
-            raise InvalidConfig("issues: CRITICAL requires security-bypass or data-loss evidence in actual")
-        entries[qa] = entry
+    for item in value:
+        entry = _validate_issue(item, run, entries)
+        _validate_issue_severity(entry, run, plan)
+        entries[entry["qa"]] = entry
     return entries
 
 
 def _issue(entry: JSON, key: str, plan: Plan, run: Run, previous: str) -> str:
-    scenario, assertion = _assertion(plan, key)
+    scenario, assertion = plan_assertion(plan, key)
     carried: dict[str, str] = {}
     decisions: list[str] = []
-    for match in PROTECTED.finditer(_header(previous)):
-        name = match[1]
+    for name, _, line in report_fields(report_header(previous)):
+        if name not in METADATA_FIELDS:
+            continue
         if name in carried:
             continue
-        carried[name] = match[0]
+        carried[name] = line
         if name in DECISION_FIELDS:
-            decisions.append(match[0])
+            decisions.append(line)
     lines = [f"### [{entry['severity']}] {entry['qa']}: {entry['title']}"]
     if "Status" in carried:
         lines.append(carried["Status"])
@@ -147,7 +150,8 @@ def _issue(entry: JSON, key: str, plan: Plan, run: Run, previous: str) -> str:
     location = carried.get("Location", "")
     if " (was: " not in location:
         location = f"**Location:** `{entry['location']}`"
-    refutation = run.state["assertions"].get(key, {}).get("refutation")
+    record = run.state["assertions"].get(key)
+    refutation = record["refutation"] if record is not None else None
     lines.extend(["", f"**ID:** {entry['qa']}", location, "**Category:** Testing", "", "**Problem:**",
                   f"- Expected: {assertion.text}", f"- Actual: {entry['actual']}"])
     if refutation is not None:
@@ -231,54 +235,59 @@ def _details(run: Run, plan: Plan, verdicts: Mapping[str, str]) -> list[str]:
     return lines
 
 
-def _elapsed(run: Run) -> int:
-    # Report re-renders use recorded activity, not the rendering process's clock.
-    latest = max((row.get("time", run.record["started"]) for row in run.state["dispatches"].values()), default=run.record["started"])
-    return max(int(latest - run.record["started"]), max((row.get("elapsed_s", 0) for row in run.state["iterations"]), default=0))
-
-
-def _final(run: Run, plan: Plan, blocks: dict[str, str], verdicts: Mapping[str, str]) -> list[str]:
-    latest: dict[str, JSON] = {}
+def _require_final_dispatches(run: Run, verdicts: Mapping[str, str]) -> None:
+    latest: dict[str, TesterDispatch] = {}
     for dispatch in run.state["dispatches"].values():
-        if dispatch.get("kind") == "tester":
+        if dispatch["kind"] == "tester":
             for sid in dispatch["scenarios"]:
                 latest[sid] = dispatch
     if any(sid not in latest or latest[sid]["phase"] != "final" or not latest[sid]["ingested"] for sid in verdicts):
         raise StateStop("final report requires an ingested final dispatch for every scenario")
+
+
+def _mark_fixed(blocks: dict[str, str], qa: str, today: str) -> bool:
+    if qa not in blocks:
+        return False
+    status = report_field(blocks[qa], "Status")
+    if status is not None and status.startswith("🚫 Rejected"):
+        return False
+    header = report_header(blocks[qa])
+    lines = [line for line in header.split("\n") if report_field(line, "Status") is None]
+    lines.insert(1, f"**Status:** ✅ Fixed ({today})")
+    blocks[qa] = "\n".join(lines) + blocks[qa][len(header):]
+    return True
+
+
+def _final_fixed(run: Run, plan: Plan, blocks: dict[str, str], verdicts: Mapping[str, str]) -> list[str]:
     fixed: list[str] = []
     today = datetime.now().astimezone().date().isoformat()
     for scenario in plan.scenarios:
-        if verdicts[scenario.id] != "pass":
-            continue
-        for qa in run.state["scenario_issues"].get(scenario.id, []):
-            if qa not in blocks:
-                continue
-            status = _field(blocks[qa], "Status")
-            if status is not None and status.removeprefix("**Status:**").strip().startswith("🚫 Rejected"):
-                continue
-            header = _header(blocks[qa])
-            lines = [line for line in header.split("\n") if not line.startswith("**Status:**")]
-            lines.insert(1, f"**Status:** ✅ Fixed ({today})")
-            blocks[qa] = "\n".join(lines) + blocks[qa][len(header):]
-            fixed.append(qa)
-    still = []
+        if verdicts[scenario.id] == "pass":
+            for qa in run.state["scenario_issues"].get(scenario.id, []):
+                if _mark_fixed(blocks, qa, today):
+                    fixed.append(qa)
+    return fixed
+
+
+def _final_remaining(run: Run, plan: Plan, blocks: Mapping[str, str], verdicts: Mapping[str, str]) -> list[str]:
+    still: list[str] = []
     for scenario in plan.scenarios:
-        open_issues = [qa for qa in run.state["scenario_issues"].get(scenario.id, []) if qa in blocks and _field(blocks[qa], "Status") is None]
-        if verdicts[scenario.id] != "pass" and open_issues:
-            note = ""
-            if run.state["assertions"].get(scenario.id, {}).get("result") == "PASS":
-                if verdicts[scenario.id] == "need-info":
-                    note = " (edge need info)"
-                elif verdicts[scenario.id] == "skip":
-                    note = " (edge skipped)"
-            still.append(scenario.id + note)
-    regressions = [sid for sid, verdict in verdicts.items() if verdict == "fail" and run.state["baseline"].get(sid) == "pass"]
-    row = {"iteration": "Final", "failing_in": [sid for sid, verdict in run.state["baseline"].items() if verdict == "fail"],
-           "now_passing": [sid for sid, verdict in verdicts.items() if verdict == "pass" and run.state["baseline"].get(sid) != "pass"],
-           "still_failing": still, "warnings": [], "regressions": regressions,
-           "dispatch_count": sum(dispatch.get("kind") == "tester" and dispatch.get("phase") == "final" for dispatch in run.state["dispatches"].values()),
-           "elapsed_s": _elapsed(run), "result": {"fixed": fixed, "regressions": regressions}}
-    run.state["iterations"] = [old for old in run.state["iterations"] if old.get("iteration") != "Final"] + [row]
+        if verdicts[scenario.id] == "pass":
+            continue
+        if not any(qa in blocks and report_field(blocks[qa], "Status") is None for qa in run.state["scenario_issues"].get(scenario.id, [])):
+            continue
+        note = ""
+        record = run.state["assertions"].get(scenario.id)
+        if record is not None and record["result"] == "PASS":
+            note = {"need-info": " (edge need info)", "skip": " (edge skipped)"}.get(verdicts[scenario.id], "")
+        still.append(scenario.id + note)
+    return still
+
+
+def _final(run: Run, plan: Plan, blocks: dict[str, str], verdicts: Mapping[str, str]) -> list[str]:
+    _require_final_dispatches(run, verdicts)
+    fixed = _final_fixed(run, plan, blocks, verdicts)
+    record_final(run, verdicts, fixed, _final_remaining(run, plan, blocks, verdicts))
     return fixed
 
 
@@ -291,9 +300,9 @@ def _history(run: Run, previous: str, final: bool) -> list[str]:
                 rows.append(line)
     for row in run.state["iterations"]:
         cells = [str(row["iteration"])]
-        for name in ("failing_in", "now_passing", "still_failing", "warnings", "regressions"):
-            cells.append(", ".join(str(value).replace("|", "\\|").replace("\n", " ") for value in row.get(name, [])) or "—")
-        cells.append(str(row.get("dispatch_count", 0)))
+        for column in (row["failing_in"], row["now_passing"], row["still_failing"], row["warnings"], row["regressions"]):
+            cells.append(", ".join(value.replace("|", "\\|").replace("\n", " ") for value in column) or "—")
+        cells.append(str(row["dispatch_count"]))
         line = "| " + " | ".join(cells) + " |"
         if line not in rows:
             rows.append(line)
@@ -306,10 +315,10 @@ def render_report(run: Run, issues: Path, *, final: bool = False) -> JSON:
     if final and run.state["open_iteration"] is not None:
         iteration_close(run, decide=False)
     # An explicit abort cannot become verification through a later --final call.
-    final = final and (run.state["loop_end"] or {}).get("decision") != "stop"
-    plan = run.plan(strict=final)
+    final = final and not run.stopped
+    plan = run_plan(run, strict=final)
     previous = run.report_text()
-    blocks = _blocks(previous)
+    blocks = report_blocks(previous)
     entries = _read_issues(issues, run, plan)
     for qa, entry in entries.items():
         blocks[qa] = _issue(entry, run.state["issue_assertion"][qa], plan, run, blocks.get(qa, ""))
@@ -318,7 +327,7 @@ def render_report(run: Run, issues: Path, *, final: bool = False) -> JSON:
         raise InvalidConfig("issues: prose required for assigned QA ids: " + ", ".join(missing))
     order: dict[str, int] = {}
     for scenario in plan.scenarios:
-        for key in (scenario.id, *(f"{scenario.id} (edge {number})" for number in range(1, len(scenario.edges) + 1))):
+        for key in assertion_keys(scenario):
             order[key] = len(order)
     blocks = dict(sorted(blocks.items(), key=lambda item: (order.get(run.state["issue_assertion"].get(item[0], ""), len(order)), int(item[0][3:]))))
     verdicts = _verdicts(run, plan)
@@ -326,7 +335,7 @@ def render_report(run: Run, issues: Path, *, final: bool = False) -> JSON:
     lines = [f"# Test Report: {run.state['topic']}", "", "## Summary", _counts(verdicts),
              f"- Plan: {run.state['plan_path']}",
              "- Plan provenance: " + ("auto-generated" if run.state["auto_generated"] else "existing"),
-             f"- Date: {run.state['created']}", f"- Duration: {_elapsed(run)}s", accounts_line(run)]
+             f"- Date: {run.state['created']}", f"- Duration: {run.elapsed()}s", accounts_line(run)]
     gaps = _gaps(run)
     if gaps:
         lines.extend(["", "## Setup gaps", *gaps])
@@ -339,9 +348,9 @@ def render_report(run: Run, issues: Path, *, final: bool = False) -> JSON:
 
 
 def _result(run: Run, verdicts: Mapping[str, str], elapsed: int) -> str:
-    end = run.state["loop_end"] or {}
-    reason = str(end.get("reason", ""))
-    if not run.plan_unchanged() or end.get("decision") == "stop":
+    end = run.state["loop_end"]
+    reason = end["reason"] if end is not None else ""
+    if not run.plan_unchanged() or run.stopped:
         return "Stopped"
     if failures_at_floor(run):
         if "no progress" in reason or "regression" in reason:
@@ -370,25 +379,61 @@ def _coverage(run: Run, plan: Plan, verdicts: Mapping[str, str]) -> tuple[list[s
 
 
 def _credential_key(run: Run, name: str) -> str:
-    database = {"PGHOST": "host", "PGPORT": "port", "PGUSER": "user", "PGDATABASE": "name", "PGPASSWORD": "password",
-                "MYSQL_HOST": "host", "MYSQL_TCP_PORT": "port", "MYSQL_USER": "user", "MYSQL_DATABASE": "name", "MYSQL_PWD": "password", "SQLITE_DB": "path"}
-    if name in database:
-        return "env.database." + database[name]
+    for names in DATABASE_NAMES.values():
+        if name in names:
+            return "env.database." + names[name]
     token = name.removeprefix("QA_")
     accounts = run.record["config"]["qa"].get("accounts", {})
-    personas = sorted(set(accounts.get("personas", [])) | set(accounts.get("static", {})), key=lambda persona: (-len(persona), persona))
-    for persona in personas:
-        prefix = persona.upper() + "_"
-        if token.startswith(prefix):
-            field = token.removeprefix(prefix)
-            if field.startswith(("TOKEN", "COOKIE")):
-                return "qa.accounts.login"
-            if persona in accounts.get("static", {}):
-                return f"qa.accounts.static.{persona}.{field.lower()}"
-            return "qa.accounts.create" if field == "ID" else f"qa.accounts.{field.lower()}"
+    personas = set(accounts.get("personas", [])) | set(accounts.get("static", {}))
+    recognized = persona_token(name, personas)
+    if recognized:
+        persona, field = recognized
+        if field == "TOKEN" or field.startswith("COOKIE"):
+            return "qa.accounts.login"
+        if persona in accounts.get("static", {}):
+            return f"qa.accounts.static.{persona}.{field.lower()}"
+        return "qa.accounts.create" if field == "ID" else f"qa.accounts.{field.lower()}"
     if re.fullmatch(r".+_(TOKEN|COOKIE(?:_.+)?)", token):
         return "qa.accounts.login"
     return "env.values." + token
+
+
+def _auth_unlock(run: Run, count: int) -> str:
+    accounts = run.record["config"]["qa"].get("accounts", {})
+    personas = sorted(set(accounts.get("personas", [])) | set(accounts.get("static", {})))
+    credentials = ", ".join(f"`$QA_{name.upper()}_TOKEN` or `$QA_{name.upper()}_COOKIE`" for name in personas) or "`$QA_<P>_TOKEN` or `$QA_<P>_COOKIE`"
+    return f"- auth-unverified ({count}): use the persona's {credentials} in the scenario, or add a `qa.accounts.login` recipe; re-run `/qa:run`."
+
+
+def _gap_action(run: Run, kind: str) -> str:
+    if kind == "credentials":
+        keys = sorted({_credential_key(run, " ".join(name.split())) for item in run.state["need_info"].values()
+                       if item["kind"] == "credentials" for name in item["missing"]})
+        return "fix " + ", ".join(f"`{key}`" for key in keys) + " in `.av/config.toml` or `.av/local.toml`"
+    return {"service": "fix/start the named service using `env.targets` and `env.services`",
+            "fixture": "provide the named fixture or create it in the scenario's data preconditions",
+            "tool": "install/enable the named tool"}.get(kind, "supply the named items listed under Setup gaps")
+
+
+def _gap_unlocks(run: Run, verdicts: Mapping[str, str]) -> list[str]:
+    if not run.state["need_info"]:
+        return []
+    hints = [f"- need-info ({sum(verdict == 'need-info' for verdict in verdicts.values())}):"]
+    for gap in _gaps(run):
+        kind = gap.split(":", 1)[0].removeprefix("- ")
+        hints.append(f"  {gap} — {_gap_action(run, kind)}; re-run `/qa:run`.")
+    return hints
+
+
+def _backend_unavailable(run: Run, plan: Plan) -> bool:
+    be = [scenario.id for scenario in plan.scenarios if scenario.section == "BE"]
+    if not be:
+        return False
+    gaps = run.state["need_info"]
+    assertions = run.state["assertions"]
+    return (all(sid in gaps and gaps[sid]["kind"] == "service" for sid in be)
+            or all(run.state["scenario_reason"].get(sid) == "transport" and (sid not in assertions or assertions[sid]["observed_status"] is None)
+                   for sid in be))
 
 
 def _unlock(run: Run, plan: Plan, verdicts: Mapping[str, str]) -> list[str]:
@@ -397,81 +442,58 @@ def _unlock(run: Run, plan: Plan, verdicts: Mapping[str, str]) -> list[str]:
     if reasons["mutation-guard"]:
         hints.append(f"- mutation-guard ({reasons['mutation-guard']}): set `qa.policy.mutations` in `.av/config.toml`; `allow` requires `qa.policy.disposable_data = true` and disposable test data.")
     if reasons["auth-unverified"] or run.state["auth_gated_issues"]:
-        accounts = run.record["config"]["qa"].get("accounts", {})
-        personas = sorted(set(accounts.get("personas", [])) | set(accounts.get("static", {})))
-        credentials = ", ".join(f"`$QA_{name.upper()}_TOKEN` or `$QA_{name.upper()}_COOKIE`" for name in personas) or "`$QA_<P>_TOKEN` or `$QA_<P>_COOKIE`"
-        hints.append(f"- auth-unverified ({reasons['auth-unverified']}): use the persona's {credentials} in the scenario, or add a `qa.accounts.login` recipe; re-run `/qa:run`.")
-    if run.state["need_info"]:
-        hints.append(f"- need-info ({sum(verdict == 'need-info' for verdict in verdicts.values())}):")
-        for gap in _gaps(run):
-            kind = gap.split(":", 1)[0].removeprefix("- ")
-            action = {"service": "fix/start the named service using `env.targets` and `env.services`",
-                      "fixture": "provide the named fixture or create it in the scenario's data preconditions",
-                      "tool": "install/enable the named tool",
-                      "credentials": "fix the named `env.values` or `qa.accounts` source in `.av/config.toml` or `.av/local.toml`"}.get(
-                          kind, "supply the named items listed under Setup gaps")
-            if kind == "credentials":
-                keys = sorted({_credential_key(run, " ".join(name.split())) for item in run.state["need_info"].values()
-                               if item["kind"] == "credentials" for name in item["missing"]})
-                action = "fix " + ", ".join(f"`{key}`" for key in keys) + " in `.av/config.toml` or `.av/local.toml`"
-            hints.append(f"  {gap} — {action}; re-run `/qa:run`.")
+        hints.append(_auth_unlock(run, reasons["auth-unverified"]))
+    hints.extend(_gap_unlocks(run, verdicts))
     if reasons["tool-unavailable"]:
         hints.append(f"- tool-unavailable ({reasons['tool-unavailable']}): install/enable the missing browser, HTTP or database client.")
     if run.state["dispatch_count"] >= run.budget["dispatches"]:
         hints.append("- dispatch-exhausted: raise `qa.budget.dispatches` in `.av/config.toml`.")
     if run.state["iteration"] >= run.budget["iterations"]:
         hints.append("- iterations exhausted: raise `qa.budget.iterations` in `.av/config.toml`.")
-    be = [scenario.id for scenario in plan.scenarios if scenario.section == "BE"]
-    gaps = run.state["need_info"]
-    if be and (all(gaps.get(sid, {}).get("kind") == "service" for sid in be)
-               or all(run.state["scenario_reason"].get(sid) == "transport" and run.state["assertions"].get(sid, {}).get("observed_status") is None for sid in be)):
+    if _backend_unavailable(run, plan):
         hints.append("- No BE scenario returned an HTTP status at the configured `env.targets` origins — the dev stack may be down; check `env.services.health`/`up`.")
     return hints
 
 
-def render_summary(run: Run) -> str:
-    """Render the severity-floor result, advisory coverage, unlocks and scoped recovery."""
-    if run.state["open_iteration"] is not None:
-        iteration_close(run, decide=False)
-    plan = run.plan(strict=False)
-    verdicts = _verdicts(run, plan)
-    elapsed = max(0, int(time.time() - run.record["started"]))
-    result = _result(run, verdicts, elapsed)
-    blocks = _blocks(run.report_text())
-    fixed = sum((_field(block, "Status") or "").startswith("**Status:** ✅ Fixed") for block in blocks.values())
-    remaining = sum(_field(block, "Status") is None for block in blocks.values())
-    warnings = [warning for row in run.state["iterations"] for warning in row.get("warnings", [])]
-    regressions = {sid for row in run.state["iterations"] for sid in row.get("regressions", [])}
-    coverage, shallow = _coverage(run, plan, verdicts)
-    lines = ["## Loop Summary", "", f"**Result:** {result}", "", "**Final Status:**", _counts(verdicts),
-             f"- Fixed (Status written): {fixed}", f"- Remaining unfixed: {remaining}", f"- Warnings: {len(warnings)} (anti-hardcoding)",
-             f"- Regressions: {len(regressions)}", "", *coverage, ""]
-    if result == "Stopped":
-        end = run.state["loop_end"] or {}
-        reason = end.get("reason") or ("plan changed mid-run (hash mismatch)" if not run.plan_unchanged() else "no executable verifier")
-        lines.append(f"- Stop reason: {reason}")
-        if end.get("detail"):
-            lines.append(f"- Stop detail: {end['detail']}")
-    all_unverified = bool(verdicts) and all(verdict in {"skip", "need-info"} for verdict in verdicts.values())
-    if all_unverified and (run.state["loop_end"] or {}).get("decision") != "stop":
-        if run.state["auto_generated"]:
-            if all(run.state["scenario_reason"].get(sid) == "mutation-guard" for sid in verdicts):
-                lines.append("Auto-generated plan is backend-write-only under the mutation guard — nothing executable here; rely on the unit/integration suite.")
-            else:
-                lines.append("Warning: All scenarios skipped or need setup for tooling/parse/prerequisite reasons, not mutation-guard — coverage is zero; verify the generated plan, Setup gaps and tool availability.")
-        else:
-            lines.append("Error: No executable verifier — cannot gate (all scenarios marked SKIP or NEED_INFO). Check your test plan, Setup gaps and tool availability.")
-    elif result != "Stopped" and not failures_at_floor(run):
-        if shallow and run.state["auto_generated"]:
-            lines.append("All assertions passed, but coverage is shallow — no feature behavior was exercised (see Coverage). Low-confidence green: the plan was auto-generated and may not reflect runtime auth/setup.")
-        else:
-            lines.append("No failing assertions to fix. Check Coverage and Setup gaps for unverified scenarios.")
-            if shallow:
-                lines.append("Warning: shallow coverage — no feature behavior was exercised. This green reflects infrastructure and enforcement checks only.")
-    lines.extend(["", "**Next steps to widen coverage:**", *_unlock(run, plan, verdicts), "", "**Budget Used:**",
-                  f"- Dispatches: {run.state['dispatch_count']} / {run.budget['dispatches']}",
-                  f"- Iterations: {run.state['iteration']} / {run.budget['iterations']}",
-                  f"- Time: {elapsed // 60}m {elapsed % 60}s / {run.budget['minutes']}m", "", "**Next Steps:**"])
+def _stop_summary(run: Run, result: str) -> list[str]:
+    if result != "Stopped":
+        return []
+    end = run.state["loop_end"]
+    reason = (end["reason"] if end is not None else "") or ("plan changed mid-run (hash mismatch)" if not run.plan_unchanged() else "no executable verifier")
+    lines = [f"- Stop reason: {reason}"]
+    detail = end.get("detail") if end is not None else None
+    if detail:
+        lines.append(f"- Stop detail: {detail}")
+    return lines
+
+
+def _all_unverified(verdicts: Mapping[str, str]) -> bool:
+    return bool(verdicts) and all(verdict in {"skip", "need-info"} for verdict in verdicts.values())
+
+
+def _coverage_notice(run: Run, verdicts: Mapping[str, str], result: str, shallow: bool) -> list[str]:
+    if _all_unverified(verdicts) and not run.stopped:
+        return [_unverified_notice(run, verdicts)]
+    if result == "Stopped" or failures_at_floor(run):
+        return []
+    if shallow and run.state["auto_generated"]:
+        return ["All assertions passed, but coverage is shallow — no feature behavior was exercised (see Coverage). Low-confidence green: the plan was auto-generated and may not reflect runtime auth/setup."]
+    lines = ["No failing assertions to fix. Check Coverage and Setup gaps for unverified scenarios."]
+    if shallow:
+        lines.append("Warning: shallow coverage — no feature behavior was exercised. This green reflects infrastructure and enforcement checks only.")
+    return lines
+
+
+def _unverified_notice(run: Run, verdicts: Mapping[str, str]) -> str:
+    if not run.state["auto_generated"]:
+        return "Error: No executable verifier — cannot gate (all scenarios marked SKIP or NEED_INFO). Check your test plan, Setup gaps and tool availability."
+    if all(run.state["scenario_reason"].get(sid) == "mutation-guard" for sid in verdicts):
+        return "Auto-generated plan is backend-write-only under the mutation guard — nothing executable here; rely on the unit/integration suite."
+    return "Warning: All scenarios skipped or need setup for tooling/parse/prerequisite reasons, not mutation-guard — coverage is zero; verify the generated plan, Setup gaps and tool availability."
+
+
+def _recovery_summary(run: Run, remaining: int) -> list[str]:
+    lines: list[str] = []
     if remaining:
         lines.append("Use `/fix QA-NNN` to fix remaining issues by ID, or re-run `/qa:run` after adjusting `.av/config.toml` policy or budgets.")
     touched = sorted(set(run.state["fix_touched_files"]) - set(run.state["pre_loop_dirty"]))
@@ -480,9 +502,41 @@ def render_summary(run: Run) -> str:
                      + "` (scoped — restores only what the loop's fixes touched, never your pre-existing changes).")
     else:
         lines.append("The loop touched nothing eligible for scoped recovery.")
-    overlap = sorted({path for row in run.state["iterations"] for path in row.get("result", {}).get("overlap", [])})
+    overlap = sorted({path for row in run.state["iterations"] if "overlap" in row["result"] for path in row["result"]["overlap"]})
     if overlap:
         lines.append("Pre-existing-dirty files also edited by fixes are excluded from scoped recovery; reconcile manually: " + ", ".join(f"`{path}`" for path in overlap) + ".")
+    return lines
+
+
+def _issue_counts(blocks: Mapping[str, str]) -> tuple[int, int]:
+    fixed = sum((report_field(block, "Status") or "").startswith("✅ Fixed") for block in blocks.values())
+    remaining = sum(report_field(block, "Status") is None for block in blocks.values())
+    return fixed, remaining
+
+
+def render_summary(run: Run) -> str:
+    """Render the severity-floor result, advisory coverage, unlocks and scoped recovery."""
+    if run.state["open_iteration"] is not None:
+        iteration_close(run, decide=False)
+    plan = run_plan(run, strict=False)
+    verdicts = _verdicts(run, plan)
+    elapsed = max(0, int(time.time() - run.record["started"]))
+    result = _result(run, verdicts, elapsed)
+    blocks = report_blocks(run.report_text())
+    fixed, remaining = _issue_counts(blocks)
+    warnings = [warning for row in run.state["iterations"] for warning in row["warnings"]]
+    regressions = {sid for row in run.state["iterations"] for sid in row["regressions"]}
+    coverage, shallow = _coverage(run, plan, verdicts)
+    lines = ["## Loop Summary", "", f"**Result:** {result}", "", "**Final Status:**", _counts(verdicts),
+             f"- Fixed (Status written): {fixed}", f"- Remaining unfixed: {remaining}", f"- Warnings: {len(warnings)} (anti-hardcoding)",
+             f"- Regressions: {len(regressions)}", "", *coverage, ""]
+    lines.extend(_stop_summary(run, result))
+    lines.extend(_coverage_notice(run, verdicts, result, shallow))
+    lines.extend(["", "**Next steps to widen coverage:**", *_unlock(run, plan, verdicts), "", "**Budget Used:**",
+                  f"- Dispatches: {run.state['dispatch_count']} / {run.budget['dispatches']}",
+                  f"- Iterations: {run.state['iteration']} / {run.budget['iterations']}",
+                  f"- Time: {elapsed // 60}m {elapsed % 60}s / {run.budget['minutes']}m", "", "**Next Steps:**"])
+    lines.extend(_recovery_summary(run, remaining))
     if warnings:
         lines.extend(["", "**Warnings (manual review recommended):**", *(f"- {warning}" for warning in warnings)])
     lines.extend(["", "**Changes remain uncommitted for your control.**", ""])

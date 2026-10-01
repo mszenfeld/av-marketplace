@@ -7,17 +7,21 @@ Sections and DB checks are scenario IDs in plan order. Persona gaps carry
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 import re
-import subprocess
-from urllib.parse import urlsplit
 
-from av_config import ConfigError
-from av_config import Origin
-from av_config import parse_origin
+from av_config.errors import ConfigError
+from av_config.origins import Origin
+from av_config.origins import parse_origin
 from qa_engine.config import Config
+from qa_engine.files import display_path
+from qa_engine.common import origin_display
+from qa_engine.git import git_command
+from qa_engine.models import Run
+from qa_engine.models import StateStop
 
 SCENARIO = re.compile(r"^###[ \t]+((FE|BE)-\d{2,})(?=[ \t:]|$)[ \t]*:?[ \t]*(.*)$", re.MULTILINE)
 BLOCK_BOUNDARY = re.compile(r"^#{1,3}[ \t]+.*$|^[ \t]*(?P<fence>`{3,}|~{3,})(?P<info>.*)$", re.MULTILINE)
@@ -36,15 +40,13 @@ RELATIVE_PATH = re.compile(r"(?<![A-Za-z0-9_:/])/(?!/)[A-Za-z0-9_{?]")
 
 @dataclass
 class Assertion:
-    """An Expected or edge assertion, retaining its grounding and status tokens."""
+    """An Expected or edge assertion with the flags used by execution guards."""
 
     text: str
     statuses: list[int] = field(init=False)
-    grounding: list[str] = field(init=False)
     unverified: bool = field(init=False)
 
     def __post_init__(self) -> None:
-        self.grounding = [match.strip("`") for match in CITATION.findall(self.text)]
         self.statuses = [int(status) for status in STATUS.findall(CITATION.sub("", self.text))]
         self.unverified = bool(re.search(r"\(unverified\b", self.text, re.IGNORECASE))
 
@@ -60,7 +62,6 @@ class Scenario:
     method: str | None
     path: str | None
     target: str | None
-    preconditions: str
     expected: Assertion
     edges: list[Assertion]
     db_check: str | None
@@ -88,6 +89,13 @@ class Plan:
     @property
     def sections(self) -> dict[str, list[str]]:
         return {section: [scenario.id for scenario in self.scenarios if scenario.section == section] for section in ("FE", "BE")}
+
+
+def run_plan(run: Run, *, strict: bool = True) -> Plan:
+    """Parse the run's plan; ``strict`` refuses a plan edited since ``run start``."""
+    if strict and not run.plan_unchanged():
+        raise StateStop("plan changed mid-run (hash mismatch)")
+    return parse_plan(run.plan_path)
 
 
 @dataclass
@@ -165,7 +173,6 @@ def _scenario(match: re.Match[str], text: str) -> Scenario:
     return Scenario(
         id=match.group(1), section=match.group(2), title=match.group(3), text=text,
         method=method, path=path, target=values.get("target", "").strip().strip("`") or None,
-        preconditions="\n".join(item.text for item in fields if item.name == "preconditions"),
         expected=Assertion(values.get("expected", "")),
         edges=[edge for item in fields if item.name == "edge cases" for edge in _edges(item.text)],
         db_check=values.get("db check"), tokens=tokens, urls=urls,
@@ -205,20 +212,6 @@ def parse_plan(path: Path) -> Plan:
     return Plan(path, branch, head, scenarios)
 
 
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=False, timeout=10)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise ConfigError("plan resolution git operation failed") from error
-
-
-def _display_path(repo: Path, path: Path) -> str:
-    try:
-        return str(path.relative_to(repo))
-    except ValueError:
-        return str(path)
-
-
 def resolve_plan(repo: Path, argument: str = "") -> dict[str, object]:
     """Reuse explicit paths or the newest current-branch plan, checking its Head.
 
@@ -226,8 +219,8 @@ def resolve_plan(repo: Path, argument: str = "") -> dict[str, object]:
     plan. Only automatically selected plans are checked for source staleness.
     """
     repo = repo.resolve()
-    branch_result = _git(repo, "branch", "--show-current")
-    head_result = _git(repo, "rev-parse", "HEAD")
+    branch_result = git_command(repo, "branch", "--show-current")
+    head_result = git_command(repo, "rev-parse", "HEAD")
     if branch_result.returncode or head_result.returncode:
         raise ConfigError("plan resolution needs a git repository with a HEAD")
     branch, head = branch_result.stdout.strip(), head_result.stdout.strip()
@@ -237,7 +230,7 @@ def resolve_plan(repo: Path, argument: str = "") -> dict[str, object]:
         if not candidate.is_absolute():
             candidate = repo / candidate
         if candidate.is_file():
-            result.update(action="reuse", plan=_display_path(repo, candidate.resolve()))
+            result.update(action="reuse", plan=display_path(repo, candidate.resolve()))
         return result
     if not branch:
         return result
@@ -246,13 +239,13 @@ def resolve_plan(repo: Path, argument: str = "") -> dict[str, object]:
         plan = parse_plan(path)
         if plan.branch != branch:
             continue
-        result.update(action="reuse", plan=_display_path(repo, path))
+        result.update(action="reuse", plan=display_path(repo, path))
         # Only literal commit IDs are accepted; plan metadata cannot introduce
         # git options or revision expressions that silently refer to another tip.
-        if not plan.head or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", plan.head) or _git(repo, "merge-base", "--is-ancestor", plan.head, "HEAD").returncode:
+        if not plan.head or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", plan.head) or git_command(repo, "merge-base", "--is-ancestor", plan.head, "HEAD").returncode:
             result["action"] = "stale"
             return result
-        changed = _git(repo, "diff", "--name-only", "-z", f"{plan.head}..HEAD")
+        changed = git_command(repo, "diff", "--name-only", "-z", f"{plan.head}..HEAD")
         if changed.returncode:
             raise ConfigError("plan resolution cannot compare the recorded Head")
         files = [name for name in changed.stdout.split("\0") if name]
@@ -263,9 +256,10 @@ def resolve_plan(repo: Path, argument: str = "") -> dict[str, object]:
     return result
 
 
-def _persona_token(token: str, configured: set[str]) -> tuple[str, str] | None:
+def persona_token(token: str, personas: Iterable[str]) -> tuple[str, str] | None:
+    """Recognize a persona field using the longest valid configured prefix."""
     name = token.removeprefix("QA_")
-    for persona in sorted(configured, key=lambda item: (-len(item), item)):
+    for persona in sorted(personas, key=lambda item: (-len(item), item)):
         prefix = persona.upper() + "_"
         if name.startswith(prefix) and PERSONA_FIELD.fullmatch(name[len(prefix):]):
             return persona, name[len(prefix):]
@@ -276,27 +270,12 @@ def _persona_reason(config: Config, persona: str, capability: str) -> str | None
     if persona not in config.static:
         if config.policy["mutations"] == "deny":
             return "provisioning is forbidden under mutations=deny"
-        if not config.accounts.get("create"):
+        if "create" not in config.recipes:
             return "qa.accounts.create is required to provision this persona"
     if capability not in config.persona_fields(persona):
         recipe = "create or a static id source" if capability == "ID" else "login"
         return f"{recipe} cannot produce {capability}"
     return None
-
-
-def _origin_display(url: str) -> str | None:
-    """Describe a refused origin without reflecting URL userinfo or payloads."""
-    try:
-        parts = urlsplit(url)
-        host = parts.hostname
-        if not host:
-            return None
-        port = parts.port if parts.port is not None else (443 if parts.scheme.lower() == "https" else 80)
-    except ValueError:
-        return None
-    if ":" in host:
-        host = f"[{host}]"
-    return f"{parts.scheme.lower()}://{host.lower()}:{port}"
 
 
 def _mutates(scenario: Scenario) -> bool:
@@ -326,27 +305,16 @@ def _rejection_exempt(scenario: Scenario) -> bool:
     )
 
 
-def check_plan(plan: Plan, config: Config) -> dict[str, object]:
-    """Return C7 requirements, config gaps, refused origins, and mutation guards.
-
-    Persona recognition precedes value lookup; otherwise configured values win
-    before the unknown-token field grammar determines the gap category.
-    """
+def _token_requirements(plan: Plan, config: Config) -> tuple[set[str], set[str], dict[str, dict[str, str]], set[str]]:
     configured = set(config.personas) | config.static.keys()
     value_names = {name.upper(): name for name in config.values}
     personas: set[str] = set()
     values: set[str] = set()
     persona_gaps: dict[str, dict[str, str]] = {}
     missing_values: set[str] = set()
-    missing_targets: set[str] = set()
-    db_checks: list[str] = []
-    off_target: list[dict[str, object]] = []
-    guarded: list[str] = []
-    exempt: list[str] = []
-    origins: set[Origin] = {parse_origin(origin, origin_only=True) for origin in config.targets.values()}
     for scenario in plan.scenarios:
         for token in scenario.tokens:
-            recognized = _persona_token(token, configured)
+            recognized = persona_token(token, configured)
             if recognized:
                 persona, capability = recognized
                 personas.add(persona)
@@ -361,37 +329,69 @@ def check_plan(plan: Plan, config: Config) -> dict[str, object]:
                     persona_gaps[token] = {"name": unknown.group(1).lower(), "token": token, "reason": "persona is not configured"}
                 else:
                     missing_values.add(token[3:])
-        if scenario.target:
-            if scenario.target not in config.targets:
-                missing_targets.add(scenario.target)
-        else:
-            # An absolute-only scenario already names its origin; relative
-            # actions (including setup requests) still need the section default.
-            without_urls = URL.sub("", scenario.actions)
-            needs_default = not scenario.urls or bool(RELATIVE_PATH.search(without_urls))
-            if needs_default:
-                key = "fe_target" if scenario.section == "FE" else "be_target"
-                target = config.defaults.get(key)
-                if not isinstance(target, str) or not target:
-                    missing_targets.add(f"qa.defaults.{key}")
-                elif target not in config.targets:
-                    missing_targets.add(target)
-        for url in scenario.urls:
-            try:
-                allowed = parse_origin(url) in origins
-                reason = "origin is not a configured target"
-            except ConfigError:
-                allowed = False
-                reason = "invalid URL or userinfo is refused"
-            if not allowed:
-                off_target.append({"scenario": scenario.id, "origin": _origin_display(url), "reason": reason})
-        if scenario.db_check is not None:
-            db_checks.append(scenario.id)
+    return personas, values, persona_gaps, missing_values
+
+
+def _missing_target(scenario: Scenario, config: Config) -> str | None:
+    if scenario.target:
+        return scenario.target if scenario.target not in config.targets else None
+    # An absolute-only scenario already names its origin; relative
+    # actions (including setup requests) still need the section default.
+    without_urls = URL.sub("", scenario.actions)
+    if scenario.urls and not RELATIVE_PATH.search(without_urls):
+        return None
+    key = "fe_target" if scenario.section == "FE" else "be_target"
+    target = config.defaults.get(key)
+    if not isinstance(target, str) or not target:
+        return f"qa.defaults.{key}"
+    return target if target not in config.targets else None
+
+
+def _off_target(scenario: Scenario, origins: set[Origin]) -> list[dict[str, object]]:
+    refused: list[dict[str, object]] = []
+    for url in scenario.urls:
+        try:
+            allowed = parse_origin(url) in origins
+            reason = "origin is not a configured target"
+        except ConfigError:
+            allowed = False
+            reason = "invalid URL or userinfo is refused"
+        if not allowed:
+            refused.append({"scenario": scenario.id, "origin": origin_display(url), "reason": reason})
+    return refused
+
+
+def _mutation_guards(plan: Plan, config: Config) -> tuple[list[str], list[str]]:
+    guarded: list[str] = []
+    exempt: list[str] = []
+    for scenario in plan.scenarios:
         if config.policy["mutations"] != "allow" and _mutates(scenario):
             if config.policy["mutations"] == "rejections-only" and _rejection_exempt(scenario):
                 exempt.append(scenario.id)
             else:
                 guarded.append(scenario.id)
+    return guarded, exempt
+
+
+def check_plan(plan: Plan, config: Config) -> dict[str, object]:
+    """Return the plan's persona and value requirements, config gaps, refused origins, and mutation guards.
+
+    Persona recognition precedes value lookup; otherwise configured values win
+    before the unknown-token field grammar determines the gap category.
+    """
+    personas, values, persona_gaps, missing_values = _token_requirements(plan, config)
+    missing_targets: set[str] = set()
+    db_checks: list[str] = []
+    off_target: list[dict[str, object]] = []
+    origins: set[Origin] = {parse_origin(origin, origin_only=True) for origin in config.targets.values()}
+    for scenario in plan.scenarios:
+        target = _missing_target(scenario, config)
+        if target is not None:
+            missing_targets.add(target)
+        off_target.extend(_off_target(scenario, origins))
+        if scenario.db_check is not None:
+            db_checks.append(scenario.id)
+    guarded, exempt = _mutation_guards(plan, config)
     missing = {
         "personas": [persona_gaps[token] for token in sorted(persona_gaps)],
         "values": sorted(missing_values), "targets": sorted(missing_targets),

@@ -70,6 +70,7 @@ class StateTests(unittest.TestCase):
         self.git("init", "-q")
         self.git("config", "user.name", "QA Tests")
         self.git("config", "user.email", "qa@test.local")
+        self.put(".av/local.toml\n", ".git/info/exclude")
         self.put("name = 'original'\n", "src/app.py")
         self.git("add", "src")
         self.git("commit", "-qm", "initial")
@@ -131,6 +132,35 @@ class StateTests(unittest.TestCase):
         self.cli("issues", "--run", run["run"])
         self.report(run, severity="CRITICAL")
         return run
+
+    def test_sidecar_off_schema_stops_instead_of_summarizing(self) -> None:
+        run = self.start()
+        dispatch = self.dispatch(run)
+        self.ingest(run, dispatch)
+        original = self.sidecar(run)
+        corruptions = {
+            "missing dirty baseline": lambda state: state.pop("pre_loop"),
+            "misspelled key": lambda state: state.update(dispatchCount=1),
+            "boolean dispatch count": lambda state: state.update(dispatch_count=True),
+            "invalid assertion status": lambda state: state["assertions"]["BE-01"].update(observed_status="200"),
+            "invalid authenticated persona": lambda state: state["dispatches"][dispatch["dispatch"]].update(authenticated=[1]),
+        }
+        for name, corrupt in corruptions.items():
+            with self.subTest(name=name):
+                state = json.loads(json.dumps(original))
+                corrupt(state)
+                Path(run["sidecar"]).write_text(json.dumps(state))
+                stopped = self.cli("summary", "--run", run["run"], code=1)
+                self.assertIn("sidecar", stopped["error"])
+
+    def test_run_record_off_schema_stops_instead_of_summarizing(self) -> None:
+        run = self.start()
+        path = Path(run["dir"]) / "run.json"
+        record = json.loads(path.read_text())
+        record["sidecar"] = 42
+        path.write_text(json.dumps(record))
+        stopped = self.cli("summary", "--run", run["run"], code=1)
+        self.assertIn("run record", stopped["error"])
 
     def test_generated_provenance_is_kept_when_reusing_a_plan(self) -> None:
         run = self.cli("run", "start", str(self.plan), "--generated")
@@ -205,6 +235,18 @@ class StateTests(unittest.TestCase):
         self.cli("run", "end", "--run", run["run"])
         self.assertFalse(directory.exists())
         self.assertEqual(self.start()["idempotency"], "reuse")
+
+    def test_ipv6_origin_locks_use_bracketed_canonical_origins(self) -> None:
+        config = BASE.replace("localhost:8000", "[::1]:8000")
+        config = config.replace('web = "http://localhost:5174"\n', "").replace('supabase = "http://127.0.0.1:54321"\n', "")
+        self.put(config.replace('fe_target = "web"', 'fe_target = "api"'), ".av/config.toml")
+        self.trust()
+        run = self.start()
+        conflict = self.start(code=1)
+        self.assertEqual(conflict["holder"]["origin"], "http://[::1]:8000")
+        self.assertEqual(conflict["holder"]["run"], run["run"])
+        released = self.cli("run", "end", "--run", run["run"])["released"]
+        self.assertIn("http://[::1]:8000", released)
 
     def test_shared_origins_exclude_and_disjoint_origins_succeed(self) -> None:
         run = self.start()
@@ -384,6 +426,21 @@ class StateTests(unittest.TestCase):
         chosen = self.cli("candidates", "--run", run["run"])
         self.assertEqual([row["qa"] for row in chosen["fix"]], ["QA-002"])
         self.assertEqual(self.sidecar(run)["auth_gated_issues"], ["QA-001"])
+
+    def test_cookie_credential_uses_longest_valid_persona_prefix(self) -> None:
+        config = BASE.replace('personas = ["user"]', 'personas = ["user", "user_cookie"]')
+        config = config.replace(
+            'run = \'printf "{\\"token\\":\\"state-test-token\\"}"\'\noutputs = ["token"]',
+            'run = \'printf "{\\"cookies\\":{\\"session\\":\\"state-test-cookie\\"}}"\'\noutputs = {cookies = ["session"]}',
+        )
+        self.put(config, ".av/config.toml")
+        self.plan.write_text(PLAN.replace("$QA_USER_TOKEN", "${QA_USER_COOKIE_SESSION}"))
+        self.trust()
+        run = self.start()
+        dispatch = self.dispatch(run)
+        result = self.ingest(run, dispatch, outcome("FAIL", 401))
+        self.assertEqual(result["verdicts"]["BE-01"], "fail")
+        self.assertEqual(self.sidecar(run)["assertions"]["BE-01"]["auth"], True)
 
     def test_authenticated_failure_is_auth_flagged_approve_or_auto(self) -> None:
         for mode in ("approve", "auto"):

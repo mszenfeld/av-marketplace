@@ -14,6 +14,8 @@ All paths below are relative to the project's repository root, not the installed
 
 The engine reads `.av/config.toml`, then merges `.av/local.toml` over it recursively, key by key. A local leaf replaces the shared leaf; other keys survive. Arrays are replaced, not concatenated. Source permissions follow the file that supplies each effective key. The shared file must exist and contain the consuming plugin's table: a local-only file or table does not count as configuring the plugin.
 
+An existing `.av/local.toml` must be **untracked and git-ignored** under Git's effective ignore rules. The loader checks the index with `git ls-files --error-unmatch` as well as the ignore rules: force-adding or committing the file is invalid even if an ignore pattern matches its name. A tracked file reports `personal config must not be tracked`; an unignored file reports `personal config must be git-ignored`, both against `.av/local.toml`'s `document` key. The loader does not merge that file or grant its sources personal-file permissions, and trust approval cannot override the error. A preview may propose ignoring an untracked local file, but adding ignore rules cannot make a tracked file personal again.
+
 Every configurable plugin reports:
 
 | Field | Meaning |
@@ -39,7 +41,7 @@ For an existing shared file, validation errors take precedence over `missing-tab
 
 Environment and dotenv key names must match `[A-Za-z_][A-Za-z0-9_]*`. Every source needs a non-empty payload. A missing or empty environment/dotenv value is an error, not a fallback to another source. Dotenv supports `KEY=value`, optional `export`, single- or double-quoted values and comments; it is read as data, not sourced as a shell script.
 
-`config` validates source syntax and permissions **without executing or resolving sources**. The engine resolves only the values an operation needs, after trust has been accepted. Engines never print a resolved source value: errors identify keys and source kinds, while configuration and trust displays mask `literal:` payloads. Do not put credentials directly in a `cmd:` command; its text is displayed for approval.
+`config` validates source syntax and permissions **without executing or resolving sources**. The engine resolves only the values an operation needs, after trust has been accepted. Engines never print a resolved source value: errors identify keys and source kinds. Configuration, preview and trust displays mask `literal:` payloads only at declared value-source keys: `env.secrets.*`, `env.values.*`, `env.database.password` and, for QA, `qa.accounts.password` and `qa.accounts.static.*.{email,password,id}`. Commands and recipe text remain visible verbatim; a `literal:` prefix elsewhere never hides them. Do not put credentials directly in a command; its text is displayed for approval.
 
 ### Restrictions on committed sources
 
@@ -55,6 +57,8 @@ Environment and dotenv key names must match `[A-Za-z_][A-Za-z0-9_]*`. Every sour
 | `literal:` for `env.database.password` | Allowed only when `env.database.host` is loopback. | Allowed. |
 | `literal:` for other exposed values | Allowed. | Allowed. |
 
+The `.av/local.toml` permissions above apply only after its untracked, git-ignored status has been verified. For a symlink, Git must ignore the configured path itself, not merely its target.
+
 Loopback means exactly `localhost`, `127.0.0.1`, `::1` or a host ending in `.localhost`, after lowercasing and stripping IPv6 brackets. It does not mean every address in `127.0.0.0/8`, a Compose service name or a bind address such as `0.0.0.0`.
 
 Source validation errors include `expected a value source`, `empty value source`, `invalid environment source name`, `environment source name has a forbidden prefix`, `expected file source with a key`, `absolute file source is forbidden in shared config`, `file source escapes the repository`, `repository file source must be git-ignored` and `secret literal is forbidden in shared config`. Resolution can additionally fail because the file or command is unavailable, dotenv quoting is invalid, a command fails or times out, command output is not UTF-8, or the result is empty. Such failures never include the value or command output.
@@ -63,7 +67,7 @@ Source validation errors include `expected a value source`, `empty value source`
 
 The root key `version` is required and must be the integer `1` (not a string or boolean). The shared loader uses Python 3.11 or newer and stdlib TOML parsing. Invalid text encoding or TOML is reported against the file's `document` key; an absent, mistyped or unsupported version reports `expected schema version 1`.
 
-`[env]` is optional and defaults to an empty table. Its known sub-tables are `targets`, `services`, `secrets`, `values` and `database`. They must be tables when present (`expected a table` otherwise). Unknown `[env]` sub-tables produce an `unknown environment sub-table` **warning**, not an error, so a later plugin can add shared capabilities without breaking an installed consumer. Other plugins' top-level tables are ignored.
+`[env]` is optional and defaults to an empty table. Its known sub-tables are `targets`, `services`, `secrets`, `values`, `database` and `source_env`. They must be tables when present (`expected a table` otherwise). Unknown `[env]` sub-tables produce an `unknown environment sub-table` **warning**, not an error, so a later plugin can add shared capabilities without breaking an installed consumer. Other plugins' top-level tables are ignored.
 
 The tables below list all shared keys. "Required" means required only when the enclosing optional table or database kind is configured; omission is not an implicit credential or connection setting.
 
@@ -76,17 +80,22 @@ The tables below list all shared keys. "Required" means required only when the e
 
 Invalid names, non-string values or malformed origins report `expected an HTTP origin without userinfo, path, query or fragment`. Origins must have a host; whitespace, control characters, backslashes, percent escapes in hosts and empty, zero or out-of-range ports are rejected. Omitted HTTP/HTTPS ports mean `80`/`443` for origin comparison. Non-loopback origins require trust before use.
 
+Targets used by an HTTP recipe or `env.services.health` probe must use **HTTPS** unless their host is exact loopback as defined above. A non-loopback HTTP origin reports `non-loopback targets must use https` against `env.targets.<name>`, including when `.av/local.toml` supplies it. Trust approval cannot override this validation error. QA also checks the transport immediately before sending a recipe or probe request, including recorded teardown recipes, so service keys and generated passwords cannot be sent over non-loopback cleartext HTTP.
+
 ### Services
 
 | Key | Type | Default | Validation and meaning |
 |---|---|---|---|
-| `env.services` | Table | No lifecycle configuration | Only `health`, `up`, `prepare` and `down` are accepted. An extra key reports `unknown key`. |
-| `env.services.health` | Array of strings | `[]` | Each probe is `<target>:<path>`. The target must exist in `[env.targets]`; the path must start with `/`, not `//`. A responding HTTP status below `500` counts as up; a connection failure does not. |
+| `env.services` | Table | No lifecycle configuration | Only `health`, `up`, `prepare`, `down` and `env` are accepted. An extra key reports `unknown key`. |
+| `env.services.health` | Array of strings | `[]` | Each probe is `<target>:<path>`. The target must exist in `[env.targets]` and use HTTPS unless its host is loopback; the path must start with `/`, not `//`. A responding HTTP status below `500` counts as up; a connection failure does not. |
 | `env.services.up` | Non-empty string | Omitted; no command | Shell command to bring services up. A wrong type or empty string reports `expected a non-empty command`. |
 | `env.services.prepare` | Array of non-empty strings | `[]` | Preparation commands in order, such as migrations. A wrong type or empty/non-string item reports `expected a command list`. |
 | `env.services.down` | Non-empty string | Omitted; no command | Shell command to tear services down. A wrong type or empty string reports `expected a non-empty command`. |
+| `env.services.env` | Table of dependency lists | `{}` | Only `up` and `prepare` are accepted. Each list names `value.NAME` / `secret.NAME` inputs for that operation; `prepare` shares its list across all preparation commands. |
 
-A non-array `health` reports `expected a probe list`; a non-string probe or one without `:` reports `expected target:path probes`; an undefined target or invalid path reports `probe has undefined target or invalid path`. These commands are shell commands, not `cmd:` value sources: they run in the repository root through `/bin/sh -c`, under the consuming plugin's lifecycle gates. QA runs `down` only if that run executed `up`; see its [configuration guide](plugins/qa.md#configuration) for when it asks to start services.
+A non-array `health` reports `expected a probe list`; a non-string probe or one without `:` reports `expected target:path probes`; an undefined target or invalid path reports `probe has undefined target or invalid path`. These commands are shell commands, not value sources: `up`, `down` and each `prepare` entry reject any leading `cmd:`, `env:`, `file:` or `literal:` with `a command cannot be a value source`. They run in the repository root through `/bin/sh -c`, under the consuming plugin's lifecycle gates. QA runs `down` only if that run executed `up`; see its [configuration guide](plugins/qa.md#configuration) for when it asks to start services.
+
+QA resolves the declared `env` inputs before `up` or `prepare`, including when the command delegates to a script. It never scans shell text to infer dependencies. For example, `env = { up = ["value.PUBLIC_KEY", "secret.SERVICE_KEY"] }` supplies `QA_PUBLIC_KEY` and `AV_SERVICE_KEY` to the `up` command. An omitted list resolves no configured inputs; commands still inherit the engine's environment. `down` uses only that inherited environment, without source resolution, so recorded teardown still runs after config drift or loss of trust.
 
 ### Secrets and values
 
@@ -98,6 +107,26 @@ A non-array `health` reports `expected a probe list`; a non-string probe or one 
 | `env.values.<name>` | Value-source string | No value | Name must match `[A-Za-z_][A-Za-z0-9_]*`; source restrictions still apply. |
 
 An invalid name reports `invalid value name`. Each entry also undergoes the [value-source checks](#value-sources). Consumers validate their exposed-name collisions: QA rejects values that collide after uppercasing, or with a configured persona's exposed fields, with `value name collides with an exposed name`. Use `secrets`, not `values`, for administrative credentials.
+
+### Command-source dependencies
+
+| Key | Type | Default | Validation and meaning |
+|---|---|---|---|
+| `env.source_env` | Table of dependency lists | `{}` | Each quoted key is the full dotted key of a configured `cmd:` source, such as `"env.values.PUBLIC_KEY"` or `"qa.accounts.password"`. Any other owner reports `dependency owner must be a configured command source`. |
+| `env.source_env."<source-key>"` | Array of strings | `[]` | Inputs named `value.NAME` / `secret.NAME`, resolved lazily before that command source executes. |
+
+Dependency names preserve the exact configured source name. QA maps `value.NAME` to `QA_<UPPERCASED_NAME>` and `secret.NAME` to `AV_<exact_name>`; for example, `secret.service_key` supplies `AV_service_key`, not `AV_SERVICE_KEY`. Dependency lists contain names only, never source strings or resolved values. Invalid shapes report `expected a dependency list` or `expected value.NAME or secret.NAME dependency`; absent references report `undefined value dependency` / `undefined secret dependency`. Configuration and preview validate these declarations without executing sources. Cyclic dependencies fail during resolution with a key-only error.
+
+```toml
+[env.values]
+PUBLIC_KEY = "cmd:sh scripts/public-key.sh"
+PROJECT = "env:AV_PROJECT"
+
+[env.source_env]
+"env.values.PUBLIC_KEY" = ["value.PROJECT"]
+```
+
+Here the helper receives `QA_PROJECT` even though its invoking shell command contains no `$QA_PROJECT` token. Undeclared configured inputs are not resolved, and dependencies do not enter the tester channel unless the plan itself references those exposed values. Existing commands that relied on implicit `$QA_NAME` / `$AV_name` detection must add declarations; no shell-text inference remains.
 
 ### Database
 
@@ -157,6 +186,7 @@ Each plugin pins the effective settings it reads that can execute commands, read
 
 - Every source string in `[env]`, including literals.
 - The configured `env.services` table, including probes and lifecycle commands.
+- The configured `env.source_env` dependency table.
 - Every non-loopback target origin.
 - A non-loopback `env.database.host`.
 
@@ -219,8 +249,8 @@ The bootstrap belongs in a configurable plugin's entry command, not in a separat
 An invalid config is reported and stopped, not overwritten as a missing config. A headless caller stops with a pointer to `docs/configuration.md`; it does not invent answers or write a proposal without approval.
 
 1. **Read-only proposal.** The author uses Read, Grep and Glob with the shared environment skill and the plugin-specific layer. It never runs candidate commands or reads secret values, and never reads or edits `.av/local.toml`. It uses provenance to stop on blocking local overrides. It preserves existing names, unrelated keys, other plugins' sections and comments byte-for-byte. Every proposed target, command and recipe cites its repository evidence in a TOML comment. Unknown facts become questions, not guessed ports, credentials or commands.
-2. **Transaction and questions.** Return `{proposal, questions[]}`. The proposal contains `config_text` (the full proposed `.av/config.toml`), `gitignore_add` (only needed absent ignore entries) and `allowed_keys` (the smallest authorized dotted-key scopes). In `create`, add only the shared keys the work needs plus the plugin's table, and collect unresolved prerequisites and creation-time policy choices together. The bootstrap never creates or fills `.av/secrets.local.env`; unresolved values become `file:.av/secrets.local.env#NAME` references.
-3. **Preview without writes.** `config preview <proposal>` validates the merged config and proposed ignore rules, checks that only `allowed_keys` change and protected sections/comments remain byte-identical, and returns a diff, the **complete resulting trust subset**, its hash and a snapshot of `.av/config.toml` and `.gitignore`. Include sensitive settings already in `[env]`, even if another plugin added them; mask literals. On preview errors, allow one corrected read-only proposal round, then stop if errors remain.
+2. **Transaction and questions.** Return `{proposal, questions[]}`. The proposal contains `config_text` (the full proposed `.av/config.toml`), `gitignore_add` (only the exact `.av/local.toml` and `.av/secrets.local.env` strings when needed; all other paths, negations and wildcards are rejected) and `allowed_keys` (the smallest authorized dotted-key scopes). In `create`, add only the shared keys the work needs plus the plugin's table, and collect unresolved prerequisites and creation-time policy choices together. The bootstrap never creates or fills `.av/secrets.local.env`; unresolved values become `file:.av/secrets.local.env#NAME` references.
+3. **Preview without writes.** `config preview <proposal>` validates the merged config and proposed ignore rules, checks that only `allowed_keys` change and protected sections/comments remain byte-identical, and returns a `diff` covering both the masked `.av/config.toml` changes and every `.gitignore` addition, the **complete resulting trust subset**, its hash and a snapshot of `.av/config.toml` and `.gitignore`. The ignore diff omits unrelated existing lines. Include sensitive settings already in `[env]`, even if another plugin added them; mask literals. On preview errors, allow one corrected read-only proposal round, then stop if errors remain.
 4. **One approval.** Show the diff, ignore additions and complete trust subset together and ask for one confirmation of the write and trust hash. Declining writes nothing. Creation-time policy questions precede this confirmation; they do not replace it.
 5. **Compare-and-swap apply.** `config apply <proposal> --snapshot S --approved-hash H` applies only the approved preview. If either file changed since preview, it writes nothing and reports a conflict. Otherwise it replaces the files atomically, revalidates and records trust **only for the approved hash**. Validation/hash failures restore the prior files only while they still contain the engine's own writes; concurrent edits are left intact and reported. Do not bypass preview or accept a different hash during apply.
 6. **Missing private inputs.** If the work needs dotenv keys that are not populated, name the keys for the user to fill and stop without printing or asking for their values. Then re-check the work against the resulting config. A plugin repairing an active run must follow its own cleanup/restart contract before using the changed configuration.
@@ -229,7 +259,13 @@ An invalid config is reported and stopped, not overwritten as a missing config. 
 
 The plugin-neutral implementation currently lives in QA:
 
-- [`plugins/qa/skills/engine/scripts/av_config.py`](../plugins/qa/skills/engine/scripts/av_config.py): file loading/merge, provenance, value sources and restrictions, origins/loopback, shared `[env]` validation, per-plugin trust and guarded transactions. It has no QA imports.
+- [`plugins/qa/skills/engine/scripts/av_config/`](../plugins/qa/skills/engine/scripts/av_config/): `files.py` owns loading/merge, provenance and shared `[env]` validation; `sources.py` owns value sources, restrictions and masking; `origins.py` owns origins/loopback; `trust.py` owns per-plugin pins; `transaction.py` owns section-preserving guarded writes. The package has no QA imports. Consumers import from the owning module; its `__init__.py` does not re-export the old monolithic API.
 - [`plugins/qa/skills/env-config/`](../plugins/qa/skills/env-config/SKILL.md): read-only repository detection and proposal rules for `[env]`, with no QA policy or recipe logic.
+
+Consumers pass their declared value-source key pattern to `av_config.sources.mask` and `av_config.transaction.ConfigTransaction`; the shared layer does not infer source positions from string contents. The same pattern applies to nested configuration tables, dotted trust-subset keys and persisted run metadata.
+
+Schema validators register each value source with `Configuration.source(value, key, secret=..., literal_allowed=...)`. It records a `SourceRule` with the key's effective-file provenance and restrictions. Consumers resolve through `Configuration.resolve(source, key, trusted=..., execute=...)`, which revalidates under that recorded rule and rejects any key the validator did not register; they must not infer restrictions from key names again.
+
+The optional executor receives `(command, key)` and returns decoded stdout, raising a safe `ConfigError` on execution failure. Without it, `av_config` uses its bounded subprocess executor. The shared resolver strips trailing newlines and rejects empty command output in both cases. QA supplies an executor that injects transitive `QA_`/`AV_` dependencies and logs only exit/line-count summaries on success, never source stdout/stderr; failed source output is discarded. Its runtime keeps only trust checks, caching and cycle detection around the shared resolution entry point.
 
 When the **second configurable plugin** is introduced, extract this generic layer into a small core plugin the consumers require, or ship byte-identical copies checked in CI. Choose that packaging then; do not create a second loader or `[env]` detector. Each plugin keeps only its call site and its own table's validation, recipes and policy choices.
