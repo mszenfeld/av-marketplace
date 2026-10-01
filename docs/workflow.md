@@ -86,7 +86,7 @@ a superpowers plan hands the plan to Delivery instead: each task goes to
 the developer agent that owns its files, with no `CLAUDE.md` note needed,
 and is reviewed and committed on a new `delivery/<slug>` branch when you
 start on `main` or `master`, or on the current branch otherwise; then the
-plan's Verification and a full code review run. See the
+plan's Verification, QA when the change is testable, and a full code review run. See the
 [Delivery guide](plugins/delivery.md).
 
 ```

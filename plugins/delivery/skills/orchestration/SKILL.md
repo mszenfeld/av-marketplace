@@ -1,9 +1,9 @@
 ---
 name: orchestration
-description: "The Delivery run: delivers a plan task by task, each task to the developer agent the router picks, reviewed and committed, then runs the plan's Verification and a full code review. Delivery's hooks start it for a Superpowers plan when subagent-driven execution is picked and for a plan approved in plan mode; /delivery:execute starts it for a plan file."
+description: "The Delivery run: delivers a plan task by task, each task to the developer agent the router picks, reviewed and committed, then runs the plan's Verification, QA when the change is testable, and a full code review. Delivery's hooks start it for a Superpowers plan when subagent-driven execution is picked and for a plan approved in plan mode; /delivery:execute starts it for a plan file."
 argument-hint: "<plan path>"
 user-invocable: false
-allowed-tools: Bash(git rev-parse *), Bash(git status *), Bash(git branch --show-current), Bash(git switch -c *), Bash(git ls-files *), Bash(git add *), Bash(git diff --cached --quiet), Bash(git reset --soft *), Bash(git stash push *), Bash(git check-ignore *), Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/route_task.py *)
+allowed-tools: Bash(git rev-parse *), Bash(git rev-list *), Bash(git status *), Bash(git branch --show-current), Bash(git switch -c *), Bash(git ls-files *), Bash(git add *), Bash(git diff --cached --quiet), Bash(git diff --cached --name-only), Bash(git reset --soft *), Bash(git reset -q), Bash(git stash push *), Bash(git check-ignore *), Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/route_task.py *)
 ---
 
 # Delivery orchestration
@@ -16,6 +16,7 @@ The router is `${CLAUDE_PLUGIN_ROOT}/scripts/route_task.py`; run it exactly as `
 - `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/route_task.py plan '<REPO>' '<plan>'` → one entry per task with `task`, `title`, `commit`, `block`, `files`, `groups`, `stack`, `agent`, `source`, `evidence`. `agent` is the implementer. `source` is `files` when the task's file list decided it; for a task without files the router decides from the task text: `text` when its code paths and fenced code languages favor one stack (`evidence` lists the votes), `default` when they favor none and `agent` is `delivery:implementer`.
 - `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/route_task.py message '<REPO>' '<plan>' <N> [--open-findings]` → the commit message of task N with its `Delivery-*` trailers.
 - `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/route_task.py done '<REPO>' '<plan>'` → `{"done": [...], "conflicts": [...], "base": "<sha>"}` from the branch's delivery commits.
+- `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/route_task.py testable '<REPO>' '<BASE>'` → `{"testable": bool, "files": [...], "excluded": [...]}`: the paths changed between `<BASE>` and `HEAD` that QA can exercise, and the docs, CI, test, tooling and `.av/` paths it ignores.
 - `slug <plan.md> [--in-repo]` → a filesystem-safe slug from the external plan's first `# ` heading (or its filename if absent); `--in-repo` uses only the filename.
 
 The router's `agent` is final. Never ask the user which agent implements a task.
@@ -62,7 +63,7 @@ Run the steps in order. Every `stop` prints its message and ends the run.
     ```
     `<agent>` is the entry's `agent`. `<source>` is `files`, `default`, or `text (<evidence joined with "; ">)`.
 14. Every routed agent must be available as a `subagent_type` of the Agent tool. A missing one → stop with `Install <plugin>: /plugin install <plugin>@av-marketplace, then restart Claude Code and run /delivery:execute <PLAN_PATH>.` (`<plugin>` is the part before `:`).
-15. Create one task-list item per not-done task with TaskCreate, `Task <N>: <title>`, then `Plan verification` and `Final code review`.
+15. Create one task-list item per not-done task with TaskCreate, `Task <N>: <title>`, then `Plan verification`, `QA` and `Final code review`.
 
 If every task is already done, print `All tasks of <PLAN_PATH> are delivered.` and go to step 3.
 
@@ -72,7 +73,7 @@ For each not-done task, in ascending order of `N`:
 
 1. Mark its task-list item in progress. Run **Task loop** with `N`, `TASK_BLOCK` = the task's `block`, `AGENT` = its `agent`, `PLAN_PATH`, `BRANCH`.
 2. Act on the result:
-   - `stopped` → run step 4 and end the run;
+   - `stopped` → run step 5 and end the run;
    - `skipped` → mark the item completed and note `skipped` in the summary;
    - `approved` or `accepted-with-open-findings` → commit the staged changes in one Bash call; for `accepted-with-open-findings` add `--open-findings` after `<N>`:
      ```bash
@@ -89,13 +90,41 @@ Mark `Plan verification` in progress. When `PLAN_PATH` has a `## Verification` s
 Verification: <check> — pass | fail | manual (<evidence>)
 ```
 
-Without a `## Verification` section, print `Verification: none in plan`. Any `fail` → use AskUserQuestion: `Verification failed: <checks>. What now?` with options `Continue to the final review` and `Stop delivery`. `Stop delivery` → run step 4 and end the run. Mark `Plan verification` completed.
+Without a `## Verification` section, print `Verification: none in plan`. Any `fail` → use AskUserQuestion: `Verification failed: <checks>. What now?` with options `Continue to the final review` and `Stop delivery`. `Stop delivery` → run step 5 and end the run. Mark `Plan verification` completed.
 
-### 4. Summary
+### 4. QA
 
-Print the table `Task | Agent | Routing | Fix rounds | Result`, one row per task handled in this run, then the `Verification:` lines. The `Routing` column holds the routing source.
+Mark `QA` in progress. This step ends with `QA_RESULT`, one of `Skipped`, `Nothing to test`, `Not run`, `Pass`, `Fail`, `Budget Exhausted`, `Stopped`; `QA_NOTE`, its reason; `QA_REPORT`, the run's report path relative to `REPO` when a run started; and `FIX_PATHS`, the paths QA's fixer created or changed. Step 7 commits only paths attributed to QA by these rules; nothing else is ever staged.
 
-### 5. Final review
+1. When the Skill tool has no `qa:run` → `Skipped`, note `qa@av-marketplace is not installed`; go to 8.
+2. Run `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/route_task.py testable '<REPO>' '<BASE>'`; a non-zero exit → stop with the router's error. When its `testable` is false → `QA_RESULT=Skipped`, `QA_NOTE`: `no testable change among <length of excluded> changed paths`; go to 8.
+3. **Clean tree and range.** `git status --porcelain --untracked-files=all` prints anything (a verification check left files behind) → `QA_RESULT=Not run`, `QA_NOTE`: `the working tree has changes after verification: <paths, space-separated>`; go to 8. QA never adopts those changes. Then `git rev-list --merges '<BASE>'..HEAD` prints anything → `QA_RESULT=Not run`, `QA_NOTE`: `commits since <BASE> include a merge; run /qa:run <BRANCH> yourself`; go to 8. Then `git rev-list --count '<BASE>'..HEAD` prints `N`; `git rev-parse 'HEAD~<N>'` differs from `BASE` → the same `Not run` with `commits since <BASE> are not linear` and go to 8. Only a linear range reaches QA, so `last <N> commits` is exactly `BASE..HEAD`.
+4. `FIX_PATHS` starts empty. Invoke the Skill tool with skill `qa:run` and args `last <N> commits`, then carry out the run it loads completely. Its gates (config bootstrap and trust, dirty tree, fix approval, service start, takeover) go to the user through AskUserQuestion exactly as that command specifies; never answer one yourself. **Fix attribution:** immediately before every `code-review:fix-auto` dispatch of its Step 10, run `git status --porcelain --untracked-files=all` and keep the output; immediately after that dispatch returns, run it again; every path whose line is new or different joins `FIX_PATHS`. Relay QA's summary, `**Result:**` line and recovery wording as it prints them: its `Changes remain uncommitted for your control.` describes the tree before step 7. Do not substitute another testing tool or skill: QA is `qa:run` or none.
+5. `QA_RESULT`:
+   - the run printed the engine `summary` → its `**Result:**` value (`Pass`, `Fail`, `Budget Exhausted` or `Stopped`); `QA_REPORT` is the `report` path that `run start` returned, made relative to `REPO` (`python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "<report path>" "$REPO"`); `QA_NOTE` is `QA_REPORT`, plus the stop reason for `Stopped`;
+   - it stopped before `run start` succeeded with the `Generated plan has no executable FE or BE scenarios` message → `Nothing to test`, `QA_NOTE`: `the generated plan has no FE or BE scenarios`;
+   - it stopped before `run start` succeeded for any other reason (declined bootstrap or trust, invalid config, failed plan generation, an open blocker, plan check) → `Not run`, `QA_NOTE`: the first line of its stop message.
+6. `Fail`, `Budget Exhausted` or `Stopped` → use AskUserQuestion: `QA ended with <QA_RESULT>. What now?` with options `Continue to the final review` and `Stop delivery`. `Stop delivery` → leave the working tree as it is, print the `QA:` line of step 8, mark `QA` done, run step 5 and end the run.
+7. **QA changes.** `git reset -q` (nothing QA staged survives; the working tree is untouched), then `git status --porcelain --untracked-files=all`. First set aside the paths delivery never commits, whatever list they are on: anything under `docs/testing/reports/screenshots/` or `docs/testing/reports/responses/` (evidence; QA's guide keeps it out of version control because it can hold user data), `.av/local.toml`, `.av/secrets.local.env`, and `*.bak` files under `docs/testing/`. Sort the remaining status paths into four groups, each a list of exact paths:
+   - fixes: the paths of `FIX_PATHS` that the status lists;
+   - configuration: `.av/config.toml` and `.gitignore` when the status lists them (nothing else under `.av/`);
+   - documents: the status paths matching `docs/testing/plans/*.md`, `docs/testing/reports/*.md` or `docs/testing/reports/*-loop-state.json` (the plan, the report and the engine's durable sidecar, files directly in those directories);
+   - other: every remaining path — service or application output, anything unexpected. Together with the set-aside paths, print `QA left changes delivery does not commit: <paths>` when there is any, and leave them all in the tree.
+
+   For each non-empty group of the first three, in this order: `git add -- <its paths>`, check `git diff --cached --name-only` prints exactly those paths, then commit; a failed add, a different cached list or a failed commit → print git's output and stop.
+   - fixes:
+     ```bash
+     printf '%s\n' 'fix: apply QA fixes of delivery <SLUG>' '' 'Delivery-Plan: <PLAN_PATH>' 'Delivery-QA: <QA_REPORT>' 'Delivery-QA-Result: <QA_RESULT>' | AV_COMMIT_SKILL=1 git commit -F -
+     ```
+   - configuration: `AV_COMMIT_SKILL=1 git commit -m 'chore: add QA configuration for delivery <SLUG>'`.
+   - documents: `AV_COMMIT_SKILL=1 git commit -m 'docs: add QA plan and report of delivery <SLUG>'`.
+8. Print `QA: <QA_RESULT> (<QA_NOTE>)`. Mark `QA` done.
+
+### 5. Summary
+
+Print the table `Task | Agent | Routing | Fix rounds | Result`, one row per task handled in this run, then the `Verification:` lines and the `QA:` line; a run that stopped before step 4 prints `QA: Not run (delivery stopped before QA)` as that line. The `Routing` column holds the routing source.
+
+### 6. Final review
 
 Mark `Final code review` in progress.
 
@@ -108,7 +137,7 @@ Mark `Final code review` in progress.
 
 Mark `Final code review` completed.
 
-### 6. Fix offer
+### 7. Fix offer
 
 If the review saved a report, use AskUserQuestion: `Run /code-review:fix-all on <report path>?` with options `Yes` and `No`. On `Yes`, invoke the Skill tool with skill `code-review:fix-all` and args `<report path>`, and carry it out completely. Whatever it changes, including the statuses it writes into the report, stays uncommitted: end with `Review fixes are uncommitted; review them and commit.` Without a saved report, end the run.
 
