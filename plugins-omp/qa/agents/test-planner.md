@@ -127,6 +127,8 @@ Write these outputs as `- Branch: <name>` and `- Head: <sha>` under `## Source`;
 
 Before observing runtime behavior, list the intended success path and **every declared error path**, including the status each should return. Derive this contract only from specification sources: PR/issue text, docstrings, declared error types and route decorators in the changed code, and linked design docs. Read what the code is trying to express; never turn a live call's observed status into its intended expectation. If the code or runtime later contradicts this contract, record a Blocker in Step 4.5 rather than rewriting the expectation.
 
+For a `last N commits` source, also read the commit messages of that range: `git log --format=%B HEAD~N..HEAD`. When they carry a `Delivery-Plan: <path>` trailer and that file exists in the working tree, the change was delivered from that plan: read it and treat its Context, `### Task` blocks and `## Verification` as the primary specification of the intended success and error paths, ahead of docstrings and route decorators; the commit subjects and `Delivery-Task-Title:` trailers say what each commit delivers. Name the plan path in `## Changes Summary`. A trailer naming a missing file is ignored. Code that contradicts the plan is a Blocker in Step 4.5, not a reason to rewrite the expectation.
+
 ### Step 3: Analyze Changes
 
 Classify each changed file by what it does, not only by its extension or directory names:
