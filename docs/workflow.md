@@ -110,13 +110,17 @@ from it.
 review.
 
 ```
-/qa:loop
+/qa:run
 ```
 
-`/qa:loop` is the recommended first choice: it generates a test plan for
-the branch when none exists, runs it, fixes failures, and re-tests until
-green or budget exhausted. Prefer the manual pair `/qa:create-plan` →
-`/qa:run` when you want to inspect or edit the plan before execution.
+`/qa:run` proposes the project config on first use, provisions disposable
+test accounts, reuses or generates a reviewed plan for the branch, then
+tests, fixes eligible failures and re-tests within the configured budget.
+Commit `.av/config.toml` so later runs reuse the team's setup. Source fixes
+need batch approval by default; `qa.policy.fix = "off"` tests and reports
+without fixing. Use `/qa:create-plan` → `/qa:run <plan-path>` when you want
+to inspect or edit the plan first. See the [QA guide](plugins/qa.md) for
+mutation policy, trust and headless behavior.
 
 **Artifact:** test plans in `docs/testing/plans/`, reports with `QA-XXX`
 issue IDs in `docs/testing/reports/`.
@@ -166,7 +170,7 @@ with pushes guarded by the plugin; feedback analysis persisted by
 | 1. Idea → Spec | superpowers *(external)* | brainstorm with Claude | `docs/superpowers/specs/*.md` |
 | 2. Spec review | superutils | `/superutils:spec-review` | `docs/superpowers/specs/reviews/*` |
 | 3. Plan & implement | delivery or frontend/php/python-developer (or superpowers) | superpowers plan → subagent-driven execution (Delivery), or `CLAUDE.md` note → `developer` agent (or `/develop <task>`) | code on the branch |
-| 4. QA | qa | `/qa:loop` | `docs/testing/plans/*`, `docs/testing/reports/*` |
+| 4. QA | qa | `/qa:run` (or `/qa:create-plan` first) | `.av/config.toml`, `docs/testing/plans/*`, `docs/testing/reports/*` |
 | 5. Code review | code-review | `/review`, then `/fix` · `/fix-report` · `/fix-all` | `docs/reviews/*` |
 | 6. Commit & PR | commit | `/commit` | commits (PR opened manually) |
 

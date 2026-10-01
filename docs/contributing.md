@@ -40,6 +40,13 @@ plugins/your-plugin/
 
 Plugins with an OMP edition either have an `omp/overlay/<name>.json`, from which `plugins-omp/<name>/` is generated, or a native OMP edition in `omp/native/<name>/` (Delivery); OMP-only plugins also live in `omp/native/<name>/`. See [CLAUDE.md](../CLAUDE.md#omp-edition).
 
+### Configuration
+
+Configurable plugins share `.av/config.toml` and `.av/local.toml`, own one
+top-level table named after the plugin, and reuse the generic loader and
+environment bootstrap. See [Making a plugin configurable](configuration.md#making-a-plugin-configurable)
+for table ownership, validation, trust and documentation requirements.
+
 ### plugin.json
 
 Defines plugin metadata:
