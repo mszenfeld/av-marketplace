@@ -249,7 +249,6 @@ SERVICE_KEY = "cmd:touch secret-resolver-ran; cat service-key.txt"
 [qa.accounts]
 personas = ["user"]
 email = "qa+{{run}}-{{persona}}@test.local"
-password = "generate"
 [qa.accounts.create]
 kind = "command"
 run = {json.dumps(create)}
@@ -847,7 +846,7 @@ USER_AGENT = "literal:qa-agent"
 USER_TOKENIZED = "literal:public-label"
 USER_COOKIEJAR = "literal:public-label"
 [qa.accounts]
-personas = ["user", "user_ops"]
+personas = ["user", "user_ops", "guest"]
 [qa.accounts.static.user]
 email = "literal:qa@test.local"
 password = "env:QA_TEST_PASSWORD"
@@ -862,12 +861,12 @@ password = "env:QA_TEST_PASSWORD"
         ))
         self.start()
         missing = ["QA_USER_AGENT", "QA_USER_TOKENIZED", "QA_USER_COOKIEJAR", "QA_USER_EMAIL",
-                   "QA_USER_OPS_EMAIL", "QA_USER_COOKIE_SESSION", "QA_USER_TOKEN", "PGPORT"]
+                   "QA_USER_OPS_EMAIL", "QA_USER_COOKIE_SESSION", "QA_USER_TOKEN", "QA_GUEST_PASSWORD", "QA_USER_PASSWORD", "PGPORT"]
         self.ingest(edge=outcome("NEED_INFO", None, kind="credentials", missing=missing))
         summary = self.summary()
         for key in ("env.values.USER_AGENT", "env.values.USER_TOKENIZED", "env.values.USER_COOKIEJAR",
                     "qa.accounts.static.user.email", "qa.accounts.static.user_ops.email",
-                    "qa.accounts.login", "env.database.port"):
+                    "qa.accounts.personas", "qa.accounts.static.user.password", "qa.accounts.login", "env.database.port"):
             with self.subTest(key=key):
                 self.assertIn(f"`{key}`", summary)
         self.assertNotIn("qa.accounts.static.user.agent", summary)

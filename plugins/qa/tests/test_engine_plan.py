@@ -31,7 +31,6 @@ supabase = "http://127.0.0.1:54321"
 ACCOUNTS = '''[qa.accounts]
 personas = ["user", "other"]
 email = "qa+{run}-{persona}@test.local"
-password = "generate"
 [qa.accounts.create]
 kind = "http"
 target = "supabase"

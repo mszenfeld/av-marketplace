@@ -19,7 +19,11 @@ from qa_engine.recipes import build_recipe
 from qa_engine.recipes import cookie_name
 
 PERSONA = re.compile(r"[a-z][a-z0-9_]*\Z")
-VALUE_SOURCE_KEYS = re.compile(r"(?:env\.(?:secrets|values)\.[A-Za-z_][A-Za-z0-9_]*|env\.database\.password|qa\.accounts\.password|qa\.accounts\.static\.[a-z][a-z0-9_]*\.(?:email|password|id))")
+VALUE_SOURCE_KEYS = re.compile(
+    r"(?:env\.(?:secrets|values)\.[A-Za-z_][A-Za-z0-9_]*|env\.database\.password|"
+    r"qa\.accounts\.password|"  # removed in 4.0.0; kept so previews mask a literal left in an old file
+    r"qa\.accounts\.static\.[a-z][a-z0-9_]*\.(?:email|password|id))"
+)
 POLICY = {"fix": "approve", "mutations": "rejections-only"}
 FIX = ("approve", "auto", "off")
 MUTATIONS = ("allow", "rejections-only", "deny")
@@ -106,7 +110,7 @@ class Config:
 
     def _validate_accounts(self) -> None:
         validator = self.shared
-        validator.keys(self.accounts, {"personas", "email", "password", "create", "confirm", "login", "delete", "static"}, "qa.accounts")
+        validator.keys(self.accounts, {"personas", "email", "create", "confirm", "login", "delete", "static"}, "qa.accounts")
         self._validate_account_templates()
         if "static" in self.accounts:
             validator.table(self.accounts["static"], "qa.accounts.static")
@@ -129,8 +133,6 @@ class Config:
                 validator.error("qa.accounts.email", "expected an email template")
             elif any(name not in {"run", "persona"} for name in PLACEHOLDER.findall(template)):
                 validator.error("qa.accounts.email", "unsupported email placeholder")
-        if "password" in self.accounts and self.accounts["password"] != "generate":
-            validator.source(self.accounts["password"], "qa.accounts.password")
 
     def _validate_static_account(self, persona: str, value: object) -> None:
         validator = self.shared

@@ -126,7 +126,6 @@ mutations = "allow"
 [qa.accounts]
 personas = ["user", "other"]
 email = "qa+{{run}}-{{persona}}@test.local"
-password = "generate"
 [qa.accounts.create]
 kind = "http"
 target = "backend"
@@ -218,7 +217,6 @@ expect = [204]
         later = json.loads((directory / "accounts.private.json").read_text())
         self.assertEqual(private["user"]["password"], later["user"]["password"])
         self.assertNotEqual(private["user"]["issued_at"], later["user"]["issued_at"])
-        self.assertEqual(len(private["user"]["password"]), 28)
         self.assertNotIn(private["user"]["password"], json.dumps(self.ledger()))
         self.assertNotIn("issued_at", json.dumps(self.ledger()))
         self.assertFalse((self.repo / "unused-source-ran").exists())
@@ -311,25 +309,21 @@ password = "literal:db-secret"
         sidecar = json.loads(next((self.repo / "docs/testing/reports").glob("*-loop-state.json")).read_text())
         self.assertEqual(sidecar["dispatch_count"], 0)
 
-    def test_shared_literal_password_provisions_and_reaches_create_and_login(self) -> None:
-        password = "Pass-1234!"
-        self.put(self.config.replace('password = "generate"', f'password = "literal:{password}"'), ".av/config.toml")
+    def test_provisioned_password_is_generated_and_reaches_create_and_login(self) -> None:
         self.plan.write_text(PLAN + '- **Steps:** $QA_USER_PASSWORD\n')
-        self.assertEqual(self.cli("config")["state"], "ok")
-        self.trust()
         run, directory = self.start()
         self.cli("accounts", "provision", "--run", run)
+        password = self.channel(directory)["QA_USER_PASSWORD"]
+        self.assertRegex(password, r"^[A-Za-z0-9_-]{24}Aa1!$")
         self.assertEqual([payload["password"] for path, payload in self.server.events if path in {"/create", "/login"}],
                          [password, password])
-        self.assertEqual(self.channel(directory)["QA_USER_PASSWORD"], password)
-        self.assertEqual(json.loads((directory / "accounts.private.json").read_text())["user"]["password"], password)
         self.assertNotIn(password, json.dumps(self.ledger()))
         self.cli("accounts", "teardown", "--run", run)
         self.cli("run", "end", "--run", run)
 
     def test_loader_fails_closed_and_shell_quotes_password_and_cookies(self) -> None:
         self.plan.write_text(PLAN + '- **Steps:** $QA_USER_PASSWORD $QA_USER_COOKIE $QA_USER_COOKIE_HOST_SESSION $QA_USER_COOKIE_CONNECT_SID\n')
-        self.put('[qa.accounts]\npassword = "literal:it\'s-a-password"\n', ".av/local.toml")
+        self.put('[qa.accounts.static.user]\nemail = "literal:qa@test.local"\npassword = "literal:it\'s-a-password"\n', ".av/local.toml")
         self.trust()
         run, directory = self.start()
         self.cli("accounts", "provision", "--run", run)
@@ -451,15 +445,13 @@ run="sh scripts/delete-user.sh"
         self.assertFalse((self.repo / "delete-helper-ran").exists())
         self.assertEqual(self.ledger()[0]["status"], "pending")
 
-    def test_delegated_login_resolves_declared_dependencies_without_exposing_them(self) -> None:
-        self.put('test "$QA_LOGIN" = login-value && test "$AV_admin" = admin-secret && '
+    def test_delegated_login_sees_only_identity_variables(self) -> None:
+        self.put('test "$QA_LOGIN" = stale-inherited-value && test -n "$QA_EMAIL" && '
                  'printf \'{"token":"command-token"}\'\n', "scripts/login.sh")
         config = self.config[:self.config.index("[qa.accounts.login]")]
-        config = config.replace('ADMIN =', 'admin =').replace('{secret.ADMIN}', '{secret.admin}')
         config += '''[qa.accounts.login]
 kind="command"
 run="sh scripts/login.sh"
-env=["value.LOGIN", "secret.admin"]
 outputs=["token"]
 '''
         self.env["QA_LOGIN"] = "stale-inherited-value"
@@ -478,7 +470,6 @@ backend="http://localhost:8000"
 [qa.accounts]
 personas=["user"]
 email="qa+{run}-{persona}@test.local"
-password="generate"
 [qa.accounts.create]
 kind="command"
 run="printf '{\\"id\\":\\"command-id\\"}'"
@@ -516,27 +507,6 @@ run="test -z \\\"${QA_PASSWORD+x}\\\" && test \\\"$QA_ID\\\" = command-id && tou
         report = self.cli("config", code=2)
         self.assertTrue(any(e["key"] == "qa.accounts.delete.path" for e in report["errors"]))
 
-    def test_transitive_command_sources_resolve_in_each_process_without_exposing_dependencies(self) -> None:
-        self.put('echo admin >> source-count; printf "%s" "$QA_ADMIN_VALUE"\n', "scripts/admin-source.sh")
-        self.put('echo login >> source-count; printf "%s" "$QA_LOGIN_INPUT"\n', "scripts/login-source.sh")
-        config = self.config.replace('ADMIN = "env:AV_ADMIN"', 'ADMIN = "cmd:sh scripts/admin-source.sh"')
-        config = config.replace('LOGIN = "env:AV_LOGIN"', 'LOGIN = "cmd:sh scripts/login-source.sh"\nADMIN_VALUE = "env:AV_ADMIN"\nLOGIN_INPUT = "env:AV_LOGIN"')
-        config += '[env.source_env]\n"env.secrets.ADMIN"=["value.ADMIN_VALUE"]\n"env.values.LOGIN"=["value.LOGIN_INPUT"]\n'
-        self.put(config, ".av/config.toml")
-        self.trust()
-        run, directory = self.start()
-        self.cli("accounts", "provision", "--run", run)
-        self.dispatch(run)
-        self.dispatch(run)
-        self.cli("accounts", "teardown", "--run", run)
-        counts = (self.repo / "source-count").read_text().splitlines()
-        self.assertEqual(counts.count("admin"), 2)
-        self.assertEqual(counts.count("login"), 3)
-        self.assertEqual(set(self.channel(directory)), {"QA_USER_TOKEN"})
-        log = (directory / "engine.log").read_text()
-        self.assertNotIn("admin-secret", log)
-        self.assertNotIn("login-value", log)
-
     def test_refresh_updates_all_auth_fields_of_section_personas_without_widening_channel(self) -> None:
         self.plan.write_text(PLAN + '''## FE Test Scenarios
 ### FE-01: Cookie login
@@ -573,18 +543,18 @@ run="test -z \\\"${QA_PASSWORD+x}\\\" && test \\\"$QA_ID\\\" = command-id && tou
         self.cli("services", "down", "--run", run)
         self.assertTrue((self.repo / "down").exists())
 
-    def test_services_resolve_needed_values_and_down_only_after_up(self) -> None:
+    def test_services_run_with_inherited_environment_and_down_only_after_up(self) -> None:
         config = self.config + '''[env.services]
 health=["backend:/health"]
 up='sh scripts/service.sh up'
 prepare=['sh scripts/service.sh prepared']
 down="touch down"
-env={up=["value.LOGIN", "secret.ADMIN"], prepare=["value.LOGIN", "secret.ADMIN"]}
 '''
-        self.put('test "$QA_LOGIN" = login-value && test "$AV_ADMIN" = admin-secret || exit 1\n'
+        self.put('test "$AV_ADMIN" = admin-secret && test -z "${QA_LOGIN:-}" || exit 1\n'
                  'touch "$1"\n', "scripts/service.sh")
         self.put(config, ".av/config.toml")
         self.trust()
+        self.env.pop("QA_LOGIN", None)
         run, directory = self.start()
         self.assertFalse(self.cli("services", "down", "--run", run)["ran"])
         self.assertFalse((self.repo / "down").exists())

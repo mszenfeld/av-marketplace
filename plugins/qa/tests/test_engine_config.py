@@ -122,6 +122,9 @@ class ConfigTests(unittest.TestCase):
             (BASE + '[qa.defaults]\nbe_target = "backend"\n', "qa.defaults"),
             (BASE + '[qa.accounts]\npersonas = ["Bad"]\n', "qa.accounts.personas"),
             (BASE + '[qa.accounts]\npersonas = ["user", "user"]\n', "qa.accounts.personas"),
+            (BASE + '[qa.accounts]\npassword = "generate"\n', "qa.accounts.password"),
+            (BASE + '[env.services]\nenv = { up = [] }\n', "env.services.env"),
+            (BASE + '[qa.accounts.create]\nkind="command"\nrun="true"\nenv=[]\n', "qa.accounts.create.env"),
             (BASE + '[qa.accounts.create]\nkind="http"\ntarget="sensitive"\nmethod="POST"\npath="/"\nexpect=[201]\n', "qa.accounts.create.target"),
             (BASE + '[qa.accounts.delete]\nkind="http"\ntarget="backend"\nmethod="DELETE"\npath="/users/{password}"\nexpect=[204]\n', "qa.accounts.delete.path"),
             (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[200]\nheaders={x="{secret.MISSING}"}\n', "qa.accounts.login.headers.x"),
@@ -162,9 +165,16 @@ class ConfigTests(unittest.TestCase):
                 report = self.config().report()
                 self.assertEqual(report["state"], "invalid")
                 self.assertTrue(any(e["file"] == ".av/config.toml" and e["key"] == key for e in report["errors"]), report["errors"])
-                if key == "qa.defaults":
+                if key in {"qa.defaults", "qa.accounts.password", "env.services.env", "qa.accounts.create.env"}:
                     self.assertIn({"file": ".av/config.toml", "key": key, "error": "unknown key"}, report["errors"])
                 self.assertNotIn("sensitive", json.dumps(report))
+
+    def test_removed_source_dependencies_are_an_environment_warning(self) -> None:
+        self.put(BASE + '[env.source_env]\n"env.values.X" = []\n')
+        report = self.config().report()
+        self.assertEqual(report["state"], "ok")
+        self.assertEqual(report["errors"], [])
+        self.assertIn({"file": ".av/config.toml", "key": "env.source_env", "warning": "unknown environment sub-table"}, report["warnings"])
 
     def test_allow_needs_no_disposable_flag(self) -> None:
         self.put(BASE + 'mutations = "allow"\n')
@@ -442,6 +452,13 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(preview["trust_subset"]["env.values.VALUE"], "literal:***")
         self.assertEqual(preview["trust_subset"]["qa.accounts.login"]["run"], "printf safe")
 
+    def test_preview_masks_a_removed_literal_password(self) -> None:
+        self.put(BASE + '[qa.accounts]\npassword="literal:old-secret"\n')
+        proposal = {"config_text": BASE, "gitignore_add": [], "allowed_keys": ["qa.accounts.password"]}
+        preview = self.config().preview(proposal)
+        self.assertTrue(preview["ok"], preview["errors"])
+        self.assertNotIn("old-secret", json.dumps(preview))
+
     def test_names_capabilities_cookie_normalization_and_collisions(self) -> None:
         text = BASE + '[qa.accounts]\npersonas=["user"]\n[qa.accounts.create]\nkind="command"\nrun="true"\noutputs={id=true}\n[qa.accounts.login]\nkind="command"\nrun="true"\noutputs={token=true,cookies=["__Host-session", "connect.sid"]}\n'
         self.put(text)
@@ -658,64 +675,26 @@ class ConfigTests(unittest.TestCase):
             timed.resolve("cmd:/bin/sleep 10", "env.values.X", trusted=True)
         self.assertIn("timed out", str(error.exception))
 
-    def test_explicit_command_dependencies_are_validated_without_execution(self) -> None:
-        sources = '[env.values]\nX="cmd:touch source-ran; printf value"\n[env.secrets]\nadmin="env:AV_ADMIN"\n'
+    def test_dependency_declarations_are_rejected_without_execution(self) -> None:
+        sources = '[env.values]\nX="cmd:touch source-ran; printf value"\n'
         cases = (
-            ('[qa.accounts.login]\nkind="command"\nrun="sh scripts/login.sh"\nenv="value.X"\n', "qa.accounts.login.env"),
-            ('[qa.accounts.login]\nkind="command"\nrun="sh scripts/login.sh"\nenv=["value.MISSING"]\n', "qa.accounts.login.env"),
-            ('[qa.accounts.login]\nkind="command"\nrun="sh scripts/login.sh"\nenv=["secret.ADMIN"]\n', "qa.accounts.login.env"),
-            ('[env.services]\nup="sh scripts/up.sh"\nenv={up=["QA_X"]}\n', "env.services.env.up"),
-            ('[env.services]\nenv={health=["value.X"]}\n', "env.services.env.health"),
-            ('[env.source_env]\n"env.values.MISSING"=["value.X"]\n', "env.source_env.env.values.MISSING"),
-            ('[env.source_env]\n"env.secrets.admin"=["value.X"]\n', "env.source_env.env.secrets.admin"),
-            ('[env.source_env]\n"env.values.X"=[1]\n', "env.source_env.env.values.X"),
+            ('[qa.accounts.login]\nkind="command"\nrun="sh scripts/login.sh"\nenv=["value.X"]\n', "qa.accounts.login.env"),
+            ('[env.services]\nup="sh scripts/up.sh"\nenv={up=["value.X"]}\n', "env.services.env"),
         )
         for fragment, key in cases:
-            with self.subTest(key=key, fragment=fragment):
+            with self.subTest(key=key):
                 self.put(BASE + sources + fragment)
-                self.assertTrue(any(error["key"] == key for error in self.config().errors))
+                self.assertIn({"file": ".av/config.toml", "key": key, "error": "unknown key"}, self.config().errors)
                 self.assertFalse((self.repo / "source-ran").exists())
-
-    def test_changing_source_dependencies_invalidates_trust(self) -> None:
-        text = BASE + '''[env.values]
-X="cmd:sh scripts/value.sh"
-INPUT="literal:public"
-[env.source_env]
-"env.values.X"=[]
-'''
-        self.put(text)
+        self.put(BASE + sources + '[env.source_env]\n"env.values.X"=["value.X"]\n')
         config = self.config()
-        self.assertEqual(config.state, "ok")
-        config.accept(config.trust_hash)
-        self.put(text.replace('"env.values.X"=[]', '"env.values.X"=["value.INPUT"]'))
-        changed = self.config()
-        self.assertEqual(changed.state, "ok")
-        self.assertEqual(changed.trust, "changed")
-
-    def test_explicit_source_cycle_fails_before_running_either_helper(self) -> None:
-        self.put(BASE + '''[env.values]
-FIRST="cmd:touch first-helper-ran; printf first"
-SECOND="cmd:touch second-helper-ran; printf second"
-[env.source_env]
-"env.values.FIRST"=["value.SECOND"]
-"env.values.SECOND"=["value.FIRST"]
-''')
-        config = self.config()
-        config.accept(config.trust_hash)
-        directory = Path(self.tmp.name) / "run"
-        directory.mkdir()
-        run = Run(self.repo, "test-run", directory, {}, {})
-        with Runtime(run, self.config()) as runtime:
-            with self.assertRaisesRegex(ConfigError, "cyclic source dependency"):
-                runtime.named("value", "FIRST")
-        self.assertFalse((self.repo / "first-helper-ran").exists())
-        self.assertFalse((self.repo / "second-helper-ran").exists())
+        self.assertEqual(config.errors, [])
+        self.assertIn({"file": ".av/config.toml", "key": "env.source_env", "warning": "unknown environment sub-table"}, config.warnings)
+        self.assertFalse((self.repo / "source-ran").exists())
 
     def test_runtime_command_sources_use_validated_keys_and_engine_executor(self) -> None:
-        command = 'printf executed >> source-count; printf "%s\\n" "$QA_PASSWORD:$AV_SECRET"; printf executor-stderr >&2'
-        self.put(BASE + '[env.values]\npassword="literal:public-demo"\nX=' + json.dumps("cmd:" + command)
-                 + '\n[env.secrets]\nSECRET="cmd:printf source-secret"\n'
-                 + '[env.source_env]\n"env.values.X"=["value.password", "secret.SECRET"]\n')
+        command = 'printf executed >> source-count; printf runtime-source-value; printf executor-stderr >&2'
+        self.put(BASE + '[env.values]\nX=' + json.dumps("cmd:" + command) + '\n')
         config = self.config()
         self.assertEqual(config.state, "ok")
         config.accept(config.trust_hash)
@@ -727,14 +706,13 @@ SECOND="cmd:touch second-helper-ran; printf second"
             with self.assertRaises(ConfigError):
                 runtime.resolve("cmd:touch unvalidated-source; printf invalid", "env.values.UNKNOWN")
             self.assertFalse((self.repo / "unvalidated-source").exists())
-            self.assertEqual(runtime.named("value", "X"), "public-demo:source-secret")
-            self.assertEqual(runtime.named("value", "X"), "public-demo:source-secret")
+            self.assertEqual(runtime.named("value", "X"), "runtime-source-value")
+            self.assertEqual(runtime.named("value", "X"), "runtime-source-value")
         self.assertEqual((self.repo / "source-count").read_text(), "executed")
         log = (directory / "engine.log").read_text()
         self.assertIn("env.values.X", log)
         self.assertNotIn("executor-stderr", log)
-        self.assertNotIn("public-demo", log)
-        self.assertNotIn("source-secret", log)
+        self.assertNotIn("runtime-source-value", log)
 
     def test_cli_preview_apply_trust_tools_and_usage(self) -> None:
         proposal = self.first_proposal()

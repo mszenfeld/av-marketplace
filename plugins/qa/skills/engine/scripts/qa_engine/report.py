@@ -393,7 +393,7 @@ def _credential_key(run: Run, name: str) -> str:
             return "qa.accounts.login"
         if persona in accounts.get("static", {}):
             return f"qa.accounts.static.{persona}.{field.lower()}"
-        return "qa.accounts.create" if field == "ID" else f"qa.accounts.{field.lower()}"
+        return {"ID": "qa.accounts.create", "EMAIL": "qa.accounts.email"}.get(field, "qa.accounts.personas")
     if re.fullmatch(r".+_(TOKEN|COOKIE(?:_.+)?)", token):
         return "qa.accounts.login"
     return "env.values." + token
