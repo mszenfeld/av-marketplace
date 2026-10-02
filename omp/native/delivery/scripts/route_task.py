@@ -68,13 +68,13 @@ FENCE_STACKS = {
     "js": "web", "javascript": "web", "css": "web", "scss": "web",
 }
 UNTESTABLE = tuple(re.compile(pattern) for pattern in (
-    r"(^|/)docs?/",
+    r"^docs?/",
     r"\.(md|markdown|rst|adoc)$",
-    r"(^|/)(LICENSE|LICENCE|CHANGELOG|CONTRIBUTING|AUTHORS|NOTICE|CODEOWNERS)[^/]*$",
+    r"(^|/)(LICENSE|LICENCE|CHANGELOG|CONTRIBUTING|AUTHORS|NOTICE|CODEOWNERS)(\.[A-Za-z0-9]+)?$",
     r"^\.(github|gitlab|circleci|buildkite|vscode|idea)/",
     r"(^|/)(Jenkinsfile|\.gitlab-ci\.yml|\.travis\.yml|azure-pipelines\.yml|\.pre-commit-config\.yaml)$",
-    r"(^|/)(tests?|__tests__|spec|e2e|cypress|playwright)/",
-    r"(^|/)(test_[^/]*\.py|[^/]*_test\.py|conftest\.py|[^/]*\.(test|spec)\.[cm]?[jt]sx?|[^/]*Test\.php)$",
+    r"(^|/)(tests?|__tests__|e2e|cypress|playwright)/|^spec/",
+    r"(^|/)(test_[^/]*\.py|[^/]*_test\.py|conftest\.py|[^/]*\.(test|spec)\.[cm]?[jt]sx?)$",
     r"(^|/)\.(editorconfig|gitignore|gitattributes|gitmodules|prettierrc[^/]*|prettierignore|eslintrc[^/]*|eslintignore|stylelintrc[^/]*|flake8|pylintrc|php-cs-fixer(\.dist)?\.php)$",
     r"(^|/)(ruff\.toml|mypy\.ini|pytest\.ini|tox\.ini|phpstan\.neon(\.dist)?|phpunit\.xml(\.dist)?|biome\.jsonc?|(eslint|prettier|stylelint)\.config\.[cm]?[jt]s)$",
     r"^\.av/",
@@ -441,7 +441,8 @@ def delivered(root: Path, rel: str, tasks: list[dict]) -> dict:
 def testable(root: Path, base: str) -> dict:
     """Classify changed paths in base..HEAD, including both endpoints of moves."""
     diff = subprocess.run(
-        ["git", "-C", str(root), "diff", "--name-only", "-z", "--no-renames", base, "HEAD"],
+        ["git", "-C", str(root), "diff", "--name-only", "-z", "--no-renames",
+         "--end-of-options", base, "HEAD"],
         capture_output=True, text=True,
     )
     if diff.returncode != 0:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Routing contract for delivery tasks: which developer agent owns a task.
+"""Routing and QA eligibility contracts for delivery tasks.
 
 Run: python3 omp/native/delivery/tests/test_route_task.py
 """
@@ -35,6 +35,11 @@ class SplitTestableTest(unittest.TestCase):
             "docs/testing/reports/r.md",
             "CHANGELOG.md",
             "LICENSE",
+            "LICENSE.txt",
+            "src/NOTICE.txt",
+            "doc/parser.go",
+            "docs/views.py",
+            "spec/orders.rb",
             ".github/workflows/ci.yml",
             ".gitlab-ci.yml",
             "backend/tests/test_orders.py",
@@ -65,6 +70,23 @@ class SplitTestableTest(unittest.TestCase):
             "shop/src/Controller/OrderController.php",
         ]
         self.assertEqual(split_testable(paths), (paths, []))
+
+    def test_rule_boundaries(self) -> None:
+        for path, excluded in (
+            ("docs/conf.py", True),
+            ("app/docs/views.py", False),
+            ("src/doc/parser.go", False),
+            ("api/spec/openapi.yaml", False),
+            ("src/NOTICEBoard.tsx", False),
+            ("src/LICENSEServer.ts", False),
+            ("src/ABTest.php", False),
+            ("src/Service/SpeedTest.php", False),
+            ("src/attest.py", False),
+            ("pkg/load_test.py", True),
+        ):
+            with self.subTest(path=path):
+                expected = ([], [path]) if excluded else ([path], [])
+                self.assertEqual(split_testable([path]), expected)
 
     def test_mixed_and_empty_inputs(self) -> None:
         for paths, expected in (
@@ -710,6 +732,15 @@ class TestableCliTest(unittest.TestCase):
         result = self.run_router("testable", str(self.root), "no-such-ref")
         self.assertEqual(result.returncode, 2)
         self.assertRegex(result.stderr, r"bad revision|unknown revision")
+
+    def test_option_like_base_cannot_write_output(self) -> None:
+        output = self.root / "git-output"
+
+        result = self.run_router("testable", str(self.root), f"--output={output}")
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse(output.exists())
+        self.assertEqual(result.stdout, "")
 
     def test_missing_base_reports_usage(self) -> None:
         result = self.run_router("testable", str(self.root))
