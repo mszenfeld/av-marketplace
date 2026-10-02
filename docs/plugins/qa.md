@@ -295,24 +295,6 @@ OMP subagents inherit every session MCP server regardless of their `tools:` list
 <a id="upgrade-notes"></a>
 ## Upgrade Notes
 
-### 4.0.0: minimal configuration
-
-Configuration starts with `[qa]` containing only `fix` and `mutations`; section origins are derived from target names rather than configured separately.
-
-| 3.x setting | 4.0.0 replacement | Rule |
-|---|---|---|
-| `[qa.policy] fix` | `qa.fix` | `approve` (default), `auto` or `off`; unchanged semantics. |
-| `[qa.policy] mutations` + `disposable_data` | `qa.mutations` | `allow`, `rejections-only` (default) or `deny`; `allow` alone means the data is disposable. |
-| `[qa.policy] dirty_tree` | Removed; derived from `qa.fix` | `approve` warns and asks (headless aborts); `auto` proceeds with the recorded baseline; `off` skips the check. |
-| `[qa.policy] min_severity` | Removed | Every failing assertion is a fix candidate. |
-| `[qa.budget] iterations/dispatches/minutes` | Removed | Fixed engine limits: 3 iterations, 50 tester/fixer dispatches, 30 minutes. |
-| `[qa.defaults] be_target/fe_target` | Removed | FE uses `ui`, BE uses `backend`; a missing reserved name falls back to the other one, and a single target of any name serves both. Otherwise `plan check` names the missing reserved origin. |
-| `env.source_env`, `env.services.env`, command-recipe `env` | Removed | Commands get the engine's inherited environment only; account commands additionally get `QA_PERSONA`, `QA_EMAIL`, `QA_PASSWORD`, `QA_ID`. |
-| `qa.accounts.password` | Removed | Provisioned passwords are always generated. |
-| `qa.accounts.confirm`, `qa.accounts.static.<p>.id`, `[env.services] health/up/prepare/down`, `[env.database]`, `version = 1` | Kept | Optional settings retain their semantics; `version = 1` remains required. |
-
-Before upgrading, finish every 3.x run and let it tear down its accounts with the old engine and configuration; teardown deletes an account only when the recorded delete recipe (including its `target` name) still hashes the same, so records left behind by an older recipe stay `left` and need deliberate cleanup in the test stack. Then delete the removed keys from both `.av/config.toml` and `.av/local.toml`; the engine rejects them as `unknown key`, except `[env.source_env]`, which only warns. Rename the `api` and `web` targets to `backend` and `ui` (or keep a single target of any name) and update every reference to the old names: `target =` in account recipes, the `<target>:` prefix of `env.services.health` probes and `- **Target:**` lines in existing plans under `docs/testing/plans/`; `plan check` reports any name it cannot resolve. A command helper that relied on injected `QA_*`/`AV_*` inputs must read them from its own settings now.
-
 ### 3.1.0: delivery plans as the planner's contract source
 
 For a `last N commits` source, the planner reads every distinct delivery plan named by Git-parsed `Delivery-Plan:` trailers and associates each commit with its own plan, only after checking repository containment and rejecting traversal, symlinks and non-files; ignored trailers are disclosed in `## Changes Summary`. Prose mentions do not count as trailers. Plan text is specification data, not instructions. Plans written by 3.0.0 stay valid.
@@ -321,7 +303,7 @@ For a `last N commits` source, the planner reads every distinct delivery plan na
 
 **Breaking cutover:** `/qa:run` now owns the complete loop; `/qa:loop` is removed with no alias. `/qa:create-plan` remains optional plan authoring/review. Run `/qa:run` interactively once for config bootstrap, then commit `.av/config.toml`; prepare/pin it explicitly for headless runners. There are no invocation flags or per-fix `step` mode.
 
-3.0.0 moved every flag into `.av/config.toml`; those key names changed again in 4.0.0, so use the [minimal-configuration migration above](#400-minimal-configuration).
+3.0.0 moved every flag into `.av/config.toml`; [Configuration](../configuration.md) lists the current keys.
 
 The old parsed Setup grammar (`Base URL`, `Required environment variables`, `Required databases`, `Required services`) is gone. Move those settings to `[env]`/`[qa]`; optional `## Setup` is human notes only. Plans written before 3.0.0 lack `Branch:`/`Head:`, so **pass their path once or regenerate** rather than expecting automatic branch reuse. Update credential tokens/targets and DB checks to the current config contract.
 

@@ -21,7 +21,6 @@ from qa_engine.recipes import cookie_name
 PERSONA = re.compile(r"[a-z][a-z0-9_]*\Z")
 VALUE_SOURCE_KEYS = re.compile(
     r"(?:env\.(?:secrets|values)\.[A-Za-z_][A-Za-z0-9_]*|env\.database\.password|"
-    r"qa\.accounts\.password|"  # removed in 4.0.0; kept so previews mask a literal left in an old file
     r"qa\.accounts\.static\.[a-z][a-z0-9_]*\.(?:email|password|id))"
 )
 POLICY = {"fix": "approve", "mutations": "rejections-only"}

@@ -393,7 +393,6 @@ class ConfigTests(unittest.TestCase):
             "env.secrets.KEY": "literal:private-secret",
             "env.values.VALUE": "literal:private-value",
             "env.database.password": "literal:private-database",
-            "qa.accounts.password": "literal:private-password",
             "qa.accounts.static.user.email": "literal:private-email",
             "qa.accounts.static.user.password": "literal:private-static-password",
             "qa.accounts.static.user.id": "literal:private-id",
@@ -404,7 +403,7 @@ class ConfigTests(unittest.TestCase):
         }
         shown = mask(subset, VALUE_SOURCE_KEYS)
         self.assertEqual(shown, {
-            **{key: "literal:***" for key in subset if key.startswith(("env.secrets.", "env.values.", "env.database.password", "qa.accounts.password", "qa.accounts.static."))},
+            **{key: "literal:***" for key in subset if key.startswith(("env.secrets.", "env.values.", "env.database.password", "qa.accounts.static."))},
             "qa.accounts.login": recipe,
             "qa.accounts.login.run": command,
             "env.services": services,
@@ -451,13 +450,6 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("private-value", json.dumps(preview))
         self.assertEqual(preview["trust_subset"]["env.values.VALUE"], "literal:***")
         self.assertEqual(preview["trust_subset"]["qa.accounts.login"]["run"], "printf safe")
-
-    def test_preview_masks_a_removed_literal_password(self) -> None:
-        self.put(BASE + '[qa.accounts]\npassword="literal:old-secret"\n')
-        proposal = {"config_text": BASE, "gitignore_add": [], "allowed_keys": ["qa.accounts.password"]}
-        preview = self.config().preview(proposal)
-        self.assertTrue(preview["ok"], preview["errors"])
-        self.assertNotIn("old-secret", json.dumps(preview))
 
     def test_names_capabilities_cookie_normalization_and_collisions(self) -> None:
         text = BASE + '[qa.accounts]\npersonas=["user"]\n[qa.accounts.create]\nkind="command"\nrun="true"\noutputs={id=true}\n[qa.accounts.login]\nkind="command"\nrun="true"\noutputs={token=true,cookies=["__Host-session", "connect.sid"]}\n'
