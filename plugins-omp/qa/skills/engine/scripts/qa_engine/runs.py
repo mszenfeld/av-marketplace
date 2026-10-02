@@ -32,6 +32,7 @@ from qa_engine.iterations import iteration_close
 from qa_engine.locks import LOCK_GRACE_MINUTES
 from qa_engine.locks import OriginLocks
 from qa_engine.locks import default_lock_directory
+from qa_engine.models import LIMITS
 from qa_engine.models import Run
 from qa_engine.models import StateStop
 from qa_engine.plan import Plan
@@ -66,7 +67,7 @@ class RunStartOptions:
 def effective_config(config: Config) -> JSON:
     """Pin only QA's environment tables and QA config, with defaults applied."""
     env = {name: config.env[name] for name in ("targets", "services", "secrets", "values", "database") if name in config.env}
-    return {"env": env, "qa": {**config.qa, "policy": config.policy, "budget": config.budget}}
+    return {"env": env, "qa": {**config.qa, **config.policy}}
 
 
 def check_drift(run: Run, config: Config) -> None:
@@ -119,7 +120,7 @@ def start_run(config: Config, plan_path: Path, options: RunStartOptions) -> JSON
     try:
         holder = {
             "run_id": run_id, "started": now, "repo": str(repo), "dir": str(directory),
-            "limit_minutes": float(cast(float, config.budget["minutes"])) + LOCK_GRACE_MINUTES,
+            "limit_minutes": LIMITS["minutes"] + LOCK_GRACE_MINUTES,
         }
         for displaced in locks.acquire(origins, holder, now, options.takeover):
             _remove_run_directory(displaced)

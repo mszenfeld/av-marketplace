@@ -5,7 +5,7 @@ from collections.abc import Mapping
 import time
 
 from qa_engine.assertions import _ordered
-from qa_engine.candidates import failures_at_floor
+from qa_engine.candidates import failures_remain
 from qa_engine.git import _dirty
 from qa_engine.hardcoding import _hardcoding_warnings
 from qa_engine.models import Run
@@ -30,8 +30,8 @@ def iteration_open(run: Run) -> JSON:
         return {"decision": "iterate", "iteration": iteration, "reason": "iteration already open"}
     if state["loop_end"] is not None:
         return {"decision": state["loop_end"]["decision"], "iteration": iteration, "reason": state["loop_end"]["reason"]}
-    if not failures_at_floor(run):
-        return {"decision": "final", "iteration": iteration, "reason": "no failures at or above min_severity"}
+    if not failures_remain(run):
+        return {"decision": "final", "iteration": iteration, "reason": "no failures remain"}
     exhausted = _budget_exhausted(run)
     if exhausted is not None:
         return {"decision": "final", "iteration": iteration, "reason": exhausted}
@@ -42,7 +42,7 @@ def iteration_open(run: Run) -> JSON:
         "dispatch_count": state["dispatch_count"], "opened": time.time(),
     }
 
-    return {"decision": "iterate", "iteration": iteration + 1, "reason": "failures remain at or above min_severity"}
+    return {"decision": "iterate", "iteration": iteration + 1, "reason": "failures remain"}
 
 
 def _unfinished_fixes(run: Run, iteration: int) -> list[FixDispatch]:

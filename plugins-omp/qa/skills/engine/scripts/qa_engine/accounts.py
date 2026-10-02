@@ -202,8 +202,7 @@ def _new_identity(runtime: Runtime, config: Config, persona: str) -> JSON:
     if not isinstance(template, str) or not template:
         raise ConfigError("qa.accounts.email: required to provision persona")
     identity["email"] = template.replace("{run}", runtime.run.run_id).replace("{persona}", persona)
-    password = str(config.accounts.get("password", "generate"))
-    identity["password"] = secrets.token_urlsafe(18) + "Aa1!" if password == "generate" else runtime.resolve(password, "qa.accounts.password")
+    identity["password"] = secrets.token_urlsafe(18) + "Aa1!"
     runtime.secrets.remember(identity)
     return identity
 

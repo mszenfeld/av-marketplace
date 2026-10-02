@@ -9,6 +9,7 @@ from http.cookies import CookieError
 from http.cookies import SimpleCookie
 import json
 import math
+import os
 import re
 from typing import TYPE_CHECKING
 from typing import Any
@@ -142,7 +143,7 @@ class Recipe(ABC):
     @classmethod
     @abstractmethod
     def validate(cls, data: Mapping[str, object], name: str, config: Config) -> None:
-        """Report schema errors without resolving any sources or running the recipe."""
+        """Report schema errors without source resolution or recipe execution."""
 
     @abstractmethod
     def execute(self, runtime: Runtime, identity: JSON, targets: Mapping[str, str]) -> tuple[int, JSON]:
@@ -264,8 +265,7 @@ class CommandRecipe(Recipe):
     def validate(cls, data: Mapping[str, object], name: str, config: Config) -> None:
         validator = config.shared
         prefix = f"qa.accounts.{name}"
-        validator.keys(data, {"kind", "run", "outputs", "env"}, prefix)
-        validator.command_env(data.get("env", []), f"{prefix}.env")
+        validator.keys(data, {"kind", "run", "outputs"}, prefix)
         command = data.get("run")
         if not isinstance(command, str) or not command:
             validator.error(f"{prefix}.run", "expected a non-empty command")
@@ -291,7 +291,7 @@ class CommandRecipe(Recipe):
 
     def execute(self, runtime: Runtime, identity: JSON, targets: Mapping[str, str]) -> tuple[int, JSON]:
         command = str(self.data["run"])
-        environ = runtime.command_environment(cast(list[str], self.data.get("env", [])))
+        environ = dict(os.environ)
         # A delete must not accidentally inherit another run's password.
         for key in ("QA_PERSONA", "QA_EMAIL", "QA_PASSWORD", "QA_ID"):
             environ.pop(key, None)

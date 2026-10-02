@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from dataclasses import asdict
 import os
 from pathlib import Path
-import re
 import subprocess
 import tempfile
 import tomllib
@@ -166,7 +165,7 @@ class Configuration:
         env = self.table(self.data.get("env", {}), "env")
         for name, value in env.items():
             prefix = f"env.{name}"
-            if name not in {"targets", "services", "secrets", "values", "database", "source_env"}:
+            if name not in {"targets", "services", "secrets", "values", "database"}:
                 self.warnings.append({"file": self.file_for(prefix), "key": prefix, "warning": "unknown environment sub-table"})
                 continue
             table = self.table(value, prefix)
@@ -176,8 +175,6 @@ class Configuration:
                 self._validate_sources(table, prefix, secret=name == "secrets")
             elif name == "services":
                 self._validate_services(table, env.get("targets", {}))
-            elif name == "source_env":
-                self._validate_source_env(table)
             else:
                 self._validate_database(table)
 
@@ -196,38 +193,9 @@ class Configuration:
                 self.error(f"{prefix}.{key}", "invalid value name")
             self.source(source, f"{prefix}.{key}", secret=secret)
 
-    def command_env(self, value: object, key: str) -> None:
-        """Validate explicit references without resolving their source values."""
-        if not isinstance(value, list):
-            self.error(key, "expected a dependency list")
-            return
-        env = self.data.get("env", {})
-        for dependency in value:
-            if not isinstance(dependency, str) or not re.fullmatch(r"(?:value|secret)\.[A-Za-z_][A-Za-z0-9_]*", dependency):
-                self.error(key, "expected value.NAME or secret.NAME dependency")
-                continue
-            kind, name = dependency.split(".", 1)
-            table = env.get("values" if kind == "value" else "secrets", {}) if isinstance(env, dict) else {}
-            if not isinstance(table, dict) or name not in table:
-                self.error(key, f"undefined {kind} dependency")
-
-    def _validate_source_env(self, table: Mapping[str, object]) -> None:
-        sources = source_subset(self.data)
-        for source_key, dependencies in table.items():
-            key = f"env.source_env.{source_key}"
-            source = sources.get(source_key)
-            if not isinstance(source, str) or not source.startswith("cmd:"):
-                self.error(key, "dependency owner must be a configured command source")
-            self.command_env(dependencies, key)
-
     def _validate_services(self, table: Mapping[str, object], targets: object) -> None:
         prefix = "env.services"
-        self.keys(table, {"health", "up", "prepare", "down", "env"}, prefix)
-        if "env" in table:
-            dependencies = self.table(table["env"], f"{prefix}.env")
-            self.keys(dependencies, {"up", "prepare"}, f"{prefix}.env")
-            for operation, value in dependencies.items():
-                self.command_env(value, f"{prefix}.env.{operation}")
+        self.keys(table, {"health", "up", "prepare", "down"}, prefix)
         for key in ("up", "down"):
             if key in table:
                 self._validate_service_command(table[key], f"{prefix}.{key}")
@@ -301,8 +269,6 @@ class Configuration:
         subset = source_subset(env, "env")
         if env.get("services"):
             subset["env.services"] = env["services"]
-        if env.get("source_env"):
-            subset["env.source_env"] = env["source_env"]
         targets = env.get("targets", {})
         if isinstance(targets, dict):
             for name, origin in targets.items():

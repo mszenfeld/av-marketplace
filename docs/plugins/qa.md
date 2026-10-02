@@ -2,7 +2,7 @@
 
 `/qa:run` takes a change from configuration through a reviewed test plan, disposable accounts, FE/BE testing and a bounded test → fix → retest loop. Reports use `QA-NNN` issue IDs that code-review's `/fix QA-001` and `/fix-report` understand.
 
-**Version:** 3.1.0
+**Version:** 4.0.0
 
 ## Quick start
 

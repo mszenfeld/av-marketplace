@@ -17,6 +17,7 @@ from av_config.errors import ConfigError
 from av_config.origins import Origin
 from av_config.origins import parse_origin
 from qa_engine.config import Config
+from qa_engine.config import SECTION_TARGETS
 from qa_engine.files import display_path
 from qa_engine.common import origin_display
 from qa_engine.git import git_command
@@ -340,11 +341,7 @@ def _missing_target(scenario: Scenario, config: Config) -> str | None:
     without_urls = URL.sub("", scenario.actions)
     if scenario.urls and not RELATIVE_PATH.search(without_urls):
         return None
-    key = "fe_target" if scenario.section == "FE" else "be_target"
-    target = config.defaults.get(key)
-    if not isinstance(target, str) or not target:
-        return f"qa.defaults.{key}"
-    return target if target not in config.targets else None
+    return None if config.section_target(scenario.section) else SECTION_TARGETS[scenario.section][0]
 
 
 def _off_target(scenario: Scenario, origins: set[Origin]) -> list[dict[str, object]]:

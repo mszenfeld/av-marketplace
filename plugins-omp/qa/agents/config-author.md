@@ -42,12 +42,12 @@ Plan: <selected plan path, or none>
 Mode-specific input:
 
 - **create:** `Plan:` is the path `plan resolve` would select, if any. Read that plan before choosing target, persona or value names. The file or `[qa]` table is missing; add a full `[qa]` configuration and only the `[env]` keys QA needs that are not already present.
-- **extend:** `Missing:` contains the `plan check` gaps (`personas`, `values`, `targets`, `database`) and their reasons. Read the referenced plan and fill exactly those gaps, including missing field capabilities and recipe/source dependencies. Keep existing names and policy.
+- **extend:** `Missing:` contains the `plan check` gaps (`personas`, `values`, `targets`, `database`) and their reasons. `targets` gaps name `ui`, `backend` or a scenario's explicit `Target:` name; ground that origin under exactly that name. Read the referenced plan and fill exactly those gaps, including missing field capabilities and recipe/source dependencies. Keep existing names and policy.
 - **repair:** `Failure:` contains the engine's recipe error or failing health probes and affected keys. Read the existing definitions and their repository evidence; repair only the failing recipe, probe, source or service configuration and its dependencies. A failed probe alone does not prove a different port or path: do not guess from the error.
 
 A revision may also contain `Preview errors:` from `config preview`; correct only those errors within the original mode's scope. Re-read affected non-secret evidence if it changed. If the caller supplies the creation-time policy answers, use those answers without asking them again.
 
-Read the committed `.av/config.toml` and the current ignore rules. Copy existing config bytes into `config_text` verbatim, including the `literal:` sources that the committed-source restrictions (docs/configuration.md#restrictions-on-committed-sources) permit there, such as `env.database.password` for a loopback host. Those bytes are already in the repository; copying them is not reading a secret's value and does not block `create` with a missing `[qa]` table, `extend` or `repair`. Do not read `.av/local.toml`, `.av/secrets.local.env`, real `.env*` files, credential stores, private run files or source output; use provenance and masked metadata. When an intended key is supplied by `.av/local.toml`, stop and return `proposal: null` with a question naming that local key. A shared change would not take effect. Inaccessible evidence or an unreadable or invalid file that prevents byte preservation also blocks the proposal; never silently overwrite it.
+Read the committed `.av/config.toml` and the current ignore rules. Copy existing config bytes into `config_text` verbatim, including the `literal:` sources that the committed-source restrictions (docs/configuration.md#secrets-and-values) permit there, such as `env.database.password` for a loopback host. Those bytes are already in the repository; copying them is not reading a secret's value and does not block `create` with a missing `[qa]` table, `extend` or `repair`. Do not read `.av/local.toml`, `.av/secrets.local.env`, real `.env*` files, credential stores, private run files or source output; use provenance and masked metadata. When an intended key is supplied by `.av/local.toml`, stop and return `proposal: null` with a question naming that local key. A shared change would not take effect. Inaccessible evidence or an unreadable or invalid file that prevents byte preservation also blocks the proposal; never silently overwrite it.
 
 ## Workflow
 
@@ -57,43 +57,33 @@ In `create`, keep every given plan target, persona and value name; do not rename
 
 Read `$QA_NAME` and `${QA_NAME}` tokens anywhere in scenarios, including headers, payloads, preconditions and edges. Persona fields are `EMAIL`, `PASSWORD`, `ID`, `TOKEN`, `COOKIE` and `COOKIE_<NAME>`; other tokens name `[env.values]` entries. Use the config's known names and the missing-key reasons to disambiguate. Persona names use `[a-z][a-z0-9_]*`; preserve them exactly and report an invalid or ambiguous name rather than rewriting the plan. Avoid collisions after uppercasing, including a value named `<PERSONA>_<FIELD>`.
 
-A scenario's `- **Target:** <name>` wins over its section's default; defaults cover relative request/page paths. A `**DB Check:**` requires `[env.database]`. With no selected plan, derive only the environment, personas and values supported by repository auth/development evidence; do not invent accounts for an unauthenticated app. Later `plan check` can request missing names.
+A scenario's `- **Target:** <name>` wins over its section origin (`ui` for FE, `backend` for BE; a single target of any name serves both); section origins cover relative request/page paths. A `**DB Check:**` requires `[env.database]`. With no selected plan, derive only the environment, personas and values supported by repository auth/development evidence; do not invent accounts for an unauthenticated app. Later `plan check` can request missing names.
 
-### 2. Propose the QA defaults, policy and budgets
-
-Choose `[qa.defaults].be_target` and `fe_target` from grounded `[env.targets]`: the API and browser origins respectively, or the same origin for a server-rendered app. Preserve a given plan's target names. Omit a section default that is not needed and has no grounded target rather than inventing one.
+### 2. Propose the QA policy
 
 In `create`, propose these safe defaults, unless explicit caller answers already choose another allowed value:
 
 ```toml
-[qa.policy]
+[qa]
 fix = "approve"
 mutations = "rejections-only"
-disposable_data = false
-min_severity = "LOW"
-dirty_tree = "ask"
-
-[qa.budget]
-iterations = 3
-dispatches = 50
-minutes = 30
 ```
 
-Allowed policy values are `fix = "approve"|"auto"|"off"`, `mutations = "allow"|"rejections-only"|"deny"`, `dirty_tree = "ask"|"allow"|"abort"`, and `min_severity = "CRITICAL"|"HIGH"|"MEDIUM"|"LOW"`. Budgets are positive integers. `mutations = "allow"` always requires `disposable_data = true`.
+Allowed policy values are `fix = "approve"|"auto"|"off"` and `mutations = "allow"|"rejections-only"|"deny"`.
 
 For `create`, return exactly the two policy-choice questions below in one `questions` array, unless already answered. Make the affected keys and answer-to-key mapping explicit in each string so the caller can ask them together and update the transaction:
 
-1. **Data:** identify the proposed target names/origins and ask whether the data behind **all** of them is disposable. When every target is loopback and the user confirms it is disposable, recommend `qa.policy.mutations = "allow"` with `qa.policy.disposable_data = true`. Otherwise keep `"rejections-only"`/`false`, with `"deny"` as the no-writes choice. Never infer disposability merely from a loopback host. Do not propose `allow` by default for a non-loopback target.
-2. **Fix handling:** ask which mode to use for `qa.policy.fix`: `"approve"` (default, one batch approval per iteration), `"auto"` (apply eligible fixes without asking), or `"off"` (test/report only). With no usable ask capability, `approve` applies no fixes; do not silently choose `auto`.
+1. **Data:** identify the proposed target names/origins and ask whether the data behind **all** of them is disposable. When every target is loopback and the user confirms it is disposable, recommend `qa.mutations = "allow"`. Otherwise keep `"rejections-only"`, with `"deny"` as the no-writes choice. Never infer disposability merely from a loopback host. Do not propose `allow` by default for a non-loopback target.
+2. **Fix handling:** ask which mode to use for `qa.fix`: `"approve"` (default, one batch approval per iteration), `"auto"` (apply eligible fixes without asking), or `"off"` (test/report only). With no usable ask capability, `approve` applies no fixes; do not silently choose `auto`.
 
-`extend` and `repair` do not reopen these policy choices or change budgets. If a requested provisioning path is impossible under the existing `mutations = "deny"`, report that prerequisite rather than broadening policy. When grounding or provenance blocks any mode, return only blocking questions with `proposal: null`, not a partial creation proposal followed by policy questions.
+`extend` and `repair` do not reopen these policy choices. If a requested provisioning path is impossible under the existing `mutations = "deny"`, report that prerequisite rather than broadening policy. When grounding or provenance blocks any mode, return only blocking questions with `proposal: null`, not a partial creation proposal followed by policy questions.
 
 ### 3. Ground personas and account recipes
 
 Inspect discovered signup/registration and login routes, administrative user APIs, seed/management commands, e2e fixtures and development/auth docs, including sections such as **Creating Test Users**. Read their non-secret request/response contracts, persona/role handling, email-confirmation requirements and cookie/CSRF flow. Do not run fixtures, seed commands or APIs; do not copy embedded test credentials.
 
 - `[qa.accounts].personas` lists the provisionable names the plan uses. An explicit `[qa.accounts.static.<persona>]` wins for that persona and is not replaced with a generated account. Do not add role-specific personas that the shared create recipe cannot actually produce.
-- Propose `email = "qa+{run}-{persona}@test.local"` only when the repository's registration rules accept that form/domain; otherwise use a documented development-domain template. Include `{run}` and `{persona}` to isolate identities. `password = "generate"` asks the engine for a fresh per-persona password; never propose a literal password.
+- Propose `email = "qa+{run}-{persona}@test.local"` only when the repository's registration rules accept that form/domain; otherwise use a documented development-domain template. Include `{run}` and `{persona}` to isolate identities. The engine always generates a fresh per-persona password; never propose a literal password.
 - A static account declares `email` and `password` sources and optional `id`. Use grounded `cmd:`/`env:AV_...` sources or `file:.av/secrets.local.env#NAME`, never actual credentials. `[qa]` also permits a repository-grounded `env:QA_...` source, but do not invent one or rely on newly exported variables. Static accounts still use the login recipe when it exists.
 - An unconfigured plan persona needs a create recipe unless it is explicitly static; under `mutations = "deny"`, the engine refuses provisioning. A required token/cookie field needs a login recipe that can actually produce it. An `ID` needs a create extractor/output or a static `id` source. Never claim a capability merely because it is requested.
 
@@ -109,8 +99,8 @@ Propose `[qa.accounts.create]`, optional `confirm`, `login`, and optional `delet
 **Command recipe — management commands or multiple requests:**
 
 - `kind = "command"`, `run = "<repository-grounded shell command>"`, and `outputs` declaring exactly what the helper emits. Use `outputs = ["id"]` or `["token"]` for simple outputs, or a TOML inline table such as `outputs = { id = true, token = true, cookies = ["sessionid", "csrftoken"] }`; declare only real outputs. An operation with no outputs uses `outputs = []`.
-- The engine supplies `QA_PERSONA`, `QA_EMAIL`, `QA_PASSWORD` and `QA_ID` in the environment; the helper reads them there. Never interpolate credentials into process arguments or place `{password}` in `run`. A delete helper receives no `QA_PASSWORD` and must work without it.
-- Declare required configured inputs with `env = ["value.NAME", "secret.NAME"]`, preserving exact source names. Values become `QA_<UPPERCASED_NAME>`; secrets become `AV_<exact_name>`. Inspect the invoked helper, not just `run`: the engine does not infer dependencies from shell text. Command delete always requires a known ledger ID; require a compatible create ID output when grounding that cleanup path.
+- Command helpers read only `QA_PERSONA`, `QA_EMAIL`, `QA_PASSWORD`, `QA_ID` and the engine's inherited environment. A helper needing an admin key must obtain it itself from its own settings or `.env`, never from a config source. Never interpolate credentials into process arguments or place `{password}` in `run`. A delete helper receives no `QA_PASSWORD` and must work without it.
+- Command delete always requires a known ledger ID; require a compatible create ID output when grounding that cleanup path.
 - Stdout must be exactly one JSON object matching `outputs`, with `cookies` represented as a name-to-value object. Login output fields must be non-empty and cookie names exact; progress belongs on stderr. An existing seed command that prints prose is not a compatible recipe merely because it creates users: require an evidence-grounded adapter that obeys the contract, or report the missing helper.
 - A login needing a CSRF-cookie fetch followed by a form POST is a **command** recipe, not an invented single HTTP request. Likewise use a grounded command helper for confirmation or registration requiring several round trips. It must preserve the cookie/CSRF flow and return the declared credentials without leaking them through argv. Do not invent a helper path, omit a required round trip, or add scripts yourself; an absent compatible path is a blocking prerequisite.
 

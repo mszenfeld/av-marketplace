@@ -32,7 +32,7 @@ def require_trust(config: Config) -> None:
 
 
 class Runtime:
-    """Resolve only executed dependencies and delay logs until outputs can be masked."""
+    """Resolve only used sources and delay logs until outputs can be masked."""
 
     def __init__(self, run: Run, config: Config, *, cleanup: bool = False) -> None:
         if not cleanup:
@@ -40,7 +40,6 @@ class Runtime:
         self.run = run
         self.config = config
         self.cache: dict[str, str] = {}
-        self.resolving: set[str] = set()
         self.secrets = SecretSet(run.directory, mapping(run.record.get("config")), config.data, minimum_length=4)
         self.logs: list[tuple[str, str]] = []
 
@@ -67,21 +66,14 @@ class Runtime:
         if key in self.cache:
             return self.cache[key]
         require_trust(self.config)
-        if key in self.resolving:
-            raise ConfigError(f"{key}: cyclic source dependency")
-        self.resolving.add(key)
-        try:
-            value = self.config.shared.resolve(source, key, trusted=True, execute=self._run_source)
-            self.cache[key] = value
-            self.secrets.remember(value)
-            return value
-        finally:
-            self.resolving.remove(key)
+        value = self.config.shared.resolve(source, key, trusted=True, execute=self._run_source)
+        self.cache[key] = value
+        self.secrets.remember(value)
+        return value
 
     def _run_source(self, command: str, key: str) -> str:
-        """Execute a source with transitive inputs and masked engine-log capture."""
-        dependencies = mapping(self.config.env.get("source_env")).get(key, [])
-        environ = self.command_environment(cast(list[str], dependencies))
+        """Execute a source with inherited inputs and masked engine-log capture."""
+        environ = dict(os.environ)
         code, stdout, stderr = self.shell(command, environ, key, timeout=30)
         if code:
             self.logs.append((key, "***"))
@@ -115,14 +107,6 @@ class Runtime:
         if isinstance(value, list):
             return [self.substitute(item, identity) for item in value]
         return value
-
-    def command_environment(self, dependencies: list[str]) -> dict[str, str]:
-        environ = dict(os.environ)
-        for dependency in dependencies:
-            kind, name = dependency.split(".", 1)
-            variable = f"QA_{name.upper()}" if kind == "value" else f"AV_{name}"
-            environ[variable] = self.named(kind, name)
-        return environ
 
     def shell(self, command: str, environ: Mapping[str, str], label: str, *,
               timeout: float, file_output: bool = False) -> tuple[int, str, str]:
@@ -179,8 +163,7 @@ def services(run: Run, config: Config, operation: str) -> dict[str, object]:
         code = 0
         for command in commands:
             # Teardown runs the already-trusted command even after config repair.
-            dependencies = mapping(settings.get("env")).get(operation, [])
-            environ = dict(os.environ) if operation == "down" else runtime.command_environment(cast(list[str], dependencies))
+            environ = dict(os.environ)
             if operation == "up":
                 run.record["services_up"] = True
                 write_json(run.directory / "run.json", run.record, 0o600)

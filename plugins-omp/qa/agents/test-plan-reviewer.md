@@ -36,7 +36,7 @@ When the engine's config state is `ok`, `Config:` contains the same safe JSON pr
 
 ```text
 Config:
-{"targets": <name-to-origin map>, "defaults": <section-default target names>, "personas": <provisionable persona names>, "static_personas": <static persona names>, "values": <exposed value names>, "database": <masked database metadata or null>}
+{"targets": <name-to-origin map>, "defaults": <section origins {FE, BE}>, "personas": <provisionable persona names>, "static_personas": <static persona names>, "values": <exposed value names>, "database": <masked database metadata or null>}
 ```
 
 Otherwise it is `Config:` followed by `none`. Names and masked metadata are sufficient: never read a secret's value or require resolved credentials or recipes to review the plan.
