@@ -19,11 +19,8 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "skills/engine/scripts"
 PRIOR = Path(__file__).parent / "fixtures/reports/prior-report-with-decisions.md"
 CONFIG = '''version = 1
 [env.targets]
-api = "http://localhost:8000"
-web = "http://localhost:5174"
-[qa.defaults]
-be_target = "api"
-fe_target = "web"
+backend = "http://localhost:8000"
+ui = "http://localhost:5173"
 [qa]
 fix = "approve"
 '''
@@ -299,25 +296,25 @@ up = {json.dumps(command)}
     def test_stop_detail_preserves_public_probes_and_unreferenced_environment_values(self) -> None:
         self.env.update(UNRELATED_FLAG="1", UNRELATED_ZERO="0", UNRELATED_BOOL="true")
         self.start()
-        detail = "services declined; failing probes: api /api/v1/health 502, web / 503; http://localhost:8000 down"
+        detail = "services declined; failing probes: backend /api/v1/health 502, ui / 503; http://localhost:8000 down"
         stopped = self.cli("run", "stop", "--run", self.run["run"], "--reason", "other", "--detail", detail)
         self.assertEqual(stopped["detail"], detail)
         self.assertIn("- Stop detail: " + detail, self.summary())
 
     def test_stop_detail_masks_only_private_values_and_configured_sources_after_drift(self) -> None:
         self.env.update(AV_OLD_SECRET="recorded-secret", AV_NEW_SECRET="current-secret", UNRELATED_FLAG="1")
-        self.put(CONFIG.replace("[qa.defaults]", '[env.secrets]\nold = "env:AV_OLD_SECRET"\n[qa.defaults]'),
+        self.put(CONFIG.replace("[qa]\n", '[env.secrets]\nold = "env:AV_OLD_SECRET"\n[qa]\n'),
                  ".av/config.toml")
         self.put('[env.values]\nname = "literal:private-literal"\n', ".av/local.toml")
         self.start()
         directory = Path(self.run["dir"])
         (directory / "accounts.private.json").write_text(json.dumps({"accounts": [{"token": "account-secret"}]}))
-        self.put(CONFIG.replace("[qa.defaults]", '[env.secrets]\nnew = "env:AV_NEW_SECRET"\n[qa.defaults]'),
+        self.put(CONFIG.replace("[qa]\n", '[env.secrets]\nnew = "env:AV_NEW_SECRET"\n[qa]\n'),
                  ".av/config.toml")
-        detail = "api /api/v1/health 502 recorded-secret current-secret private-literal account-secret"
+        detail = "backend /api/v1/health 502 recorded-secret current-secret private-literal account-secret"
         stopped = self.cli("run", "stop", "--run", self.run["run"], "--reason", "config-drift", "--detail", detail)
-        self.assertEqual(stopped["detail"], "api /api/v1/health 502 *** *** *** ***")
-        self.assertIn("- Stop detail: api /api/v1/health 502 *** *** *** ***", self.summary())
+        self.assertEqual(stopped["detail"], "backend /api/v1/health 502 *** *** *** ***")
+        self.assertIn("- Stop detail: backend /api/v1/health 502 *** *** *** ***", self.summary())
 
     def test_repair_bootstrap_edits_are_excluded_from_fix_recovery(self) -> None:
         self.put(".av/local.toml\n", ".gitignore")
@@ -892,7 +889,7 @@ password = "env:QA_TEST_PASSWORD"
     def test_summary_coverage_unlocks_and_recovery_are_config_scoped(self) -> None:
         self.start()
         self.ingest(fe=outcome("SKIP", None, skip_reason="mutation-guard"),
-                    main=outcome("FAIL", 401), edge=outcome("NEED_INFO", None, kind="service", missing=["api:/items"]))
+                    main=outcome("FAIL", 401), edge=outcome("NEED_INFO", None, kind="service", missing=["backend:/items"]))
         # BE-01 is need-info due to its edge; add separate authenticated-gating coverage.
         self.change_state(current={"FE-01": "skip", "BE-01": "auth-unverified", "BE-02": "pass"},
                           scenario_reason={"FE-01": "mutation-guard", "BE-01": "auth-unverified"},
@@ -913,7 +910,7 @@ password = "env:QA_TEST_PASSWORD"
         self.assertIn("qa.accounts.login", summary)
         self.assertIn("need-info (0)", summary)
         self.assertIn("env.services", summary)
-        self.assertIn("api:/items", summary)
+        self.assertIn("backend:/items", summary)
         self.assertNotIn("restart the harness", summary)
         self.assertNotIn("--auth-token", summary)
         self.assertIn("git restore -- 'src/new file.py'", summary)

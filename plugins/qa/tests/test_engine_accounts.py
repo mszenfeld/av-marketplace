@@ -115,15 +115,12 @@ class AccountTests(unittest.TestCase):
         self.origin = f"http://127.0.0.1:{self.server.server_port}"
         self.config = f'''version = 1
 [env.targets]
-api = "{self.origin}"
+backend = "{self.origin}"
 [env.secrets]
 ADMIN = "env:AV_ADMIN"
 [env.values]
 LOGIN = "env:AV_LOGIN"
 UNUSED = 'cmd:touch unused-source-ran; printf "%s" "$AV_UNUSED"'
-[qa.defaults]
-be_target = "api"
-fe_target = "api"
 [qa]
 mutations = "allow"
 [qa.accounts]
@@ -132,7 +129,7 @@ email = "qa+{{run}}-{{persona}}@test.local"
 password = "generate"
 [qa.accounts.create]
 kind = "http"
-target = "api"
+target = "backend"
 method = "POST"
 path = "/create"
 headers = {{x-key = "{{secret.ADMIN}}"}}
@@ -142,7 +139,7 @@ conflict = [409]
 id = ".data.items[0].id"
 [qa.accounts.login]
 kind = "http"
-target = "api"
+target = "backend"
 method = "POST"
 path = "/login"
 headers = {{x-key = "{{value.LOGIN}}"}}
@@ -152,7 +149,7 @@ token = ".token"
 cookies = ["__Host-session", "connect.sid"]
 [qa.accounts.delete]
 kind = "http"
-target = "api"
+target = "backend"
 method = "DELETE"
 path = "/delete/{{id}}?run={{run}}"
 headers = {{x-key = "{{secret.ADMIN}}"}}
@@ -391,7 +388,7 @@ password = "literal:db-secret"
 
     def test_drift_refuses_provision_but_cleanup_uses_recorded_commands(self) -> None:
         config = self.config + '''[env.services]
-health = ["api:/health"]
+health = ["backend:/health"]
 up = 'touch service-up; printf "%s" "$AV_ADMIN"'
 prepare = ["touch prepared"]
 down = "touch recorded-down"
@@ -424,7 +421,7 @@ down = "touch recorded-down"
                 if change == "delete":
                     self.put(self.config.replace("/delete/{id}", "/other/{id}"), ".av/config.toml")
                 if change == "origin":
-                    self.put(self.config.replace(f'api = "{self.origin}"', f'api = "http://127.0.0.1:1"\nold = "{self.origin}"'), ".av/config.toml")
+                    self.put(self.config.replace(f'backend = "{self.origin}"', f'backend = "http://127.0.0.1:1"\nold = "{self.origin}"'), ".av/config.toml")
                 self.trust()
                 current, _ = self.start()
                 result = self.cli("accounts", "teardown", "--run", current)
@@ -477,9 +474,7 @@ outputs=["token"]
     def test_static_command_recipes_and_delete_environment(self) -> None:
         self.config = '''version=1
 [env.targets]
-api="http://localhost:8000"
-[qa.defaults]
-be_target="api"
+backend="http://localhost:8000"
 [qa.accounts]
 personas=["user"]
 email="qa+{run}-{persona}@test.local"
@@ -580,7 +575,7 @@ run="test -z \\\"${QA_PASSWORD+x}\\\" && test \\\"$QA_ID\\\" = command-id && tou
 
     def test_services_resolve_needed_values_and_down_only_after_up(self) -> None:
         config = self.config + '''[env.services]
-health=["api:/health"]
+health=["backend:/health"]
 up='sh scripts/service.sh up'
 prepare=['sh scripts/service.sh prepared']
 down="touch down"
@@ -604,7 +599,7 @@ env={up=["value.LOGIN", "secret.ADMIN"], prepare=["value.LOGIN", "secret.ADMIN"]
             proxy = f"http://127.0.0.1:{unused_proxy.server_port}"
         self.env.update({"http_proxy": proxy, "HTTP_PROXY": proxy, "all_proxy": proxy,
                          "ALL_PROXY": proxy, "no_proxy": "", "NO_PROXY": ""})
-        self.put(self.config + '[env.services]\nhealth=["api:/health"]\n', ".av/config.toml")
+        self.put(self.config + '[env.services]\nhealth=["backend:/health"]\n', ".av/config.toml")
         self.trust()
         run, directory = self.start()
         with self.subTest(operation="provision"):
@@ -613,7 +608,7 @@ env={up=["value.LOGIN", "secret.ADMIN"], prepare=["value.LOGIN", "secret.ADMIN"]
             self.assertEqual(self.shell_channel(directory), {"QA_USER_TOKEN": "token-1"})
         with self.subTest(operation="check"):
             self.assertEqual(self.cli("services", "check", "--run", run),
-                             {"up": True, "probes": [{"target": "api", "path": "/health", "status": 200}]})
+                             {"up": True, "probes": [{"target": "backend", "path": "/health", "status": 200}]})
 
     def test_services_up_returns_without_killing_background_child(self) -> None:
         self.put(self.config + '''[env.services]
@@ -662,7 +657,7 @@ down="kill $(cat service.pid)"
         config = self.config.replace('json = {email = "{email}", password = "{password}"}', 'form = {email = "{email}", password = "{password}"}')
         config += '''[qa.accounts.confirm]
 kind="http"
-target="api"
+target="backend"
 method="POST"
 path="/confirm"
 headers={x-key="{value.LOGIN}"}
@@ -715,7 +710,7 @@ expect=[200]
         self.assertEqual(self.server.events[-1][0], f"/delete/account-id?run={interrupted}")
 
     def test_health_probe_boundary_is_500(self) -> None:
-        self.put(self.config + '[env.services]\nhealth=["api:/health"]\n', ".av/config.toml")
+        self.put(self.config + '[env.services]\nhealth=["backend:/health"]\n', ".av/config.toml")
         self.trust()
         run, _ = self.start()
         for status, up in ((200, True), (499, True), (500, False)):
@@ -723,7 +718,7 @@ expect=[200]
                 self.server.health_status = status
                 result = self.cli("services", "check", "--run", run)
                 self.assertEqual(result["up"], up)
-                self.assertEqual(result["probes"], [{"target": "api", "path": "/health", "status": status}])
+                self.assertEqual(result["probes"], [{"target": "backend", "path": "/health", "status": status}])
 
 
 if __name__ == "__main__":

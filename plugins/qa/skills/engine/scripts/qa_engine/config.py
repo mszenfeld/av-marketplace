@@ -23,6 +23,7 @@ VALUE_SOURCE_KEYS = re.compile(r"(?:env\.(?:secrets|values)\.[A-Za-z_][A-Za-z0-9
 POLICY = {"fix": "approve", "mutations": "rejections-only"}
 FIX = ("approve", "auto", "off")
 MUTATIONS = ("allow", "rejections-only", "deny")
+SECTION_TARGETS = {"FE": ("ui", "backend"), "BE": ("backend", "ui")}
 DATABASE_NAMES = {
     "postgres": {"PGHOST": "host", "PGPORT": "port", "PGUSER": "user", "PGDATABASE": "name", "PGPASSWORD": "password"},
     "mysql": {"MYSQL_HOST": "host", "MYSQL_TCP_PORT": "port", "MYSQL_USER": "user", "MYSQL_DATABASE": "name", "MYSQL_PWD": "password"},
@@ -64,7 +65,6 @@ class Config:
         self.targets = cast(dict[str, str], mapping(self.env.get("targets")))
         self.accounts = mapping(self.qa.get("accounts"))
         self.recipes: dict[str, Recipe] = {}
-        self.defaults = mapping(self.qa.get("defaults"))
         self.policy = {**POLICY, **{key: self.qa[key] for key in POLICY if key in self.qa}}
         self.services = mapping(self.env.get("services"))
         self.values = mapping(self.env.get("values"))
@@ -83,17 +83,21 @@ class Config:
     def state(self) -> str:
         return self.shared.state("qa")
 
+    def section_target(self, section: str) -> str | None:
+        """The origin name a section's relative paths use: its reserved name, the other one, or the only target."""
+        for name in SECTION_TARGETS[section]:
+            if name in self.targets:
+                return name
+        if len(self.targets) == 1:
+            return next(iter(self.targets))
+        return None
+
     def _validate(self) -> None:
         validator = self.shared
         qa = validator.table(self.data["qa"], "qa")
-        validator.keys(qa, {"fix", "mutations", "defaults", "accounts"}, "qa")
-        for name in ("defaults", "accounts"):
-            if name in qa:
-                validator.table(qa[name], f"qa.{name}")
-        validator.keys(self.defaults, {"be_target", "fe_target"}, "qa.defaults")
-        for key, target in self.defaults.items():
-            if not isinstance(target, str) or target not in self.targets:
-                validator.error(f"qa.defaults.{key}", "undefined target")
+        validator.keys(qa, {"fix", "mutations", "accounts"}, "qa")
+        if "accounts" in qa:
+            validator.table(qa["accounts"], "qa.accounts")
         for key, allowed in (("fix", FIX), ("mutations", MUTATIONS)):
             if key in qa and qa[key] not in allowed:
                 validator.error(f"qa.{key}", "unsupported policy value")
@@ -201,7 +205,7 @@ class Config:
         exposed = [f"QA_{persona.upper()}_{field}" for persona in sorted(set(self.personas) | self.static.keys()) for field in sorted(self.persona_fields(persona))]
         exposed.extend(f"QA_{name.upper()}" for name in self.values)
         exposed.extend(DATABASE_NAMES.get(cast(str, self.database.get("kind")), []))
-        report.update({"targets": self.targets, "defaults": self.defaults, "policy": self.policy, "services": {"health": [], "up": None, "prepare": [], "down": None, **self.services}, "personas": self.personas, "static_personas": self.static_personas, "values": sorted(self.values), "exposed": sorted(exposed), "database": mask(self.database, VALUE_SOURCE_KEYS, "env.database") if self.database else None})
+        report.update({"targets": self.targets, "defaults": {"FE": self.section_target("FE"), "BE": self.section_target("BE")}, "policy": self.policy, "services": {"health": [], "up": None, "prepare": [], "down": None, **self.services}, "personas": self.personas, "static_personas": self.static_personas, "values": sorted(self.values), "exposed": sorted(exposed), "database": mask(self.database, VALUE_SOURCE_KEYS, "env.database") if self.database else None})
         return report
 
     def accept(self, approved_hash: str) -> dict[str, object]:

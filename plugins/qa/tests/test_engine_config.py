@@ -28,7 +28,7 @@ from qa_engine.config import VALUE_SOURCE_KEYS
 from qa_engine.services import Runtime
 from qa_engine.models import Run
 
-BASE = 'version = 1\n[env.targets]\napi = "http://localhost:8000"\n[qa]\n'
+BASE = 'version = 1\n[env.targets]\nbackend = "http://localhost:8000"\n[qa]\n'
 
 
 class ConfigTests(unittest.TestCase):
@@ -83,7 +83,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(supplied.policy["fix"], "auto")
 
     def test_local_qa_table_does_not_replace_shared_table(self) -> None:
-        without_qa = 'version = 1\n[env.targets]\napi = "http://localhost:8000"\n'
+        without_qa = 'version = 1\n[env.targets]\nbackend = "http://localhost:8000"\n'
         self.put('[qa]\nfix = "auto"\n', ".av/local.toml")
         for shared_text, config_text in ((without_qa, None), (BASE, without_qa)):
             with self.subTest(config_text=config_text):
@@ -97,16 +97,18 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["state"], "missing-table")
 
-    def test_local_defaults_without_shared_file_need_bootstrap(self) -> None:
-        self.put('[qa.defaults]\nbe_target = "api"\n', ".av/local.toml")
+    def test_local_mutations_without_shared_file_need_bootstrap(self) -> None:
+        self.put('[qa]\nmutations = "deny"\n', ".av/local.toml")
         report = self.config().report()
         result = self.cli("config")
         self.assertEqual(report["state"], "missing-file")
         self.assertEqual(report["errors"], [])
+        self.assertEqual(report["policy"]["mutations"], "deny")
         self.assertEqual(result.returncode, 0, result.stderr)
         cli_report = json.loads(result.stdout)
         self.assertEqual(cli_report["state"], "missing-file")
         self.assertEqual(cli_report["errors"], [])
+        self.assertEqual(cli_report["policy"]["mutations"], "deny")
 
     def test_validation_errors_identify_file_and_key_without_values(self) -> None:
         cases = [
@@ -117,19 +119,19 @@ class ConfigTests(unittest.TestCase):
             (BASE + 'mutations = "sensitive"\n', "qa.mutations"),
             (BASE + '[qa.policy]\nfix = "approve"\n', "qa.policy"),
             (BASE + '[qa.budget]\niterations = 3\n', "qa.budget"),
-            (BASE + '[qa.defaults]\nbe_target = "sensitive"\n', "qa.defaults.be_target"),
+            (BASE + '[qa.defaults]\nbe_target = "backend"\n', "qa.defaults"),
             (BASE + '[qa.accounts]\npersonas = ["Bad"]\n', "qa.accounts.personas"),
             (BASE + '[qa.accounts]\npersonas = ["user", "user"]\n', "qa.accounts.personas"),
             (BASE + '[qa.accounts.create]\nkind="http"\ntarget="sensitive"\nmethod="POST"\npath="/"\nexpect=[201]\n', "qa.accounts.create.target"),
-            (BASE + '[qa.accounts.delete]\nkind="http"\ntarget="api"\nmethod="DELETE"\npath="/users/{password}"\nexpect=[204]\n', "qa.accounts.delete.path"),
-            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="api"\nmethod="POST"\npath="/"\nexpect=[200]\nheaders={x="{secret.MISSING}"}\n', "qa.accounts.login.headers.x"),
-            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="api"\nmethod="POST"\npath="/"\nexpect=[200]\njson={x="{value.MISSING}"}\n', "qa.accounts.login.json.x"),
+            (BASE + '[qa.accounts.delete]\nkind="http"\ntarget="backend"\nmethod="DELETE"\npath="/users/{password}"\nexpect=[204]\n', "qa.accounts.delete.path"),
+            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[200]\nheaders={x="{secret.MISSING}"}\n', "qa.accounts.login.headers.x"),
+            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[200]\njson={x="{value.MISSING}"}\n', "qa.accounts.login.json.x"),
             (BASE + '[env.services]\nhealth=["missing:/"]\n', "env.services.health"),
             (BASE + '[env.services]\nunknown="sensitive"\n', "env.services.unknown"),
             (BASE + '[env.database]\nkind="sensitive"\n', "env.database.kind"),
             (BASE + '[env.database]\nkind="sqlite"\npath="db"\nunknown="sensitive"\n', "env.database.unknown"),
             ('version=1\nenv="sensitive"\n[qa]\n', "env"),
-            (BASE + '[qa.defaults]\nunknown="sensitive"\n', "qa.defaults.unknown"),
+            (BASE + '[qa.defaults]\nunknown="sensitive"\n', "qa.defaults"),
             (BASE + '[qa.accounts]\nunknown="sensitive"\n', "qa.accounts.unknown"),
             (BASE + '[qa.accounts]\nemail=1\n', "qa.accounts.email"),
             (BASE + '[qa.accounts]\nemail="{unknown}"\n', "qa.accounts.email"),
@@ -141,12 +143,12 @@ class ConfigTests(unittest.TestCase):
             (BASE + '[qa.accounts.login]\nkind="command"\nrun=1\n', "qa.accounts.login.run"),
             (BASE + '[qa.accounts.login]\nkind="command"\nrun="true"\noutputs={unknown=true}\n', "qa.accounts.login.outputs.unknown"),
             (BASE + '[qa.accounts.login]\nkind="command"\nrun="true"\noutputs={token="sensitive"}\n', "qa.accounts.login.outputs.token"),
-            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="api"\nmethod="sensitive"\npath="https://evil.test/"\nexpect=["sensitive"]\nheaders={x=1}\ntoken="sensitive"\ncookies=["---"]\n', "qa.accounts.login.method"),
-            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="api"\nmethod="POST"\npath="//evil.test/"\nexpect=[200]\n', "qa.accounts.login.path"),
-            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="api"\nmethod="POST"\npath="/"\nexpect=[true]\n', "qa.accounts.login.expect"),
-            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="api"\nmethod="POST"\npath="/"\nexpect=[200]\nheaders={x=1}\n', "qa.accounts.login.headers.x"),
-            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="api"\nmethod="POST"\npath="/"\nexpect=[200]\ntoken="sensitive"\n', "qa.accounts.login.token"),
-            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="api"\nmethod="POST"\npath="/"\nexpect=[200]\ncookies=["---"]\n', "qa.accounts.login.cookies"),
+            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="sensitive"\npath="https://evil.test/"\nexpect=["sensitive"]\nheaders={x=1}\ntoken="sensitive"\ncookies=["---"]\n', "qa.accounts.login.method"),
+            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="//evil.test/"\nexpect=[200]\n', "qa.accounts.login.path"),
+            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[true]\n', "qa.accounts.login.expect"),
+            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[200]\nheaders={x=1}\n', "qa.accounts.login.headers.x"),
+            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[200]\ntoken="sensitive"\n', "qa.accounts.login.token"),
+            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[200]\ncookies=["---"]\n', "qa.accounts.login.cookies"),
             (BASE + '[env.services]\nhealth=1\nup=1\ndown=1\nprepare=[1]\n', "env.services.health"),
             (BASE + '[env.services]\nhealth=["sensitive"]\n', "env.services.health"),
             (BASE + '[env.database]\nkind="sqlite"\n', "env.database.path"),
@@ -160,6 +162,8 @@ class ConfigTests(unittest.TestCase):
                 report = self.config().report()
                 self.assertEqual(report["state"], "invalid")
                 self.assertTrue(any(e["file"] == ".av/config.toml" and e["key"] == key for e in report["errors"]), report["errors"])
+                if key == "qa.defaults":
+                    self.assertIn({"file": ".av/config.toml", "key": key, "error": "unknown key"}, report["errors"])
                 self.assertNotIn("sensitive", json.dumps(report))
 
     def test_allow_needs_no_disposable_flag(self) -> None:
@@ -171,13 +175,13 @@ class ConfigTests(unittest.TestCase):
     def test_target_validation(self) -> None:
         for origin in ("ftp://localhost", "http://user:pass@localhost", "http://localhost/", "http://localhost?q=x", "http://localhost#x", "http://localhost:bad", "http://localhost:70000"):
             with self.subTest(origin=origin):
-                self.put(f'version=1\n[env.targets]\napi={json.dumps(origin)}\n[qa]\n')
-                self.assertTrue(any(e["key"] == "env.targets.api" for e in self.config().errors))
+                self.put(f'version=1\n[env.targets]\nbackend={json.dumps(origin)}\n[qa]\n')
+                self.assertTrue(any(e["key"] == "env.targets.backend" for e in self.config().errors))
 
     def test_recipe_and_health_targets_require_https_outside_loopback(self) -> None:
-        usages = ['[env.services]\nhealth=["api:/health"]\n']
+        usages = ['[env.services]\nhealth=["backend:/health"]\n']
         usages.extend(
-            f'[qa.accounts.{name}]\nkind="http"\ntarget="api"\nmethod="POST"\npath="/accounts"\nexpect=[200]\n'
+            f'[qa.accounts.{name}]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/accounts"\nexpect=[200]\n'
             for name in ("create", "confirm", "login", "delete")
         )
         origins = (
@@ -196,21 +200,21 @@ class ConfigTests(unittest.TestCase):
         for usage in usages:
             for origin, state in origins:
                 with self.subTest(usage=usage, origin=origin):
-                    self.put(f'version=1\n[env.targets]\napi={json.dumps(origin)}\n[qa]\n' + usage)
+                    self.put(f'version=1\n[env.targets]\nbackend={json.dumps(origin)}\n[qa]\n' + usage)
                     report = self.config().report()
                     self.assertEqual(report["state"], state, report["errors"])
                     if state == "invalid":
-                        self.assertTrue(any(error["key"] == "env.targets.api" for error in report["errors"]), report["errors"])
+                        self.assertTrue(any(error["key"] == "env.targets.backend" for error in report["errors"]), report["errors"])
 
     def test_trust_cannot_override_cleartext_recipe_target_from_local_config(self) -> None:
-        recipe = '[qa.accounts.login]\nkind="http"\ntarget="api"\nmethod="POST"\npath="/login"\nexpect=[200]\njson={password="{password}"}\n'
-        self.put('version=1\n[env.targets]\napi="https://staging.example.com"\n[qa]\n' + recipe)
+        recipe = '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/login"\nexpect=[200]\njson={password="{password}"}\n'
+        self.put('version=1\n[env.targets]\nbackend="https://staging.example.com"\n[qa]\n' + recipe)
         secure = self.config()
         secure.accept(secure.trust_hash)
-        self.put('[env.targets]\napi="http://staging.example.com"\n', ".av/local.toml")
+        self.put('[env.targets]\nbackend="http://staging.example.com"\n', ".av/local.toml")
         cfg = self.config()
         self.assertEqual(cfg.state, "invalid")
-        self.assertTrue(any(error["file"] == ".av/local.toml" and error["key"] == "env.targets.api" for error in cfg.errors), cfg.errors)
+        self.assertTrue(any(error["file"] == ".av/local.toml" and error["key"] == "env.targets.backend" for error in cfg.errors), cfg.errors)
         with self.assertRaises(ConfigError):
             cfg.accept(cfg.trust_hash)
         result = self.cli("config")
@@ -218,7 +222,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["state"], "invalid")
 
     def test_unused_cleartext_target_retains_the_normal_origin_trust_gate(self) -> None:
-        self.put('version=1\n[env.targets]\napi="http://staging.example.com"\n[qa.defaults]\nbe_target="api"\n')
+        self.put('version=1\n[env.targets]\nbackend="http://staging.example.com"\n[qa]\n')
         cfg = self.config()
         self.assertEqual(cfg.state, "ok")
         self.assertEqual(cfg.trust, "new")
@@ -410,7 +414,7 @@ class ConfigTests(unittest.TestCase):
                 for key in ("up", "down")
             ])
             cases.append((f'[env.services]\nprepare=["true", {json.dumps(value)}]\n', "env.services.prepare.1"))
-            http = '[qa.accounts.login]\nkind="http"\ntarget="api"\nmethod="POST"\nexpect=[200]\n'
+            http = '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\nexpect=[200]\n'
             cases.extend([
                 (http + f'path={json.dumps(value)}\n', "qa.accounts.login.path"),
                 (http + f'path="/login"\nheaders={{x={json.dumps(value)}}}\n', "qa.accounts.login.headers.x"),
@@ -467,7 +471,7 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(replacement=replacement):
                 changed = {**proposal, "config_text": proposal["config_text"].replace('mode="old"', replacement)}
                 self.assertFalse(cfg.preview(changed)["ok"])
-        inline = 'version=1\n[env.targets]\napi = "http://localhost:8000"\n[qa]\naccounts={personas=["user"], email="qa+{run}-{persona}@test.local"}\n[delivery]\n# protected\nmode="old"\n'
+        inline = 'version=1\n[env.targets]\nbackend = "http://localhost:8000"\n[qa]\naccounts={personas=["user"], email="qa+{run}-{persona}@test.local"}\n[delivery]\n# protected\nmode="old"\n'
         self.put(inline)
         proposal = {"config_text": inline.replace('personas=["user"]', 'personas=["user", "other"]'), "gitignore_add": [], "allowed_keys": ["qa.accounts.personas"]}
         self.assertTrue(self.config().preview(proposal)["ok"])
@@ -486,8 +490,8 @@ class ConfigTests(unittest.TestCase):
             'version = 1\n\n[qa]\n',
             '# Project configuration\nversion = 1\n\n[qa]\n',
             'version = 1\n\n# ---- shared environment (any plugin) ----\n\n'
-            '[env.targets]  # named origins\napi = "http://localhost:8000"\n\n'
-            '# ---- QA ----\n\n[qa.defaults]\nbe_target = "api"\n',
+            '[env.targets]  # named origins\nbackend = "http://localhost:8000"\n\n'
+            '# ---- QA ----\n\n[qa]\nfix = "approve"\n',
         )
         for text in proposals:
             with self.subTest(text=text):
@@ -500,13 +504,13 @@ class ConfigTests(unittest.TestCase):
                 self.assertFalse(self.config().preview(proposal)["ok"])
 
     def test_extend_preview_accepts_separators_and_qa_header_comments(self) -> None:
-        original = 'version = 1\n\n[env.targets]\napi = "http://localhost:8000"\n'
+        original = 'version = 1\n\n[env.targets]\nbackend = "http://localhost:8000"\n'
         self.put(original)
         cfg = self.config()
         self.assertEqual(cfg.state, "missing-table")
-        for separator in ("\n", "\n# QA defaults\n# Derived from settings.py\n"):
+        for separator in ("\n", "\n# QA policy\n# Derived from settings.py\n"):
             with self.subTest(separator=separator):
-                text = original + separator + '[qa.defaults]\nbe_target = "api"\n'
+                text = original + separator + '[qa]\nfix = "approve"\n'
                 proposal = {"config_text": text, "gitignore_add": [], "allowed_keys": ["qa"]}
                 preview = cfg.preview(proposal)
                 self.assertTrue(preview["ok"], preview["errors"])
@@ -821,14 +825,14 @@ SECOND="cmd:touch second-helper-ran; printf second"
     def test_recipe_json_rejects_non_json_toml_values(self) -> None:
         for value in ("2000-01-01", "nan", "inf"):
             with self.subTest(value=value):
-                self.put(BASE + f'[qa.accounts.login]\nkind="http"\ntarget="api"\nmethod="POST"\npath="/"\nexpect=[200]\njson={{x={value}}}\n')
+                self.put(BASE + f'[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[200]\njson={{x={value}}}\n')
                 result = self.cli("config")
                 self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 report = json.loads(result.stdout)
                 self.assertTrue(any(error["key"] == "qa.accounts.login.json.x" for error in report["errors"]))
 
     def test_nested_placeholder_and_shell_environment_syntax(self) -> None:
-        self.put(BASE + '[qa.accounts.login]\nkind="http"\ntarget="api"\nmethod="POST"\npath="/"\nexpect=[200]\njson={items=[{secret="{secret.MISSING}"}]}\n')
+        self.put(BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[200]\njson={items=[{secret="{secret.MISSING}"}]}\n')
         self.assertTrue(any("json.items" in error["key"] for error in self.config().errors))
         self.put(BASE + '[qa.accounts.login]\nkind="command"\nrun="printf \\"${QA_EMAIL}\\""\noutputs=["token"]\n')
         self.assertFalse(self.config().errors)

@@ -21,12 +21,9 @@ from qa_engine.models import LIMITS
 RESULTS = Path(__file__).parent / "fixtures/results"
 BASE = '''version = 1
 [env.targets]
-api = "http://localhost:8000"
-web = "http://localhost:5174"
+backend = "http://localhost:8000"
+ui = "http://localhost:5173"
 supabase = "http://127.0.0.1:54321"
-[qa.defaults]
-be_target = "api"
-fe_target = "web"
 [qa]
 fix = "approve"
 [qa.accounts]
@@ -245,8 +242,8 @@ class StateTests(unittest.TestCase):
 
     def test_ipv6_origin_locks_use_bracketed_canonical_origins(self) -> None:
         config = BASE.replace("localhost:8000", "[::1]:8000")
-        config = config.replace('web = "http://localhost:5174"\n', "").replace('supabase = "http://127.0.0.1:54321"\n', "")
-        self.put(config.replace('fe_target = "web"', 'fe_target = "api"'), ".av/config.toml")
+        config = config.replace('ui = "http://localhost:5173"\n', "").replace('supabase = "http://127.0.0.1:54321"\n', "")
+        self.put(config, ".av/config.toml")
         self.trust()
         run = self.start()
         conflict = self.start(code=1)
@@ -257,9 +254,9 @@ class StateTests(unittest.TestCase):
 
     def test_shared_origins_exclude_and_disjoint_origins_succeed(self) -> None:
         run = self.start()
-        self.put(BASE.replace('web = "http://localhost:5174"\n', '').replace('fe_target = "web"\n', ''), ".av/config.toml")
+        self.put(BASE.replace('ui = "http://localhost:5173"\n', ''), ".av/config.toml")
         self.assertIn("live run", self.start(code=1)["error"])
-        self.put(BASE.replace(":8000", ":9000").replace(":5174", ":9174").replace(":54321", ":54322"), ".av/config.toml")
+        self.put(BASE.replace(":8000", ":9000").replace(":5173", ":9173").replace(":54321", ":54322"), ".av/config.toml")
         self.trust()
         other = self.start()
         self.assertNotEqual(run["run"], other["run"])
