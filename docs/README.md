@@ -10,7 +10,7 @@
 
 - [Code Review](plugins/code-review.md) — Security, architecture, and code quality analysis
 - [Commit](plugins/commit.md) — Conventional Commits message generation
-- [Delivery](plugins/delivery.md) — Plan format, automatic routing, task delivery, reviews, and resuming; starts from Superpowers or plan mode
+- [Delivery](plugins/delivery.md) — Plan format, automatic routing, task delivery, reviews, QA on testable changes, and resuming; starts from Superpowers or plan mode
 - [Frontend Developer](plugins/frontend-developer.md) — TypeScript + React best practices, TDD, modern tooling patterns
 - [PHP Developer](plugins/php-developer.md) — PHP best practices, TDD, Symfony, Doctrine, DDD patterns
 - [Python Developer](plugins/python-developer.md) — Python best practices, TDD, Django, Celery, FastAPI, async patterns
