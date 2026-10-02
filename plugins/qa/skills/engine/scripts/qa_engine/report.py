@@ -44,10 +44,11 @@ from qa_engine.config import DATABASE_NAMES
 from qa_engine.plan import Plan
 from qa_engine.plan import persona_token
 from qa_engine.plan import run_plan
+from qa_engine.models import LIMITS
 from qa_engine.models import Run
 from qa_engine.models import StateStop
 from qa_engine.schema import TesterDispatch
-from qa_engine.candidates import failures_at_floor
+from qa_engine.candidates import failures_remain
 from qa_engine.iterations import iteration_close
 from qa_engine.iterations import record_final
 from qa_engine.verdicts import scenario_kind
@@ -352,7 +353,7 @@ def _result(run: Run, verdicts: Mapping[str, str], elapsed: int) -> str:
     reason = end["reason"] if end is not None else ""
     if not run.plan_unchanged() or run.stopped:
         return "Stopped"
-    if failures_at_floor(run):
+    if failures_remain(run):
         if "no progress" in reason or "regression" in reason:
             return "Stopped"
         if ("budget" in reason or "max iterations" in reason
@@ -440,16 +441,16 @@ def _unlock(run: Run, plan: Plan, verdicts: Mapping[str, str]) -> list[str]:
     reasons = Counter(run.state["scenario_reason"].values())
     hints: list[str] = []
     if reasons["mutation-guard"]:
-        hints.append(f"- mutation-guard ({reasons['mutation-guard']}): set `qa.policy.mutations` in `.av/config.toml`; `allow` requires `qa.policy.disposable_data = true` and disposable test data.")
+        hints.append(f"- mutation-guard ({reasons['mutation-guard']}): set `qa.mutations = \"allow\"` in `.av/config.toml` only when the data behind every target is disposable.")
     if reasons["auth-unverified"] or run.state["auth_gated_issues"]:
         hints.append(_auth_unlock(run, reasons["auth-unverified"]))
     hints.extend(_gap_unlocks(run, verdicts))
     if reasons["tool-unavailable"]:
         hints.append(f"- tool-unavailable ({reasons['tool-unavailable']}): install/enable the missing browser, HTTP or database client.")
     if run.state["dispatch_count"] >= run.budget["dispatches"]:
-        hints.append("- dispatch-exhausted: raise `qa.budget.dispatches` in `.av/config.toml`.")
+        hints.append(f"- dispatch-exhausted: this run used all {LIMITS['dispatches']} tester/fixer dispatches; re-run `/qa:run` for another pass.")
     if run.state["iteration"] >= run.budget["iterations"]:
-        hints.append("- iterations exhausted: raise `qa.budget.iterations` in `.av/config.toml`.")
+        hints.append(f"- iterations exhausted: this run used all {LIMITS['iterations']} fix iterations; re-run `/qa:run` for another pass.")
     if _backend_unavailable(run, plan):
         hints.append("- No BE scenario returned an HTTP status at the configured `env.targets` origins — the dev stack may be down; check `env.services.health`/`up`.")
     return hints
@@ -474,7 +475,7 @@ def _all_unverified(verdicts: Mapping[str, str]) -> bool:
 def _coverage_notice(run: Run, verdicts: Mapping[str, str], result: str, shallow: bool) -> list[str]:
     if _all_unverified(verdicts) and not run.stopped:
         return [_unverified_notice(run, verdicts)]
-    if result == "Stopped" or failures_at_floor(run):
+    if result == "Stopped" or failures_remain(run):
         return []
     if shallow and run.state["auto_generated"]:
         return ["All assertions passed, but coverage is shallow — no feature behavior was exercised (see Coverage). Low-confidence green: the plan was auto-generated and may not reflect runtime auth/setup."]
@@ -495,7 +496,7 @@ def _unverified_notice(run: Run, verdicts: Mapping[str, str]) -> str:
 def _recovery_summary(run: Run, remaining: int) -> list[str]:
     lines: list[str] = []
     if remaining:
-        lines.append("Use `/fix QA-NNN` to fix remaining issues by ID, or re-run `/qa:run` after adjusting `.av/config.toml` policy or budgets.")
+        lines.append("Use `/fix QA-NNN` to fix remaining issues by ID, or re-run `/qa:run` after adjusting `.av/config.toml` policy.")
     touched = sorted(set(run.state["fix_touched_files"]) - set(run.state["pre_loop_dirty"]))
     if touched:
         lines.append("To recover the loop's own edits: `git restore -- " + " ".join(shlex.quote(path) for path in touched)
@@ -515,7 +516,7 @@ def _issue_counts(blocks: Mapping[str, str]) -> tuple[int, int]:
 
 
 def render_summary(run: Run) -> str:
-    """Render the severity-floor result, advisory coverage, unlocks and scoped recovery."""
+    """Render the remaining-failure result, advisory coverage, unlocks and scoped recovery."""
     if run.state["open_iteration"] is not None:
         iteration_close(run, decide=False)
     plan = run_plan(run, strict=False)

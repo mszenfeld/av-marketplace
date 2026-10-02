@@ -24,7 +24,7 @@ web = "http://localhost:5174"
 [qa.defaults]
 be_target = "api"
 fe_target = "web"
-[qa.policy]
+[qa]
 fix = "approve"
 '''
 PLAN = '''# Test Plan: Items
@@ -794,7 +794,7 @@ outputs = []
 email = "literal:admin@test.local"
 password = "env:QA_ADMIN_PASSWORD"
 '''
-        self.put(CONFIG.replace('fix = "approve"', 'fix = "approve"\nmutations = "allow"\ndisposable_data = true') + accounts, ".av/config.toml")
+        self.put(CONFIG.replace('fix = "approve"', 'fix = "approve"\nmutations = "allow"') + accounts, ".av/config.toml")
         self.put('[qa.accounts.static.admin]\npassword = "literal:private-password"\n', ".av/local.toml")
         self.plan.write_text(PLAN.replace("- **Method:** GET /items", "- **Method:** GET /items\n- **Headers:** Authorization: Bearer $QA_USER_TOKEN, $QA_ADMIN_TOKEN"))
         self.start()
@@ -908,7 +908,7 @@ password = "env:QA_TEST_PASSWORD"
         self.assertIn("Confidence: low", summary)
         self.assertIn("Low-confidence green", summary)
         self.assertNotIn("Warning: shallow coverage", summary)
-        self.assertIn("qa.policy.mutations", summary)
+        self.assertIn("qa.mutations", summary)
         self.assertIn("$QA_<P>_TOKEN", summary)
         self.assertIn("qa.accounts.login", summary)
         self.assertIn("need-info (0)", summary)
@@ -921,35 +921,6 @@ password = "env:QA_TEST_PASSWORD"
         self.assertNotIn("git restore -- src/app.py", summary)
         self.change_state(auto_generated=False)
         self.assertIn("Warning: shallow coverage", self.summary())
-
-    def test_summary_zero_failure_exit_respects_severity_floor_with_shallow_coverage(self) -> None:
-        self.put(CONFIG.replace('fix = "approve"', 'fix = "approve"\nmin_severity = "HIGH"'), ".av/config.toml")
-        self.start()
-        self.ingest(fe=outcome("SKIP", None, skip_reason="browser unavailable"),
-                    main=outcome("FAIL", 400))
-        self.cli("issues", "--run", self.run["run"])
-        self.render([issue("QA-001", "LOW")])
-        decision = self.cli("iteration", "open", "--run", self.run["run"])
-        self.assertEqual(decision["decision"], "final")
-        self.assertEqual(decision["reason"], "no failures at or above min_severity")
-        summary = self.summary()
-        self.assertIn("**Result:** Pass\n", summary)
-        self.assertIn("No failing assertions to fix.", summary)
-        self.assertIn("Warning: shallow coverage", summary)
-        self.assertIn("Confidence: low — no feature behavior exercised", summary)
-        self.assertIn("Total: 3 | Pass: 1 | Fail: 1 | Skip: 1 | Need info: 0", summary)
-        self.assertIn("- Remaining unfixed: 1", summary)
-        self.change_state(auto_generated=True)
-        summary = self.summary()
-        self.assertIn("**Result:** Pass\n", summary)
-        self.assertIn("Low-confidence green", summary)
-        self.assertNotIn("Warning: shallow coverage", summary)
-        self.assertNotIn("No failing assertions to fix.", summary)
-        self.render([issue("QA-001", "HIGH")])
-        summary = self.summary()
-        self.assertIn("**Result:** Fail\n", summary)
-        self.assertNotIn("Low-confidence green", summary)
-        self.assertNotIn("No failing assertions to fix.", summary)
 
     def test_summary_result_vocabulary_and_zero_coverage(self) -> None:
         self.start()

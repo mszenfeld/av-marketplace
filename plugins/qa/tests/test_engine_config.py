@@ -63,35 +63,35 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(self.config().report()["state"], "missing-table")
         self.put('version = 2\n[qa]\n')
         self.assertEqual(self.config().report()["state"], "invalid")
-        self.put(BASE + '[qa.budget]\niterations = 3\nminutes = 30\n')
-        self.put('[qa.budget]\niterations = 5\n', ".av/local.toml")
+        self.put(BASE + 'fix = "approve"\nmutations = "deny"\n')
+        self.put('[qa]\nfix = "auto"\n', ".av/local.toml")
         report = self.config().report()
         self.assertEqual(report["state"], "ok")
-        self.assertEqual(report["budget"]["iterations"], 5)
-        self.assertEqual(report["budget"]["minutes"], 30)
-        self.assertEqual(report["provenance"]["qa.budget.iterations"], ".av/local.toml")
+        self.assertEqual(report["policy"], {"fix": "auto", "mutations": "deny"})
+        self.assertEqual(report["provenance"]["qa.fix"], ".av/local.toml")
+        self.assertNotIn("budget", report)
 
     def test_local_overrides_without_shared_file_need_bootstrap(self) -> None:
-        self.put('[qa.budget]\niterations = 5\n', ".av/local.toml")
+        self.put('[qa]\nfix = "auto"\n', ".av/local.toml")
         report = self.config().report()
         self.assertEqual(report["state"], "missing-file")
         self.assertEqual(report["errors"], [])
-        self.assertEqual(report["budget"]["iterations"], 5)
-        self.assertEqual(report["provenance"]["qa.budget.iterations"], ".av/local.toml")
+        self.assertEqual(report["policy"]["fix"], "auto")
+        self.assertEqual(report["provenance"]["qa.fix"], ".av/local.toml")
         supplied = Config(self.repo, state_home=self.state, config_text=BASE)
         self.assertEqual(supplied.state, "ok")
-        self.assertEqual(supplied.budget["iterations"], 5)
+        self.assertEqual(supplied.policy["fix"], "auto")
 
     def test_local_qa_table_does_not_replace_shared_table(self) -> None:
         without_qa = 'version = 1\n[env.targets]\napi = "http://localhost:8000"\n'
-        self.put('[qa.budget]\niterations = 5\n', ".av/local.toml")
+        self.put('[qa]\nfix = "auto"\n', ".av/local.toml")
         for shared_text, config_text in ((without_qa, None), (BASE, without_qa)):
             with self.subTest(config_text=config_text):
                 self.put(shared_text)
                 report = Config(self.repo, state_home=self.state, config_text=config_text).report()
                 self.assertEqual(report["state"], "missing-table")
                 self.assertEqual(report["errors"], [])
-                self.assertEqual(report["budget"]["iterations"], 5)
+                self.assertEqual(report["policy"]["fix"], "auto")
         self.put(without_qa)
         result = self.cli("config")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -113,13 +113,10 @@ class ConfigTests(unittest.TestCase):
             ('[qa]\n', "version"), ('version = true\n[qa]\n', "version"),
             ('version = 2\n[qa]\n', "version"), ('version = 1\nqa = "sensitive"\n', "qa"),
             (BASE + 'surprise = "sensitive"\n', "qa.surprise"),
-            (BASE + '[qa.policy]\nfix = "sensitive"\n', "qa.policy.fix"),
-            (BASE + '[qa.policy]\nmutations = "sensitive"\n', "qa.policy.mutations"),
-            (BASE + '[qa.policy]\ndirty_tree = "sensitive"\n', "qa.policy.dirty_tree"),
-            (BASE + '[qa.policy]\nmin_severity = "sensitive"\n', "qa.policy.min_severity"),
-            (BASE + '[qa.policy]\nmutations = "allow"\n', "qa.policy.disposable_data"),
-            (BASE + '[qa.policy]\ndisposable_data = "sensitive"\n', "qa.policy.disposable_data"),
-            (BASE + '[qa.budget]\niterations = "sensitive"\n', "qa.budget.iterations"),
+            (BASE + 'fix = "sensitive"\n', "qa.fix"),
+            (BASE + 'mutations = "sensitive"\n', "qa.mutations"),
+            (BASE + '[qa.policy]\nfix = "approve"\n', "qa.policy"),
+            (BASE + '[qa.budget]\niterations = 3\n', "qa.budget"),
             (BASE + '[qa.defaults]\nbe_target = "sensitive"\n', "qa.defaults.be_target"),
             (BASE + '[qa.accounts]\npersonas = ["Bad"]\n', "qa.accounts.personas"),
             (BASE + '[qa.accounts]\npersonas = ["user", "user"]\n', "qa.accounts.personas"),
@@ -133,7 +130,6 @@ class ConfigTests(unittest.TestCase):
             (BASE + '[env.database]\nkind="sqlite"\npath="db"\nunknown="sensitive"\n', "env.database.unknown"),
             ('version=1\nenv="sensitive"\n[qa]\n', "env"),
             (BASE + '[qa.defaults]\nunknown="sensitive"\n', "qa.defaults.unknown"),
-            (BASE + '[qa.budget]\nunknown=1\n', "qa.budget.unknown"),
             (BASE + '[qa.accounts]\nunknown="sensitive"\n', "qa.accounts.unknown"),
             (BASE + '[qa.accounts]\nemail=1\n', "qa.accounts.email"),
             (BASE + '[qa.accounts]\nemail="{unknown}"\n', "qa.accounts.email"),
@@ -165,6 +161,12 @@ class ConfigTests(unittest.TestCase):
                 self.assertEqual(report["state"], "invalid")
                 self.assertTrue(any(e["file"] == ".av/config.toml" and e["key"] == key for e in report["errors"]), report["errors"])
                 self.assertNotIn("sensitive", json.dumps(report))
+
+    def test_allow_needs_no_disposable_flag(self) -> None:
+        self.put(BASE + 'mutations = "allow"\n')
+        report = self.config().report()
+        self.assertEqual(report["state"], "ok", report["errors"])
+        self.assertEqual(report["policy"]["mutations"], "allow")
 
     def test_target_validation(self) -> None:
         for origin in ("ftp://localhost", "http://user:pass@localhost", "http://localhost/", "http://localhost?q=x", "http://localhost#x", "http://localhost:bad", "http://localhost:70000"):
@@ -330,7 +332,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(self.config().trust, "trusted")
         self.put('# changed comment\n' + BASE + '[env.values]\nX="cmd:printf x"\n')
         self.assertEqual(self.config().trust, "trusted")
-        for fragment in ('[env.values]\nX="cmd:printf y"\n', '[env.values]\nX="env:AV_X"\n', '[env.values]\nX="env:AV_Y"\n', '[qa.policy]\nfix="auto"\n'):
+        for fragment in ('[env.values]\nX="cmd:printf y"\n', '[env.values]\nX="env:AV_X"\n', '[env.values]\nX="env:AV_Y"\n', 'fix="approve"\nmutations="deny"\n'):
             with self.subTest(fragment=fragment):
                 old = self.config().trust_hash
                 self.put(BASE + fragment)
@@ -340,8 +342,14 @@ class ConfigTests(unittest.TestCase):
                     cfg.accept(old)
                 cfg.accept(cfg.trust_hash)
         cfg = self.config()
+        self.assertEqual(cfg.trust_subset, {"qa.fix": "approve", "qa.mutations": "deny"})
+        self.put(BASE + 'fix="auto"\nmutations="deny"\n')
+        cfg = self.config()
+        self.assertEqual(cfg.trust, "changed")
+        self.assertEqual(cfg.trust_subset, {"qa.fix": "auto", "qa.mutations": "deny"})
+        cfg.accept(cfg.trust_hash)
         old = cfg.trust_hash
-        self.put(BASE + '[qa.policy]\nfix="off"\n')
+        self.put(BASE + 'fix="off"\n')
         with self.assertRaises(ConfigError):
             cfg.accept(old)
 
@@ -447,10 +455,10 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(any(e["key"] == "env.values.USER_COOKIE_SESSION" for e in self.config().errors))
 
     def test_preview_section_guard_and_no_writes(self) -> None:
-        original = BASE + '[qa.budget]\niterations=3\n[delivery]\n# keep this comment\nmode="old"\n'
+        original = BASE + 'fix="approve"\n[delivery]\n# keep this comment\nmode="old"\n'
         self.put(original)
         cfg = self.config()
-        proposal = {"config_text": original.replace("iterations=3", "iterations=4"), "gitignore_add": [], "allowed_keys": ["qa.budget.iterations"]}
+        proposal = {"config_text": original.replace('fix="approve"', 'fix="auto"'), "gitignore_add": [], "allowed_keys": ["qa.fix"]}
         preview = cfg.preview(proposal)
         self.assertTrue(preview["ok"], preview["errors"])
         self.assertEqual((self.repo / ".av/config.toml").read_text(), original)
@@ -459,14 +467,14 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(replacement=replacement):
                 changed = {**proposal, "config_text": proposal["config_text"].replace('mode="old"', replacement)}
                 self.assertFalse(cfg.preview(changed)["ok"])
-        inline = 'version=1\n[qa]\nbudget={iterations=3, dispatches=50}\n[delivery]\n# protected\nmode="old"\n'
+        inline = 'version=1\n[env.targets]\napi = "http://localhost:8000"\n[qa]\naccounts={personas=["user"], email="qa+{run}-{persona}@test.local"}\n[delivery]\n# protected\nmode="old"\n'
         self.put(inline)
-        proposal = {"config_text": inline.replace("iterations=3", "iterations=4"), "gitignore_add": [], "allowed_keys": ["qa.budget.iterations"]}
+        proposal = {"config_text": inline.replace('personas=["user"]', 'personas=["user", "other"]'), "gitignore_add": [], "allowed_keys": ["qa.accounts.personas"]}
         self.assertTrue(self.config().preview(proposal)["ok"])
-        proposal["config_text"] = proposal["config_text"].replace("dispatches=50", "dispatches=20")
+        proposal["config_text"] = proposal["config_text"].replace("qa+{run}-{persona}@test.local", "other+{run}-{persona}@test.local")
         self.assertFalse(self.config().preview(proposal)["ok"])
         self.put(BASE)
-        proposal = {"config_text": BASE + '[qa.budget]\niterations=4\n', "gitignore_add": [], "allowed_keys": ["qa.budget.iterations"]}
+        proposal = {"config_text": BASE + 'fix="auto"\n', "gitignore_add": [], "allowed_keys": ["qa.fix"]}
         self.assertTrue(self.config().preview(proposal)["ok"])
         quoted = 'version=1\n[qa]\n["qa.extra"]\n# another plugin table\nvalue="old"\n'
         self.put(quoted)
@@ -744,12 +752,13 @@ SECOND="cmd:touch second-helper-ran; printf second"
         self.assertIn("error", json.loads(result.stdout))
 
     def test_hash_mismatch_restores_existing_snapshot(self) -> None:
-        original = BASE + '[qa.policy]\nfix="approve"\n'
+        original = BASE + 'fix="approve"\n'
         self.put(original)
         self.put("# original ignore\n", ".gitignore")
         cfg = self.config()
-        proposal = {"config_text": original.replace('fix="approve"', 'fix="auto"'), "gitignore_add": [".av/local.toml"], "allowed_keys": ["qa.policy.fix"]}
+        proposal = {"config_text": original.replace('fix="approve"', 'fix="auto"'), "gitignore_add": [".av/local.toml"], "allowed_keys": ["qa.fix"]}
         preview = cfg.preview(proposal)
+        self.assertTrue(preview["ok"], preview["errors"])
         with self.assertRaises(ConfigError):
             cfg.apply(proposal, preview["snapshot"], "stale")
         self.assertEqual((self.repo / ".av/config.toml").read_text(), original)
@@ -765,7 +774,7 @@ SECOND="cmd:touch second-helper-ran; printf second"
         self.assertFalse((self.repo / "must-not-exist").exists())
 
     def test_trust_is_scoped_to_plugin_and_real_repository(self) -> None:
-        self.put(BASE + '[qa.policy]\nfix="auto"\n')
+        self.put(BASE + 'fix="auto"\n')
         cfg = self.config()
         cfg.accept(cfg.trust_hash)
         other = TrustStore(self.repo, "delivery", self.state)
@@ -776,7 +785,7 @@ SECOND="cmd:touch second-helper-ran; printf second"
         another = Path(self.tmp.name) / "another"
         another.mkdir()
         self.assertEqual(TrustStore(another, "qa", self.state).status(cfg.trust_subset), "new")
-        self.put(BASE + '[qa.policy]\nfix="auto"\n[delivery]\npolicy={fix="auto"}\n')
+        self.put(BASE + 'fix="auto"\n[delivery]\npolicy={fix="auto"}\n')
         self.assertEqual(self.config().trust, "trusted")
 
     def test_gitignore_semantics_and_parameterized_source_prefix(self) -> None:
@@ -792,7 +801,7 @@ SECOND="cmd:touch second-helper-ran; printf second"
         self.assertIsNotNone(resolver.validate("file:../secret.env#X", "delivery.token", local=True))
 
     def test_malformed_types_and_documents_do_not_crash_or_echo(self) -> None:
-        for text in ('version=1\n[qa.policy]\nfix=[]\n', 'version=1\n[qa.accounts.login]\nkind=[]\n', 'version=1\n[env.database]\nkind=[]\n', 'version=1\n[qa]\nbudget=1\n', 'version=1\n[qa]\naccounts=1\n', 'version=1\n[env]\nvalues=1\n', 'version=1\n[qa]\nbudget="sensitive\n'):
+        for text in ('version=1\n[qa]\nfix=[]\n', 'version=1\n[qa.accounts.login]\nkind=[]\n', 'version=1\n[env.database]\nkind=[]\n', 'version=1\n[qa]\nbudget=1\n', 'version=1\n[qa]\naccounts=1\n', 'version=1\n[env]\nvalues=1\n', 'version=1\n[qa]\nbudget="sensitive\n'):
             with self.subTest(text=text):
                 self.put(text)
                 result = self.cli("config")
@@ -801,7 +810,7 @@ SECOND="cmd:touch second-helper-ran; printf second"
                 self.assertNotIn("sensitive", result.stdout + result.stderr)
 
     def test_sensitive_env_sources_and_qa_gates_are_pinned(self) -> None:
-        cases = ('[env.browser]\nsource="cmd:printf value"\n', '[env.browser]\nsources=["env:AV_BROWSER"]\n', '[env.targets]\nremote="https://example.com"\n', '[env.database]\nkind="postgres"\nhost="db.example.com"\nuser="user"\nname="db"\npassword="env:AV_DB"\n', '[qa.policy]\nfix="off"\n', '[qa.policy]\ndirty_tree="abort"\n', '[qa.policy]\nmutations="deny"\n', '[qa.policy]\ndisposable_data=true\n')
+        cases = ('[env.browser]\nsource="cmd:printf value"\n', '[env.browser]\nsources=["env:AV_BROWSER"]\n', '[env.targets]\nremote="https://example.com"\n', '[env.database]\nkind="postgres"\nhost="db.example.com"\nuser="user"\nname="db"\npassword="env:AV_DB"\n', 'fix="off"\n', 'mutations="deny"\n')
         for section in cases:
             with self.subTest(section=section):
                 self.put(('version=1\n[qa]\n' if section.startswith("[env.targets]") else BASE) + section)
@@ -851,7 +860,7 @@ SECOND="cmd:touch second-helper-ran; printf second"
         self.assertNotIn("never-display-me", result.stdout + result.stderr)
 
     def test_empty_xdg_state_home_keeps_trust_outside_repository(self) -> None:
-        self.put(BASE + '[qa.policy]\nfix="auto"\n')
+        self.put(BASE + 'fix="auto"\n')
         home = Path(self.tmp.name) / "home"
         home.mkdir()
         result = subprocess.run(

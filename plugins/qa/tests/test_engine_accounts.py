@@ -124,9 +124,8 @@ UNUSED = 'cmd:touch unused-source-ran; printf "%s" "$AV_UNUSED"'
 [qa.defaults]
 be_target = "api"
 fe_target = "api"
-[qa.policy]
+[qa]
 mutations = "allow"
-disposable_data = true
 [qa.accounts]
 personas = ["user", "other"]
 email = "qa+{{run}}-{{persona}}@test.local"

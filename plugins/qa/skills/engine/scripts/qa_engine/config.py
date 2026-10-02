@@ -20,8 +20,9 @@ from qa_engine.recipes import cookie_name
 
 PERSONA = re.compile(r"[a-z][a-z0-9_]*\Z")
 VALUE_SOURCE_KEYS = re.compile(r"(?:env\.(?:secrets|values)\.[A-Za-z_][A-Za-z0-9_]*|env\.database\.password|qa\.accounts\.password|qa\.accounts\.static\.[a-z][a-z0-9_]*\.(?:email|password|id))")
-POLICY = {"fix": "approve", "mutations": "rejections-only", "disposable_data": False, "min_severity": "LOW", "dirty_tree": "ask"}
-BUDGET = {"iterations": 3, "dispatches": 50, "minutes": 30}
+POLICY = {"fix": "approve", "mutations": "rejections-only"}
+FIX = ("approve", "auto", "off")
+MUTATIONS = ("allow", "rejections-only", "deny")
 DATABASE_NAMES = {
     "postgres": {"PGHOST": "host", "PGPORT": "port", "PGUSER": "user", "PGDATABASE": "name", "PGPASSWORD": "password"},
     "mysql": {"MYSQL_HOST": "host", "MYSQL_TCP_PORT": "port", "MYSQL_USER": "user", "MYSQL_DATABASE": "name", "MYSQL_PWD": "password"},
@@ -64,8 +65,7 @@ class Config:
         self.accounts = mapping(self.qa.get("accounts"))
         self.recipes: dict[str, Recipe] = {}
         self.defaults = mapping(self.qa.get("defaults"))
-        self.policy = {**POLICY, **mapping(self.qa.get("policy"))}
-        self.budget = {**BUDGET, **mapping(self.qa.get("budget"))}
+        self.policy = {**POLICY, **{key: self.qa[key] for key in POLICY if key in self.qa}}
         self.services = mapping(self.env.get("services"))
         self.values = mapping(self.env.get("values"))
         self.database = mapping(self.env.get("database"))
@@ -86,29 +86,17 @@ class Config:
     def _validate(self) -> None:
         validator = self.shared
         qa = validator.table(self.data["qa"], "qa")
-        validator.keys(qa, {"defaults", "policy", "budget", "accounts"}, "qa")
-        for name in ("defaults", "policy", "budget", "accounts"):
+        validator.keys(qa, {"fix", "mutations", "defaults", "accounts"}, "qa")
+        for name in ("defaults", "accounts"):
             if name in qa:
                 validator.table(qa[name], f"qa.{name}")
         validator.keys(self.defaults, {"be_target", "fe_target"}, "qa.defaults")
         for key, target in self.defaults.items():
             if not isinstance(target, str) or target not in self.targets:
                 validator.error(f"qa.defaults.{key}", "undefined target")
-        policy = mapping(qa.get("policy"))
-        validator.keys(policy, set(POLICY), "qa.policy")
-        choices = {"fix": ("approve", "auto", "off"), "mutations": ("allow", "rejections-only", "deny"), "dirty_tree": ("ask", "allow", "abort"), "min_severity": ("CRITICAL", "HIGH", "MEDIUM", "LOW")}
-        for key, allowed in choices.items():
-            if key in policy and policy[key] not in allowed:
-                validator.error(f"qa.policy.{key}", "unsupported policy value")
-        if "disposable_data" in policy and type(policy["disposable_data"]) is not bool:
-            validator.error("qa.policy.disposable_data", "expected a boolean")
-        if self.policy["mutations"] == "allow" and self.policy["disposable_data"] is not True:
-            validator.error("qa.policy.disposable_data", "must be true when mutations are allowed")
-        budget = mapping(qa.get("budget"))
-        validator.keys(budget, set(BUDGET), "qa.budget")
-        for key, value in budget.items():
-            if type(value) is not int or cast(int, value) <= 0:
-                validator.error(f"qa.budget.{key}", "expected a positive integer")
+        for key, allowed in (("fix", FIX), ("mutations", MUTATIONS)):
+            if key in qa and qa[key] not in allowed:
+                validator.error(f"qa.{key}", "unsupported policy value")
         self._validate_accounts()
         self._validate_names()
 
@@ -200,10 +188,9 @@ class Config:
         for recipe in ("create", "confirm", "login", "delete"):
             if recipe in self.accounts:
                 subset[f"qa.accounts.{recipe}"] = self.accounts[recipe]
-        policy = mapping(self.qa.get("policy"))
-        for key in ("fix", "dirty_tree", "mutations", "disposable_data"):
-            if key in policy:
-                subset[f"qa.policy.{key}"] = policy[key]
+        for key in POLICY:
+            if key in self.qa:
+                subset[f"qa.{key}"] = self.qa[key]
         return subset
 
     def report(self) -> dict[str, object]:
@@ -214,7 +201,7 @@ class Config:
         exposed = [f"QA_{persona.upper()}_{field}" for persona in sorted(set(self.personas) | self.static.keys()) for field in sorted(self.persona_fields(persona))]
         exposed.extend(f"QA_{name.upper()}" for name in self.values)
         exposed.extend(DATABASE_NAMES.get(cast(str, self.database.get("kind")), []))
-        report.update({"targets": self.targets, "defaults": self.defaults, "policy": self.policy, "budget": self.budget, "services": {"health": [], "up": None, "prepare": [], "down": None, **self.services}, "personas": self.personas, "static_personas": self.static_personas, "values": sorted(self.values), "exposed": sorted(exposed), "database": mask(self.database, VALUE_SOURCE_KEYS, "env.database") if self.database else None})
+        report.update({"targets": self.targets, "defaults": self.defaults, "policy": self.policy, "services": {"health": [], "up": None, "prepare": [], "down": None, **self.services}, "personas": self.personas, "static_personas": self.static_personas, "values": sorted(self.values), "exposed": sorted(exposed), "database": mask(self.database, VALUE_SOURCE_KEYS, "env.database") if self.database else None})
         return report
 
     def accept(self, approved_hash: str) -> dict[str, object]:

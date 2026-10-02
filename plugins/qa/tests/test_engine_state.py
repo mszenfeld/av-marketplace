@@ -14,6 +14,10 @@ import time
 import unittest
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/engine/scripts"
+sys.path.insert(0, str(SCRIPTS))
+
+from qa_engine.models import LIMITS
+
 RESULTS = Path(__file__).parent / "fixtures/results"
 BASE = '''version = 1
 [env.targets]
@@ -23,7 +27,7 @@ supabase = "http://127.0.0.1:54321"
 [qa.defaults]
 be_target = "api"
 fe_target = "web"
-[qa.policy]
+[qa]
 fix = "approve"
 [qa.accounts]
 personas = ["user"]
@@ -106,6 +110,9 @@ class StateTests(unittest.TestCase):
 
     def sidecar(self, run: dict[str, object]) -> dict[str, object]:
         return json.loads(Path(run["sidecar"]).read_text())
+
+    def change_state(self, run: dict[str, object], **extra: object) -> None:
+        Path(run["sidecar"]).write_text(json.dumps({**self.sidecar(run), **extra}))
 
     def dispatch(self, run: dict[str, object], section: str = "BE", phase: str = "baseline") -> dict[str, object]:
         return self.cli("dispatch", "--run", run["run"], "tester", "--section", section, "--phase", phase)
@@ -479,16 +486,6 @@ class StateTests(unittest.TestCase):
         self.report(run, location="`src/app.py:1` (was: unknown:0)", severity="CRITICAL")
         self.assertEqual(self.cli("candidates", "--run", run["run"])["fix"][0]["qa"], "QA-001")
 
-    def test_candidates_drop_medium_issue_below_high_minimum(self) -> None:
-        self.put(BASE.replace('fix = "approve"', 'fix = "approve"\nmin_severity = "HIGH"'), ".av/config.toml")
-        run = self.start()
-        self.ingest(run, self.dispatch(run), outcome("FAIL", 400))
-        assigned = self.cli("issues", "--run", run["run"])["assign"]
-        self.assertEqual([(row["qa"], row["key"]) for row in assigned], [("QA-001", "BE-01")])
-        self.report(run, severity="MEDIUM")
-        self.assertEqual(self.cli("candidates", "--run", run["run"]),
-                         {"fix": [], "dropped": [{"qa": "QA-001", "reason": "below min_severity"}]})
-
     def test_unverified_and_mechanical_severity(self) -> None:
         self.plan.write_text(PLAN.replace("200 items returned. (src/app.py:1)", "200 items returned. (unverified — confirm at run time)"))
         run = self.start()
@@ -544,11 +541,11 @@ class StateTests(unittest.TestCase):
         self.assertTrue(history["warnings"])
 
     def test_dispatch_budget_does_not_gate_final_run(self) -> None:
-        self.put(BASE + '[qa.budget]\ndispatches = 1\n', ".av/config.toml")
         run = self.failed()
+        self.change_state(run, dispatch_count=LIMITS["dispatches"])
         self.assertEqual(self.cli("iteration", "open", "--run", run["run"])["reason"], "dispatch budget exhausted")
         self.cli("dispatch", "--run", run["run"], "tester", "--section", "BE", "--phase", "iteration", code=1)
-        self.assertEqual(self.dispatch(run, phase="final")["dispatch_count"], 2)
+        self.assertEqual(self.dispatch(run, phase="final")["dispatch_count"], LIMITS["dispatches"] + 1)
 
     def test_recorded_tester_answers_ingest(self) -> None:
         run = self.start()

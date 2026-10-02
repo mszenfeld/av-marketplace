@@ -204,9 +204,8 @@ port = 54322
 user = "postgres"
 name = "postgres"
 password = "literal:postgres"
-[qa.policy]
+[qa]
 mutations = "allow"
-disposable_data = true
 ''')
         result = check_plan(parse_plan(FIXTURE), config)
         self.assertTrue(result["ok"], result)
@@ -341,7 +340,7 @@ disposable_data = true
         body = REJECTION + "- **Headers:** $QA_USER_EMAIL\n"
         for extra, reason in (
             ('[qa.accounts]\npersonas=["user"]\n', "create"),
-            (ACCOUNTS + '[qa.policy]\nmutations="deny"\n', "deny"),
+            (ACCOUNTS + '[qa]\nmutations="deny"\n', "deny"),
         ):
             with self.subTest(reason=reason):
                 result = self.check(body, extra)
@@ -352,7 +351,7 @@ disposable_data = true
 email = "env:QA_ADMIN_EMAIL"
 password = "env:QA_ADMIN_PASSWORD"
 id = "env:QA_ADMIN_ID"
-[qa.policy]
+[qa]
 mutations = "deny"
 '''
         result = self.check(REJECTION + "- **Headers:** $QA_ADMIN_EMAIL $QA_ADMIN_ID\n", extra)
@@ -478,7 +477,7 @@ outputs = {token = true, cookies = ["sessionid"]}
                 self.assertEqual(result["guarded"], ["BE-01"])
                 self.assertEqual(result["exempt"], [])
         body = "### BE-01: Fetch\n- POST /cvs to create the resource.\n- **Method:** GET /cvs/1\n- **Expected:** 200. (src/api.py:200)\n"
-        result = self.check(body, '[qa.policy]\nmutations="deny"\n')
+        result = self.check(body, '[qa]\nmutations="deny"\n')
         self.assertEqual(result["guarded"], ["BE-01"])
 
     def test_deny_guards_writes_in_methods_preconditions_steps_edges_and_db(self) -> None:
@@ -490,7 +489,7 @@ outputs = {token = true, cookies = ["sessionid"]}
             REJECTION.replace("POST /api/v1/cvs", "GET /api/v1/cvs") + '- **DB Check:** `UPDATE cvs SET title = 1`\n',
         ):
             with self.subTest(body=body):
-                result = self.check(body, '[qa.policy]\nmutations="deny"\n')
+                result = self.check(body, '[qa]\nmutations="deny"\n')
                 self.assertEqual(result["guarded"], ["BE-01"])
                 self.assertEqual(result["exempt"], [])
 
@@ -507,7 +506,7 @@ outputs = {token = true, cookies = ["sessionid"]}
             with self.subTest(policy=policy):
                 result = self.check(
                     REJECTION.replace("POST /api/v1/cvs", "GET /api/v1/cvs"),
-                    f'[qa.policy]\nmutations="{policy}"\ndisposable_data=true\n',
+                    f'[qa]\nmutations="{policy}"\n',
                 )
                 self.assertEqual(result["guarded"], [])
                 self.assertEqual(result["exempt"], [])
