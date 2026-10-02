@@ -115,9 +115,9 @@ review.
 
 `/qa:run` proposes the project config on first use, provisions disposable
 test accounts, reuses or generates a reviewed plan for the branch, then
-tests, fixes eligible failures and re-tests within the configured budget.
+tests, fixes eligible failures and re-tests within the engine's fixed limits.
 Commit `.av/config.toml` so later runs reuse the team's setup. Source fixes
-need batch approval by default; `qa.policy.fix = "off"` tests and reports
+need batch approval by default; `qa.fix = "off"` tests and reports
 without fixing. Use `/qa:create-plan` → `/qa:run <plan-path>` when you want
 to inspect or edit the plan first. See the [QA guide](plugins/qa.md) for
 mutation policy, trust and headless behavior.

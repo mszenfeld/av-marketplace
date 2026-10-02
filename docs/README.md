@@ -4,7 +4,7 @@
 
 - [Installation & Optional Tools](installation.md) — How to install the marketplace and configure optional analysis tools
 - [Oh My Pi (OMP)](oh-my-pi.md) — Installing and updating the OMP edition, recommended models per role, and the Advisor
-- [Marketplace Configuration](configuration.md) — Shared files, environment schema, value sources, trust, and the bootstrap convention for configurable plugins
+- [Configuration](configuration.md) — `.av/config.toml`: files, targets, services, secrets, database, QA policy, test accounts, examples and trust
 
 ## Plugin Guides
 

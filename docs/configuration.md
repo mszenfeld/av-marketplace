@@ -1,8 +1,27 @@
-# Marketplace Configuration
+# Configuration
 
-This is the shared configuration reference for users and plugin authors. QA is the first consumer; any marketplace plugin that becomes configurable uses the same files and shared environment schema.
+QA reads `.av/config.toml` from the project's repository root. On the first interactive run, `/qa:run` proposes it from repository evidence and asks two questions: whether the data is disposable and how to handle fixes.
 
-## Files and overrides
+## Minimal file
+
+```toml
+version = 1
+
+[env.targets]
+ui = "http://localhost:5173"
+backend = "http://localhost:8000"
+
+[qa]
+fix = "approve"
+mutations = "rejections-only"
+```
+
+Add [services](#services) when QA should check or manage the running stack.
+Add [secrets and values](#secrets-and-values) when recipes or scenarios need private inputs.
+Add a [database](#database) when scenarios include database checks.
+Add [test accounts](#test-accounts) when scenarios need authenticated personas.
+
+## Files
 
 All paths below are relative to the project's repository root, not the installed marketplace plugin.
 
@@ -12,166 +31,7 @@ All paths below are relative to the project's repository root, not the installed
 | `.av/local.toml` | No; add it to `.gitignore` | Personal overrides, using the same schema. |
 | `.av/secrets.local.env` | No; add it to `.gitignore` | Private dotenv values referenced through `file:` sources. It is not loaded automatically. |
 
-The engine reads `.av/config.toml`, then merges `.av/local.toml` over it recursively, key by key. A local leaf replaces the shared leaf; other keys survive. Arrays are replaced, not concatenated. Source permissions follow the file that supplies each effective key. The shared file must exist and contain the consuming plugin's table: a local-only file or table does not count as configuring the plugin.
-
-An existing `.av/local.toml` must be **untracked and git-ignored** under Git's effective ignore rules. The loader checks the index with `git ls-files --error-unmatch` as well as the ignore rules: force-adding or committing the file is invalid even if an ignore pattern matches its name. A tracked file reports `personal config must not be tracked`; an unignored file reports `personal config must be git-ignored`, both against `.av/local.toml`'s `document` key. The loader does not merge that file or grant its sources personal-file permissions, and trust approval cannot override the error. A preview may propose ignoring an untracked local file, but adding ignore rules cannot make a tracked file personal again.
-
-Every configurable plugin reports:
-
-| Field | Meaning |
-|---|---|
-| `state = "missing-file"` | `.av/config.toml` does not exist. |
-| `state = "missing-table"` | The shared file exists and validates, but lacks this plugin's top-level table. |
-| `state = "invalid"` | A file cannot be parsed, or the effective shared environment/plugin settings fail validation. Inspect `errors`. |
-| `state = "ok"` | The shared file contains the plugin's table and the effective settings validate. |
-| `provenance` | A map from effective dotted keys to `.av/config.toml` or `.av/local.toml`, identifying which file supplies them. |
-
-For an existing shared file, validation errors take precedence over `missing-table`. Errors and warnings identify the file and key, not a resolved value. The bootstrap writes only `.av/config.toml` and `.gitignore`, **never `.av/local.toml`**. If a proposed addition or repair is supplied by the local file, it stops and names that key; the user must resolve the personal override before a shared change can take effect.
-
-## Value sources
-
-`[env.secrets]`, `[env.values]` and `env.database.password` contain source strings, not unprefixed values. A plugin may use the same source format in its own table.
-
-| Source | Resolution |
-|---|---|
-| `cmd:<shell>` | Runs `/bin/sh -c` in the repository root with a 30-second timeout. Uses UTF-8 stdout with trailing newlines stripped; a non-zero exit, timeout, invalid output or empty result is an error. |
-| `env:<NAME>` | Reads the engine's inherited environment: what the harness had **at startup**. A variable exported later in another shell is not visible. |
-| `file:<path>#<KEY>` | Reads a named key from a dotenv file. Relative paths are rooted at the repository; an absolute path is permitted in a personal override. |
-| `literal:<text>` | Uses the supplied text, subject to the restrictions below. |
-
-Environment and dotenv key names must match `[A-Za-z_][A-Za-z0-9_]*`. Every source needs a non-empty payload. A missing or empty environment/dotenv value is an error, not a fallback to another source. Dotenv supports `KEY=value`, optional `export`, single- or double-quoted values and comments; it is read as data, not sourced as a shell script.
-
-`config` validates source syntax and permissions **without executing or resolving sources**. The engine resolves only the values an operation needs, after trust has been accepted. Engines never print a resolved source value: errors identify keys and source kinds. Configuration, preview and trust displays mask `literal:` payloads only at declared value-source keys: `env.secrets.*`, `env.values.*`, `env.database.password` and, for QA, `qa.accounts.password` and `qa.accounts.static.*.{email,password,id}`. Commands and recipe text remain visible verbatim; a `literal:` prefix elsewhere never hides them. Do not put credentials directly in a command; its text is displayed for approval.
-
-### Restrictions on committed sources
-
-`.av/config.toml` is branch content: whoever controls a branch can change its commands and source references. It must not silently gain access to arbitrary credentials in the user's environment or tracked files.
-
-| Source or field | `.av/config.toml` | `.av/local.toml` |
-|---|---|---|
-| `env:` in `[env]` | Name must start with `AV_`. | Any valid environment name. |
-| `env:` in a plugin table | `AV_` or the consuming plugin's registered prefix; QA permits `QA_`. | Any valid environment name. |
-| `file:` | Repository-relative, cannot escape the repository, and must be git-ignored according to Git's effective ignore rules. Absolute paths are rejected. | Absolute paths are allowed. Relative paths must still stay inside the repository and be git-ignored. |
-| `literal:` in `[env.secrets]` | Rejected. | Allowed. |
-| `literal:` for a static account password | Rejected by QA. | Allowed. |
-| `literal:` for `env.database.password` | Allowed only when `env.database.host` is loopback. | Allowed. |
-| `literal:` for other exposed values | Allowed. | Allowed. |
-
-The `.av/local.toml` permissions above apply only after its untracked, git-ignored status has been verified. For a symlink, Git must ignore the configured path itself, not merely its target.
-
-Loopback means exactly `localhost`, `127.0.0.1`, `::1` or a host ending in `.localhost`, after lowercasing and stripping IPv6 brackets. It does not mean every address in `127.0.0.0/8`, a Compose service name or a bind address such as `0.0.0.0`.
-
-Source validation errors include `expected a value source`, `empty value source`, `invalid environment source name`, `environment source name has a forbidden prefix`, `expected file source with a key`, `absolute file source is forbidden in shared config`, `file source escapes the repository`, `repository file source must be git-ignored` and `secret literal is forbidden in shared config`. Resolution can additionally fail because the file or command is unavailable, dotenv quoting is invalid, a command fails or times out, command output is not UTF-8, or the result is empty. Such failures never include the value or command output.
-
-## Shared `[env]` schema
-
-The root key `version` is required and must be the integer `1` (not a string or boolean). The shared loader uses Python 3.11 or newer and stdlib TOML parsing. Invalid text encoding or TOML is reported against the file's `document` key; an absent, mistyped or unsupported version reports `expected schema version 1`.
-
-`[env]` is optional and defaults to an empty table. Its known sub-tables are `targets`, `services`, `secrets`, `values`, `database` and `source_env`. They must be tables when present (`expected a table` otherwise). Unknown `[env]` sub-tables produce an `unknown environment sub-table` **warning**, not an error, so a later plugin can add shared capabilities without breaking an installed consumer. Other plugins' top-level tables are ignored.
-
-The tables below list all shared keys. "Required" means required only when the enclosing optional table or database kind is configured; omission is not an implicit credential or connection setting.
-
-### Targets
-
-| Key | Type | Default | Validation and meaning |
-|---|---|---|---|
-| `env.targets` | Table of named origins | `{}` | Each name must match `[A-Za-z_][A-Za-z0-9_]*`. |
-| `env.targets.<name>` | String | No target | An `http://host[:port]` or `https://host[:port]` origin, with no userinfo, path (including a trailing `/`), query or fragment. |
-
-Invalid names, non-string values or malformed origins report `expected an HTTP origin without userinfo, path, query or fragment`. Origins must have a host; whitespace, control characters, backslashes, percent escapes in hosts and empty, zero or out-of-range ports are rejected. Omitted HTTP/HTTPS ports mean `80`/`443` for origin comparison. Non-loopback origins require trust before use.
-
-Targets used by an HTTP recipe or `env.services.health` probe must use **HTTPS** unless their host is exact loopback as defined above. A non-loopback HTTP origin reports `non-loopback targets must use https` against `env.targets.<name>`, including when `.av/local.toml` supplies it. Trust approval cannot override this validation error. QA also checks the transport immediately before sending a recipe or probe request, including recorded teardown recipes, so service keys and generated passwords cannot be sent over non-loopback cleartext HTTP.
-
-### Services
-
-| Key | Type | Default | Validation and meaning |
-|---|---|---|---|
-| `env.services` | Table | No lifecycle configuration | Only `health`, `up`, `prepare`, `down` and `env` are accepted. An extra key reports `unknown key`. |
-| `env.services.health` | Array of strings | `[]` | Each probe is `<target>:<path>`. The target must exist in `[env.targets]` and use HTTPS unless its host is loopback; the path must start with `/`, not `//`. A responding HTTP status below `500` counts as up; a connection failure does not. |
-| `env.services.up` | Non-empty string | Omitted; no command | Shell command to bring services up. A wrong type or empty string reports `expected a non-empty command`. |
-| `env.services.prepare` | Array of non-empty strings | `[]` | Preparation commands in order, such as migrations. A wrong type or empty/non-string item reports `expected a command list`. |
-| `env.services.down` | Non-empty string | Omitted; no command | Shell command to tear services down. A wrong type or empty string reports `expected a non-empty command`. |
-| `env.services.env` | Table of dependency lists | `{}` | Only `up` and `prepare` are accepted. Each list names `value.NAME` / `secret.NAME` inputs for that operation; `prepare` shares its list across all preparation commands. |
-
-A non-array `health` reports `expected a probe list`; a non-string probe or one without `:` reports `expected target:path probes`; an undefined target or invalid path reports `probe has undefined target or invalid path`. These commands are shell commands, not value sources: `up`, `down` and each `prepare` entry reject any leading `cmd:`, `env:`, `file:` or `literal:` with `a command cannot be a value source`. They run in the repository root through `/bin/sh -c`, under the consuming plugin's lifecycle gates. QA runs `down` only if that run executed `up`; see its [configuration guide](plugins/qa.md#configuration) for when it asks to start services.
-
-QA resolves the declared `env` inputs before `up` or `prepare`, including when the command delegates to a script. It never scans shell text to infer dependencies. For example, `env = { up = ["value.PUBLIC_KEY", "secret.SERVICE_KEY"] }` supplies `QA_PUBLIC_KEY` and `AV_SERVICE_KEY` to the `up` command. An omitted list resolves no configured inputs; commands still inherit the engine's environment. `down` uses only that inherited environment, without source resolution, so recorded teardown still runs after config drift or loss of trust.
-
-### Secrets and values
-
-| Key | Type | Default | Validation and meaning |
-|---|---|---|---|
-| `env.secrets` | Table of named source strings | `{}` | Engine-only values, never exposed to agents. |
-| `env.secrets.<name>` | Value-source string | No value | Name must match `[A-Za-z_][A-Za-z0-9_]*`; committed literals are forbidden. |
-| `env.values` | Table of named source strings | `{}` | Values the consuming plugin may expose to its agents. QA exposes referenced names as `QA_<NAME>`. |
-| `env.values.<name>` | Value-source string | No value | Name must match `[A-Za-z_][A-Za-z0-9_]*`; source restrictions still apply. |
-
-An invalid name reports `invalid value name`. Each entry also undergoes the [value-source checks](#value-sources). Consumers validate their exposed-name collisions: QA rejects values that collide after uppercasing, or with a configured persona's exposed fields, with `value name collides with an exposed name`. Use `secrets`, not `values`, for administrative credentials.
-
-### Command-source dependencies
-
-| Key | Type | Default | Validation and meaning |
-|---|---|---|---|
-| `env.source_env` | Table of dependency lists | `{}` | Each quoted key is the full dotted key of a configured `cmd:` source, such as `"env.values.PUBLIC_KEY"` or `"qa.accounts.password"`. Any other owner reports `dependency owner must be a configured command source`. |
-| `env.source_env."<source-key>"` | Array of strings | `[]` | Inputs named `value.NAME` / `secret.NAME`, resolved lazily before that command source executes. |
-
-Dependency names preserve the exact configured source name. QA maps `value.NAME` to `QA_<UPPERCASED_NAME>` and `secret.NAME` to `AV_<exact_name>`; for example, `secret.service_key` supplies `AV_service_key`, not `AV_SERVICE_KEY`. Dependency lists contain names only, never source strings or resolved values. Invalid shapes report `expected a dependency list` or `expected value.NAME or secret.NAME dependency`; absent references report `undefined value dependency` / `undefined secret dependency`. Configuration and preview validate these declarations without executing sources. Cyclic dependencies fail during resolution with a key-only error.
-
-```toml
-[env.values]
-PUBLIC_KEY = "cmd:sh scripts/public-key.sh"
-PROJECT = "env:AV_PROJECT"
-
-[env.source_env]
-"env.values.PUBLIC_KEY" = ["value.PROJECT"]
-```
-
-Here the helper receives `QA_PROJECT` even though its invoking shell command contains no `$QA_PROJECT` token. Undeclared configured inputs are not resolved, and dependencies do not enter the tester channel unless the plan itself references those exposed values. Existing commands that relied on implicit `$QA_NAME` / `$AV_name` detection must add declarations; no shell-text inference remains.
-
-### Database
-
-`[env.database]` is optional; when omitted, no database is configured. An empty table is not a usable database: `kind` is required. Only the keys below are accepted; any other key reports `unknown key`.
-
-| Key | Type | Default | Validation and meaning |
-|---|---|---|---|
-| `env.database.kind` | String | Required | `postgres`, `mysql` or `sqlite`; otherwise `expected postgres, mysql or sqlite`. |
-| `env.database.host` | Non-empty string | Required for Postgres/MySQL | Connection host, not a value source. Non-loopback hosts are trust-pinned. Forbidden for SQLite. |
-| `env.database.port` | Integer | Omitted; QA uses `5432` for Postgres, `3306` for MySQL | If present, `1`–`65535` inclusive; booleans are not integers here. Forbidden for SQLite. Specify a published non-default host port explicitly. |
-| `env.database.user` | Non-empty string | Required for Postgres/MySQL | Connection username, not a value source. Forbidden for SQLite. |
-| `env.database.name` | Non-empty string | Required for Postgres/MySQL | Database name, not a value source. Forbidden for SQLite. |
-| `env.database.password` | Non-empty value-source string | Required for Postgres/MySQL | All source restrictions apply; a committed literal requires a loopback `host`. Forbidden for SQLite. |
-| `env.database.path` | Non-empty string | Required for SQLite | Database file path, not a value source. QA resolves a relative path against the repository root. Forbidden for Postgres/MySQL. |
-
-Missing, empty or mistyped required strings report `expected a non-empty string`. An invalid port reports `expected a port between 1 and 65535`. SQLite rejects each of `host`, `port`, `user`, `name` and `password` with `not supported for sqlite`; Postgres/MySQL reject `path` with `only supported for sqlite`. Passwords also undergo value-source validation. The shared loader does not test database connectivity during `config`.
-
-### Example shared environment
-
-This demonstrates the schema, not environment autodetection. Replace the origins, names and probes with those established by your repository, add the plugin's table from its guide, and supply the private dotenv keys before running work that needs them.
-
-```toml
-version = 1
-
-[env.targets]
-api = "http://localhost:8000"
-web = "http://localhost:5174"
-
-[env.services]
-health = ["api:/health", "web:/"]
-
-[env.secrets]
-SERVICE_KEY = "file:.av/secrets.local.env#SERVICE_KEY"
-
-[env.values]
-PUBLIC_KEY = "env:AV_PUBLIC_KEY"
-
-[env.database]
-kind = "postgres"
-host = "127.0.0.1"
-port = 54322
-user = "postgres"
-name = "app"
-password = "file:.av/secrets.local.env#DB_PASSWORD"
-```
+The engine merges local overrides leaf-by-leaf over the shared file, replacing arrays rather than concatenating them; the shared file must still exist and contain `[qa]`. The local file must be untracked and git-ignored, and source permissions follow the file supplying each effective key.
 
 Add these entries to the project's `.gitignore`:
 
@@ -180,21 +40,391 @@ Add these entries to the project's `.gitignore`:
 .av/secrets.local.env
 ```
 
+## Targets
+
+`[env.targets]` names the origins QA may use. A scenario's `- **Target:** <name>` overrides its section origin.
+
+| Target | Role |
+|---|---|
+| `ui` | Browser-facing origin; preferred for FE relative URLs. |
+| `backend` | HTTP API origin; preferred for BE relative paths. |
+| One target of any name | Serves both FE and BE. |
+| Other names | Origins needed only by account recipes or health probes. |
+
+If a section's reserved name is absent, it falls back to the other reserved name; if neither exists, only a single target can serve both sections. With multiple targets and no reserved name, `plan check` names the missing `ui` or `backend` origin.
+
+Names match `[A-Za-z_][A-Za-z0-9_]*`. Origins are `http://host[:port]` or `https://host[:port]`, without userinfo, path (including a trailing `/`), query or fragment; omitted ports mean `80` or `443` for comparison.
+
+Loopback means exactly `localhost`, `127.0.0.1`, `::1` or a host ending in `.localhost`, after lowercasing and stripping IPv6 brackets. It does not mean every address in `127.0.0.0/8`, a Compose service name or a bind address such as `0.0.0.0`.
+
+Targets used by HTTP account recipes or health probes require HTTPS off loopback, even with a local override or trust approval.
+
+## Services
+
+`[env.services]` is optional. Commands run through `/bin/sh -c` in the repository root with the engine's inherited environment.
+
+| Key | Type / default | Meaning |
+|---|---|---|
+| `health` | Array of strings / `[]` | `<target>:<path>` probes; a responding status below `500` counts as up. |
+| `up` | Non-empty string / omitted | Command to bring services up. |
+| `prepare` | Array of non-empty strings / `[]` | Preparation commands in order, such as migrations. |
+| `down` | Non-empty string / omitted | Command to tear services down. |
+
+A probe such as `backend:/health` uses a configured target and a path starting with `/`, not `//`. QA runs `down` only when it ran `up`.
+
+## Secrets and values
+
+`[env.secrets]` contains engine-only inputs, never exposed to testers. `[env.values]` contains inputs that a plan can reference as `QA_<NAME>`; names match `[A-Za-z_][A-Za-z0-9_]*` and uppercase for the tester channel.
+
+Both tables, database passwords and static account fields use source strings:
+
+| Source | Resolution |
+|---|---|
+| `cmd:<shell>` | Runs `/bin/sh -c` in the repository root with a 30-second timeout and the engine's inherited environment; strips trailing newlines from UTF-8 stdout. A non-zero exit, timeout or invalid/empty output stops resolution. |
+| `env:<NAME>` | Reads the engine's inherited environment: what the harness had at startup, not exports made later in another shell. |
+| `file:<path>#<KEY>` | Reads a named key from a dotenv file; relative paths start at the repository root. |
+| `literal:<text>` | Uses the supplied text, subject to the rules below. |
+
+In the committed `.av/config.toml`:
+
+- `env:` names start with `AV_`, or `QA_` inside `[qa]`.
+- `file:` paths are repository-relative, stay inside the repository and are git-ignored.
+- No `literal:` secrets or static passwords are allowed; a database-password literal is allowed only on a loopback host.
+
+`.av/local.toml` permits any valid environment name, absolute `file:` paths and secret literals; a relative `file:` path there must still stay inside the repository and be git-ignored.
+
+`config` validates sources without resolving them. Resolution happens only after trust and only when needed; missing or empty values stop that operation. Source and trust displays mask declared literal payloads, but commands and recipe text remain visible: never put credentials directly in them.
+
+## Database
+
+`[env.database]` is optional; when configured, choose one database kind and its connection fields. Configuration validation does not test connectivity.
+
+| Key | Type / default | Meaning |
+|---|---|---|
+| `kind` | String / required | `postgres`, `mysql` or `sqlite`. |
+| `host` | Non-empty string / required for Postgres/MySQL | Connection host, not a source; omitted for SQLite. |
+| `port` | Integer / `5432` for Postgres, `3306` for MySQL | Optional port from `1` to `65535`; specify a published non-default port explicitly; omitted for SQLite. |
+| `user` | Non-empty string / required for Postgres/MySQL | Connection username, not a source; omitted for SQLite. |
+| `name` | Non-empty string / required for Postgres/MySQL | Database name, not a source; omitted for SQLite. |
+| `password` | Non-empty source string / required for Postgres/MySQL | Uses the source rules above; omitted for SQLite. |
+| `path` | Non-empty string / required for SQLite | Database file path, resolved against the repository root when relative; omitted for Postgres/MySQL. |
+
+For database checks, QA exposes the matching client variables: `PG*`, `MYSQL_*` or `SQLITE_DB`.
+
+## QA policy
+
+`[qa]` has two policy keys. Omitted keys default to `fix = "approve"` and `mutations = "rejections-only"`.
+
+| Key / value | Meaning |
+|---|---|
+| `fix = "approve"` | Ask for one batch approval per fix iteration. |
+| `fix = "auto"` | Apply eligible fixes after a scope banner; start configured services without a bring-up question. |
+| `fix = "off"` | Test and report without source fixes. |
+| `mutations = "allow"` | Guard nothing; use only when the data behind every target is disposable. |
+| `mutations = "rejections-only"` | Guard writes except grounded rejection-only BE scenarios without other write steps or write preconditions. |
+| `mutations = "deny"` | Guard all detected writes and forbid account provisioning. |
+
+The dirty-tree gate follows `fix`: `approve` warns that fixes may overlap your work and asks Proceed/Abort (headless aborts), `auto` proceeds with the recorded baseline, and `off` skips the gate. Recovery never restores the whole tree or pre-existing dirty files.
+
+Every failing assertion is a fix candidate, subject to the [fix guards](plugins/qa.md#safety). The engine's fixed limits are 3 iterations, 50 tester/fixer dispatches and 30 minutes; the authoritative final pass is counted but not limit-gated. `approve` without an interactive session tests and reports only.
+
+`fix` does not gate HTTP writes or provisioning; `mutations` does. For a restrictive setup, combine `off` and `deny` and omit service bring-up/preparation commands, as in the [read-only example](#read-only-testreport).
+
+## Test accounts
+
+`[qa.accounts]` declares personas and shared recipes. Only personas referenced by the plan are used; provisioned passwords are always generated as 24 random URL-safe characters plus `Aa1!`.
+
+| Key | Meaning |
+|---|---|
+| `personas` | Distinct names matching `[a-z][a-z0-9_]*`; defaults to `[]`. |
+| `email` | Required for provisioning; template using `{run}` (eight-character run ID) and `{persona}`. |
+| `static.<p>` | Pre-existing persona with `email` and `password` sources and an optional `id` source; adds the persona and wins over provisioning. |
+| `create` | Recipe required to provision a non-static persona. |
+| `confirm` | Optional post-create confirmation recipe. |
+| `login` | Optional login recipe; required for token/cookie capabilities, including static personas. |
+| `delete` | Optional cleanup recipe; without it, provisioned accounts are reported `left`. |
+
+Recipes choose `kind = "http"` or `"command"`. Static accounts are never created or deleted. Reserve persona field names such as `USER_TOKEN` rather than using them as exposed-value names; plan checks distinguish credentials from other values using the longest configured persona prefix and a recognized field.
+
+### HTTP recipes
+
+| Key | Type / default | Meaning |
+|---|---|---|
+| `kind` | String / required | `http`. |
+| `target` | String / required | Existing target name; HTTPS unless loopback. |
+| `method` | String / required | `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE` or `OPTIONS`. |
+| `path` | String / required | Target-relative path starting `/`, not `//`; query allowed, no backslash or fragment. |
+| `headers` | Table of strings / `{}` | Request headers. |
+| `json` | Table / omitted | JSON-compatible nested tables, arrays, strings, numbers and booleans. |
+| `form` | Table of strings / omitted | URL-encoded form; mutually exclusive with `json`. |
+| `expect` | Non-empty integer array / required | Successful HTTP statuses from `100` to `599`. |
+| `conflict` | Non-empty integer array / omitted | Create statuses that prove nothing was created; one retry with a fresh email suffix. |
+| `id` | String extractor / omitted | Dotted JSON path such as `.id`, `.data.user.id` or `.items[0].id`. |
+| `token` | String extractor / omitted | Same extractor grammar; login exposes `QA_<P>_TOKEN`. |
+| `cookies` | Non-empty string array / omitted | Set-Cookie names with distinct, non-empty normalized forms. |
+
+String templates can use `{email}`, `{password}`, `{persona}`, `{run}`, `{id}`, `{secret.X}` and `{value.X}`. Delete cannot use `{password}` because earlier runs' private passwords are gone. Recipe strings are templates, not source strings; HTTP requests are sent by the engine without redirects or credentials on process argv.
+
+### Command recipes
+
+| Key | Type / default | Meaning |
+|---|---|---|
+| `kind` | String / required | `command`. |
+| `run` | Non-empty string / required | Shell command run in the repository root. |
+| `outputs` | Array or table / `{}` | Array entries `id`/`token`, or a table such as `{ id = true, token = true, cookies = ["sessionid", "csrftoken"] }`, declaring only needed fields. |
+
+Commands get the engine's inherited environment plus `QA_PERSONA`, `QA_EMAIL`, `QA_PASSWORD` and `QA_ID`; delete receives no `QA_PASSWORD`. Credentials are not substituted into command text or argv. A helper needing an admin key must obtain it from its own settings or `.env`, not a configured source.
+
+Declared outputs must be exactly one JSON object: `id`/`token` scalar strings or IDs, and a `cookies` map with precisely the declared names and non-empty values. With no outputs, no identity fields are collected; exit 0 means success. Every command delete requires a known ledger ID, while HTTP delete requires one only when its templates use `{id}`. Commands are trust-pinned, not sandboxed; multi-request session/CSRF login belongs here.
+
+### Tester-visible names
+
+| Input | Tester-visible names |
+|---|---|
+| Persona `p` | `QA_<P>_EMAIL`, `QA_<P>_PASSWORD` |
+| Create ID or static ID source | `QA_<P>_ID` |
+| Login token | `QA_<P>_TOKEN` |
+| Login cookies | `QA_<P>_COOKIE` (original names as `a=1; b=2`) and `QA_<P>_COOKIE_<NAME>` (individual values) |
+| `[env.values]` entry `X` | `QA_<X>` |
+| Postgres DB check | `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `PGPASSWORD` |
+| MySQL DB check | `MYSQL_HOST`, `MYSQL_TCP_PORT`, `MYSQL_USER`, `MYSQL_DATABASE`, `MYSQL_PWD` |
+| SQLite DB check | `SQLITE_DB` |
+| `[env.secrets]` | Never exposed to testers |
+
+## Examples
+
+These are complete schema examples for the stated application contracts, not autodetection results or proof that your checkout exposes these routes. Match ports, extractors, service commands, cookie names, user models and settings to repository evidence before approval, and add the [private ignore entries](#files).
+
+### JWT API: `/register` and `/login`
+
+For an API where registration returns `201 {"id": ...}` and login returns `200 {"token": ...}`:
+
+```toml
+version = 1
+
+[env.targets]
+backend = "http://localhost:8000"
+
+[qa]
+fix = "approve"
+mutations = "allow"
+
+[qa.accounts]
+personas = ["user"]
+email = "qa+{run}-{persona}@test.local"
+
+[qa.accounts.create]
+kind = "http"
+target = "backend"
+method = "POST"
+path = "/register"
+json = { email = "{email}", password = "{password}" }
+expect = [201]
+id = ".id"
+
+[qa.accounts.login]
+kind = "http"
+target = "backend"
+method = "POST"
+path = "/login"
+json = { email = "{email}", password = "{password}" }
+expect = [200]
+token = ".token"
+```
+
+Use `$QA_USER_TOKEN` in authenticated scenarios. This deliberately has no delete recipe: accounts are reported `left`. Add the app's evidenced cleanup API/management command rather than inventing a deletion route. Add `conflict = [409]` to create only if that status proves nothing was created; the engine retries once with a fresh email suffix, not on arbitrary failures.
+
+### Django session stack: command recipe and CSRF cookie
+
+This example assumes Django's standard username-based user model, `/accounts/login/`, `sessionid`/`csrftoken` cookies, a CSRF cookie (not `CSRF_USE_SESSIONS`), and `localhost` in `ALLOWED_HOSTS`. Run `manage.py` with the same settings, database and shared session backend as the target server. The login command calls the app through Django's in-process client with CSRF checks enabled: GET the form, POST with its CSRF token, retain the rotated cookies. It does not follow redirects. Custom models, forms or tenant/session settings need a repository-specific recipe instead.
+
+```toml
+version = 1
+
+[env.targets]
+app = "http://localhost:8000"
+
+[qa]
+fix = "approve"
+mutations = "allow"
+
+[qa.accounts]
+personas = ["user"]
+email = "qa+{run}-{persona}@test.local"
+
+[qa.accounts.create]
+kind = "command"
+run = '''python3 manage.py shell --verbosity 0 -c '
+import json
+import os
+from django.contrib.auth import get_user_model
+
+user = get_user_model().objects.create_user(
+    username=os.environ["QA_EMAIL"],
+    email=os.environ["QA_EMAIL"],
+    password=os.environ["QA_PASSWORD"],
+)
+print(json.dumps({"id": str(user.pk)}))
+' '''
+outputs = { id = true }
+
+[qa.accounts.login]
+kind = "command"
+run = '''python3 manage.py shell --verbosity 0 -c '
+import json
+import os
+from django.test import Client
+
+client = Client(enforce_csrf_checks=True, HTTP_HOST="localhost")
+client.get("/accounts/login/")
+response = client.post("/accounts/login/", {
+    "username": os.environ["QA_EMAIL"],
+    "password": os.environ["QA_PASSWORD"],
+    "csrfmiddlewaretoken": client.cookies["csrftoken"].value,
+})
+if response.status_code != 302 or "sessionid" not in client.cookies:
+    raise SystemExit("login failed")
+print(json.dumps({"cookies": {
+    name: client.cookies[name].value for name in ("sessionid", "csrftoken")
+}}))
+' '''
+outputs = { cookies = ["sessionid", "csrftoken"] }
+
+[qa.accounts.delete]
+kind = "command"
+run = '''python3 manage.py shell --verbosity 0 -c '
+import os
+from django.contrib.auth import get_user_model
+
+get_user_model().objects.filter(
+    pk=os.environ["QA_ID"], email=os.environ["QA_EMAIL"],
+).delete()
+print("{}")
+' '''
+```
+
+A BE write sends `Cookie: $QA_USER_COOKIE` and `X-CSRFToken: $QA_USER_COOKIE_CSRFTOKEN`. In general the latter name is `QA_<P>_COOKIE_CSRFTOKEN`. Never copy cookie values into a plan or the command text. The command receives credentials privately through its environment and returns them to the engine, not chat. Its create/delete commands operate on the real configured database, so this setup requires disposable data.
+
+### Explicit static accounts from `.av/secrets.local.env`
+
+Pre-existing non-privileged test accounts can be used when signup is unavailable. This example assumes the JWT `/login` contract above; static accounts are not created or deleted by QA.
+
+```toml
+version = 1
+
+[env.targets]
+backend = "http://localhost:8000"
+
+[qa]
+fix = "approve"
+mutations = "rejections-only"
+
+[qa.accounts.static.user]
+email = "file:.av/secrets.local.env#QA_USER_EMAIL"
+password = "file:.av/secrets.local.env#QA_USER_PASSWORD"
+id = "file:.av/secrets.local.env#QA_USER_ID"
+
+[qa.accounts.login]
+kind = "http"
+target = "backend"
+method = "POST"
+path = "/login"
+json = { email = "{email}", password = "{password}" }
+expect = [200]
+token = ".token"
+```
+
+Populate `QA_USER_EMAIL`, `QA_USER_PASSWORD` and `QA_USER_ID` privately in that git-ignored dotenv file. `id` is optional: remove the source if the plan does not need an ID. No exported harness variables or harness restart is needed. Static does not mean preauthenticated: the login still runs on provisioning and every tester dispatch.
+
+### Read-only test/report
+
+For anonymous read scenarios on an already-running app, with no account or service lifecycle commands:
+
+```toml
+version = 1
+
+[env.targets]
+backend = "http://localhost:8000"
+ui = "http://localhost:5173"
+
+[qa]
+fix = "off"
+mutations = "deny"
+```
+
+This disables source fixes, guards detected writes and prevents provisioning; `fix = "off"` skips the dirty-tree gate. Authenticated plans need explicit static accounts; configured login recipes can themselves mutate session state, so review them separately. Static mutation detection is not a guarantee of read-only behavior (GET side effects and implicit UI writes remain possible).
+
+### Supabase local stack
+
+Supabase's local stack exposes the GoTrue admin API on `:54321`; the service-role key stays engine-only. The anon key can reach testers when referenced by a plan. These sources require the Supabase CLI and `jq`; QA does not install them.
+
+```toml
+version = 1
+
+[env.targets]
+ui = "http://localhost:5173"
+backend = "http://localhost:8000"
+supabase = "http://127.0.0.1:54321"
+
+[env.services]
+health = ["backend:/health", "ui:/"]
+
+[env.secrets]
+SERVICE_KEY = "cmd:supabase status --output json | jq -r .SERVICE_ROLE_KEY"
+
+[env.values]
+SUPABASE_ANON_KEY = "cmd:supabase status --output json | jq -r .ANON_KEY"
+
+[env.database]
+kind = "postgres"
+host = "127.0.0.1"
+port = 54322
+user = "postgres"
+name = "postgres"
+password = "literal:postgres"
+
+[qa]
+fix = "approve"
+mutations = "allow"
+
+[qa.accounts]
+personas = ["user", "other"]
+email = "qa+{run}-{persona}@test.local"
+
+[qa.accounts.create]
+kind = "http"
+target = "supabase"
+method = "POST"
+path = "/auth/v1/admin/users"
+headers = { apikey = "{secret.SERVICE_KEY}", Authorization = "Bearer {secret.SERVICE_KEY}" }
+json = { email = "{email}", password = "{password}", email_confirm = true }
+expect = [200, 201]
+id = ".id"
+
+[qa.accounts.login]
+kind = "http"
+target = "supabase"
+method = "POST"
+path = "/auth/v1/token?grant_type=password"
+headers = { apikey = "{value.SUPABASE_ANON_KEY}" }
+json = { email = "{email}", password = "{password}" }
+expect = [200]
+token = ".access_token"
+
+[qa.accounts.delete]
+kind = "http"
+target = "supabase"
+method = "DELETE"
+path = "/auth/v1/admin/users/{id}"
+headers = { apikey = "{secret.SERVICE_KEY}", Authorization = "Bearer {secret.SERVICE_KEY}" }
+expect = [200, 204]
+```
+
+The database fields use the Supabase CLI's default local Postgres connection. A plan can send `Authorization: Bearer $QA_USER_TOKEN`, use `$QA_OTHER_TOKEN` for ownership checks and name `supabase` explicitly for auth requests. HTTP login/delete placeholders resolve even if the plan never references `$QA_SUPABASE_ANON_KEY`. Add repository-grounded service lifecycle commands only for managed bring-up; this example checks an already-running stack.
+
 ## Trust
 
-Each plugin pins the effective settings it reads that can execute commands, read the user's environment/files or widen its own gates. The shared subset includes:
-
-- Every source string in `[env]`, including literals.
-- The configured `env.services` table, including probes and lifecycle commands.
-- The configured `env.source_env` dependency table.
-- Every non-loopback target origin.
-- A non-loopback `env.database.host`.
-
-The plugin adds its own sources, recipes and gate-setting keys. QA's pinned keys are documented in its [configuration guide](plugins/qa.md#configuration). Changing another plugin's table does not invalidate QA's trust; changing shared sensitive settings does affect each consumer's pin.
-
-The hash is SHA-256 over the **full, unmasked canonical JSON** of that subset. The displayed `trust_subset` masks every `literal:` payload as `literal:***`; recipe headers and bodies keep source placeholders instead of resolved values. Masking is only for display: changing a literal changes the hash even though both previews show `literal:***`. The pin covers source definitions, not the output of a command or the current contents of an environment variable/dotenv key.
-
-Pins live outside branch content at `~/.local/state/av-marketplace/trust.json`, or `${XDG_STATE_HOME}/av-marketplace/trust.json` when that variable is set. They are keyed by the repository root's **realpath and plugin name**; each worktree trusts separately.
+QA pins every source string, every account recipe, `env.services`, non-loopback target origins and database hosts, and configured `qa.fix` and `qa.mutations`. Pins live outside branch content at `~/.local/state/av-marketplace/trust.json` (or `${XDG_STATE_HOME}/av-marketplace/trust.json`), keyed by repository realpath and plugin name; each worktree trusts separately.
 
 | Reported `trust` | Meaning |
 |---|---|
@@ -203,7 +433,7 @@ Pins live outside branch content at `~/.local/state/av-marketplace/trust.json`, 
 | `trusted` | The current subset matches the recorded hash. |
 | `changed` | A pin exists, but the effective subset has changed. |
 
-For `new` or `changed`, display the complete subset and ask once before running anything it authorizes. On approval, `trust accept <hash>` records the displayed `trust_hash` only if the current subset still hashes to it; otherwise it stops and requires a fresh preview. Declining leaves trust unchanged. Accepting a pin does not bypass the plugin's other approval or mutation gates.
+The hash covers full, unmasked canonical JSON, while `trust_subset` masks literal payloads. Review the complete subset for `new` or `changed`, then approve once; `trust accept <hash>` records it only if the current subset still matches. Pins cover source definitions, not command output or current dotenv/environment values, and never bypass other approval or mutation gates.
 
 ### Headless runners and CI
 
@@ -223,49 +453,7 @@ python3 "$QA_ENGINE" trust accept "$APPROVED_TRUST_HASH" --repo "$PROJECT_ROOT"
 
 | Table | Owner and key reference |
 |---|---|
-| `[env]` | Shared environment; [schema above](#shared-env-schema). |
-| `[qa]` | QA; [configuration keys, defaults, recipes and pinned gates](plugins/qa.md#configuration). |
+| `[env]` | Shared environment; [this page](#configuration). |
+| `[qa]` | QA; [policy](#qa-policy) and [test accounts](#test-accounts). |
 
-Only QA is configurable in this release. Register future plugin tables here with a link to their full key reference; do not put plugin-specific policies or recipes in `[env]`.
-
-## Making a plugin configurable
-
-1. **Own exactly one top-level table named after the plugin**, such as `[qa]`. Use the root `version` and shared `[env]` schema; read settings only from `.av/config.toml` and `.av/local.toml`, with private values obtained through sources. Do not introduce a plugin-specific config directory or parallel file convention.
-2. **Validate only your table plus the shared schema.** Ignore other plugins' top-level tables; preserve the warning-only treatment of unknown `[env]` sub-tables. Report `state`, `provenance`, file/key diagnostics and masked trust metadata through your engine.
-3. **Pin capabilities before use.** Combine the shared sensitive subset with your sources, executable recipes and keys that widen gates. Scope acceptance by repository and plugin; never resolve a source or run an untrusted command while inspecting config.
-4. **Use the bootstrap protocol below** from the plugin's entry command in `create`, `extend` and `repair` situations. Reuse the generic loader and environment detector, adding only your table's validation, recipes and policy questions.
-5. **Register and document the change together.** Add your table and key-reference link to this page's registry, and document every plugin-owned key, type, default, allowed value, validation error and trust-pinned gate in the plugin guide. Any new shared `[env]` keys must be documented here as well. Update this page in the same change that makes the plugin configurable.
-
-## Bootstrap protocol
-
-The bootstrap belongs in a configurable plugin's entry command, not in a separate init command. Its modes are:
-
-| Mode | Trigger | Input |
-|---|---|---|
-| `create` | The shared file or the plugin's table is missing. | Required names from the work document, if one exists, and plugin creation-time policy choices. |
-| `extend` | The requested work needs configuration keys that are absent. | Exactly those missing keys. |
-| `repair` | A configured recipe or health probe fails. | The failing keys, probes and safe engine error. |
-
-An invalid config is reported and stopped, not overwritten as a missing config. A headless caller stops with a pointer to `docs/configuration.md`; it does not invent answers or write a proposal without approval.
-
-1. **Read-only proposal.** The author uses Read, Grep and Glob with the shared environment skill and the plugin-specific layer. It never runs candidate commands or reads secret values, and never reads or edits `.av/local.toml`. It uses provenance to stop on blocking local overrides. It preserves existing names, unrelated keys, other plugins' sections and comments byte-for-byte. Every proposed target, command and recipe cites its repository evidence in a TOML comment. Unknown facts become questions, not guessed ports, credentials or commands.
-2. **Transaction and questions.** Return `{proposal, questions[]}`. The proposal contains `config_text` (the full proposed `.av/config.toml`), `gitignore_add` (only the exact `.av/local.toml` and `.av/secrets.local.env` strings when needed; all other paths, negations and wildcards are rejected) and `allowed_keys` (the smallest authorized dotted-key scopes). In `create`, add only the shared keys the work needs plus the plugin's table, and collect unresolved prerequisites and creation-time policy choices together. The bootstrap never creates or fills `.av/secrets.local.env`; unresolved values become `file:.av/secrets.local.env#NAME` references.
-3. **Preview without writes.** `config preview <proposal>` validates the merged config and proposed ignore rules, checks that only `allowed_keys` change and protected sections/comments remain byte-identical, and returns a `diff` covering both the masked `.av/config.toml` changes and every `.gitignore` addition, the **complete resulting trust subset**, its hash and a snapshot of `.av/config.toml` and `.gitignore`. The ignore diff omits unrelated existing lines. Include sensitive settings already in `[env]`, even if another plugin added them; mask literals. On preview errors, allow one corrected read-only proposal round, then stop if errors remain.
-4. **One approval.** Show the diff, ignore additions and complete trust subset together and ask for one confirmation of the write and trust hash. Declining writes nothing. Creation-time policy questions precede this confirmation; they do not replace it.
-5. **Compare-and-swap apply.** `config apply <proposal> --snapshot S --approved-hash H` applies only the approved preview. If either file changed since preview, it writes nothing and reports a conflict. Otherwise it replaces the files atomically, revalidates and records trust **only for the approved hash**. Validation/hash failures restore the prior files only while they still contain the engine's own writes; concurrent edits are left intact and reported. Do not bypass preview or accept a different hash during apply.
-6. **Missing private inputs.** If the work needs dotenv keys that are not populated, name the keys for the user to fill and stop without printing or asking for their values. Then re-check the work against the resulting config. A plugin repairing an active run must follow its own cleanup/restart contract before using the changed configuration.
-
-## Shared code
-
-The plugin-neutral implementation currently lives in QA:
-
-- [`plugins/qa/skills/engine/scripts/av_config/`](../plugins/qa/skills/engine/scripts/av_config/): `files.py` owns loading/merge, provenance and shared `[env]` validation; `sources.py` owns value sources, restrictions and masking; `origins.py` owns origins/loopback; `trust.py` owns per-plugin pins; `transaction.py` owns section-preserving guarded writes. The package has no QA imports. Consumers import from the owning module; its `__init__.py` does not re-export the old monolithic API.
-- [`plugins/qa/skills/env-config/`](../plugins/qa/skills/env-config/SKILL.md): read-only repository detection and proposal rules for `[env]`, with no QA policy or recipe logic.
-
-Consumers pass their declared value-source key pattern to `av_config.sources.mask` and `av_config.transaction.ConfigTransaction`; the shared layer does not infer source positions from string contents. The same pattern applies to nested configuration tables, dotted trust-subset keys and persisted run metadata.
-
-Schema validators register each value source with `Configuration.source(value, key, secret=..., literal_allowed=...)`. It records a `SourceRule` with the key's effective-file provenance and restrictions. Consumers resolve through `Configuration.resolve(source, key, trusted=..., execute=...)`, which revalidates under that recorded rule and rejects any key the validator did not register; they must not infer restrictions from key names again.
-
-The optional executor receives `(command, key)` and returns decoded stdout, raising a safe `ConfigError` on execution failure. Without it, `av_config` uses its bounded subprocess executor. The shared resolver strips trailing newlines and rejects empty command output in both cases. QA supplies an executor that injects transitive `QA_`/`AV_` dependencies and logs only exit/line-count summaries on success, never source stdout/stderr; failed source output is discarded. Its runtime keeps only trust checks, caching and cycle detection around the shared resolution entry point.
-
-When the **second configurable plugin** is introduced, extract this generic layer into a small core plugin the consumers require, or ship byte-identical copies checked in CI. Choose that packaging then; do not create a second loader or `[env]` detector. Each plugin keeps only its call site and its own table's validation, recipes and policy choices.
+Register a new plugin's table here with a link to its full key reference; keep plugin-specific policies and recipes out of `[env]`.
