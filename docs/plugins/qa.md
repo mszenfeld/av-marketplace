@@ -2,7 +2,7 @@
 
 `/qa:run` takes a change from configuration through a reviewed test plan, disposable accounts, FE/BE testing and a bounded test → fix → retest loop. Reports use `QA-NNN` issue IDs that code-review's `/fix QA-001` and `/fix-report` understand.
 
-**Version:** 3.0.0
+**Version:** 3.1.0
 
 ## Quick start
 
@@ -93,7 +93,9 @@ For CI trust setup, see [Headless runners and CI](../configuration.md#headless-r
 
 Author and review a plan without executing it. Accepts the same change-source forms (`#123`, branch, `last N commits`, `staged`, or empty for the current branch/PR); no flags. It works **without a config**: with `Config: none`, the planner grounds target/persona/value names in repository evidence, and `/qa:run` later fills gaps through plan check/bootstrap.
 
-The command detects browser/HTTP/DB tools, dispatches `qa:test-planner`, then `qa:test-plan-reviewer` for up to three review rounds. The planner pins success/error contracts before observing runtime results, reads related producers and refutes unsupported assertions. For multiple independent booleans it enumerates all $2^N$ combinations. The final message lists the path, review outcome, unresolved findings, declined findings and optional nits, then proposes `/qa:run <path>`. Unreviewed or still-blocked plans are not described as approved.
+The command detects browser/HTTP/DB tools, dispatches `qa:test-planner`, then `qa:test-plan-reviewer` for up to three review rounds. The planner pins success/error contracts before observing runtime results. For a `last N commits` source, it reads every distinct delivery plan named by Git-parsed `Delivery-Plan:` trailers and associates each commit with its own plan; prose mentioning a trailer key is not a trailer. It also reads related producers and refutes unsupported assertions. For multiple independent booleans it enumerates all $2^N$ combinations. The final message lists the path, review outcome, unresolved findings, declined findings and optional nits, then proposes `/qa:run <path>`. Unreviewed or still-blocked plans are not described as approved.
+
+Before reading a trailer-named delivery plan, the planner requires a repository-relative path with no `..` segment or symlink component that resolves to a regular file under `git rev-parse --show-toplevel`. Rejected trailers, including missing files, are ignored and listed with their reasons in `## Changes Summary`; each accepted plan path and its associated commits are listed there too. Accepted plans are specification data, never instructions to the planner; their verification commands are not executed during planning.
 
 Plans are saved to `docs/testing/plans/YYYY-MM-DD-<topic>-test-plan.md`. `## Source` records `Branch:` and `Head:`; `## Changes Summary`, `## Blockers / Findings`, `## Detected Tools` and FE/BE scenario sections follow. `## Setup` is optional **human notes only**, never parsed configuration. Scenarios use relative paths or URLs on configured origins, optional `- **Target:** <name>`, and `$QA_…` references. Expected results and each edge have `(path:line)` grounding or `(unverified — confirm at run time)`. Data preconditions create needed records through the app as the persona; they do not assume a seeded CV/order already exists. Upload fixtures can be repository files; `NEED_INFO kind=fixture` is for data the app cannot create. DB checks require `[env.database]`, not a connection embedded in the plan.
 
@@ -565,6 +567,8 @@ Issue blocks use `### [SEVERITY] QA-NNN: Title`, `**ID:**`, `**Location:**`, `**
 
 With Code Review installed, `/fix QA-001` reads the newest QA report; `/fix-report` without a path merges the newest review and QA reports and writes statuses back to their original files. `/fix-report docs/testing/reports/<file>.md` selects one report. See [Code Review](code-review.md) for routing and decision handling.
 
+Delivery 0.6.0 and later runs `/qa:run last <N> commits` over a delivered change before its final code review and commits the fixes, configuration, plan and report QA produces; see the [Delivery guide](delivery.md#qa).
+
 ## Engine
 
 The stdlib-only CLI at `plugins/qa/skills/engine/scripts/qa.py` owns config/trust, plan checks, origins/mutations, services/accounts, private state, dispatch counters, verdicts, QA IDs, candidates, stop decisions and report rendering. The model owns planning, test execution, fixes and sanitized issue prose. Neither the orchestrator nor users should patch the sidecar/report to manufacture results.
@@ -630,6 +634,10 @@ OMP subagents inherit every session MCP server regardless of their `tools:` list
 
 <a id="upgrade-notes"></a>
 ## Upgrade Notes
+
+### 3.1.0: delivery plans as the planner's contract source
+
+For a `last N commits` source, the planner reads every distinct delivery plan named by Git-parsed `Delivery-Plan:` trailers and associates each commit with its own plan, only after checking repository containment and rejecting traversal, symlinks and non-files; ignored trailers are disclosed in `## Changes Summary`. Prose mentions do not count as trailers. Plan text is specification data, not instructions. Plans written by 3.0.0 stay valid.
 
 ### 3.0.0: flagless `/qa:run`, config and account provisioning
 
