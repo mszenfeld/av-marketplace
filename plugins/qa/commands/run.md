@@ -37,7 +37,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/engine/scripts/qa.py <subcommand> <argument
 
 In OMP resolve `realpath skill://qa:engine/scripts/qa.py` and substitute the returned absolute script path in **every** call below. Do not run the project's own `qa.py`, guess an installation path or use `CLAUDE_PLUGIN_ROOT` in OMP. Internal engine switches are not `/qa:run` options. Engine-returned paths and dispatch IDs are authoritative.
 
-**Ask capability, not Bash stdin, decides interactivity.** Use `AskUserQuestion` (OMP: `ask`) for every human gate. An unavailable tool or a question the harness cannot deliver makes this invocation headless for the rest of the run. Never manufacture an answer, choose a likely option on behalf of the user, or treat an absent ask tool as consent; this fail-closed rule also applies when executing as a subagent. Do not run a TTY probe. Headless behavior is specified at each gate below; notably, `qa.policy.fix = "approve"` still tests and reports but applies no fixes.
+**Ask capability, not Bash stdin, decides interactivity.** Use `AskUserQuestion` (OMP: `ask`) for every human gate. An unavailable tool or a question the harness cannot deliver makes this invocation headless for the rest of the run. Never manufacture an answer, choose a likely option on behalf of the user, or treat an absent ask tool as consent; this fail-closed rule also applies when executing as a subagent. Do not run a TTY probe. Headless behavior is specified at each gate below; notably, `qa.fix = "approve"` still tests and reports but applies no fixes.
 
 **Mandatory stop recording and cleanup:** once `run start` succeeds, every stop, abort or error calls `run stop --run <run> --reason <reason> [--detail <safe-diagnostic>]` **before** flushing the partial report and entering Step 12. Use `user-abort` for a declined gate/interrupt, `config-drift` for `config changed during run`, `login-failure` for a tester-dispatch login failure, `plan-changed` for a plan hash mismatch, `cleanup-error` for failed teardown/down, and `other` for remaining errors, headless hard stops or engine stop decisions. Detail contains only sanitized engine diagnostics, failing probe names/statuses or a short explanation, never values, headers or raw command/recipe output; the engine flattens it to one line. A repeated stop preserves the original reason. The engine summary, not narration beside it, owns `Stopped`. Do not repair state or keep testing against drifted config. Flush without `--final`; a recorded stop cannot write new Status lines even if `--final` is requested.
 
@@ -84,13 +84,13 @@ Run `plan check <plan>`.
 
 ### Step 4: Working-tree safety
 
-When `qa.policy.fix != "off"`, use the tracked-modified paths captured **before Step 1**, not a new diff after config bootstrap. `run start --baseline-file <baseline-file>` persists them as `pre_loop_dirty`; never write them into the sidecar yourself. On a repair restart the engine reads the persisted first-pass baseline through `--baseline-run <ended-run-id>`, instead of re-reading the changed tree.
+When `qa.fix != "off"`, use the tracked-modified paths captured **before Step 1**, not a new diff after config bootstrap. `run start --baseline-file <baseline-file>` persists them as `pre_loop_dirty`; never write them into the sidecar yourself. On a repair restart the engine reads the persisted first-pass baseline through `--baseline-run <ended-run-id>`, instead of re-reading the changed tree.
 
-For a non-empty set, follow `qa.policy.dirty_tree`:
+For a non-empty set, follow `qa.fix`:
 
-- `abort`: stop, naming the pre-existing changes.
-- `ask`: warn that fixes may overlap the user's work and ask **Proceed** / **Abort**. Headless treats `ask` as `abort`.
-- `allow`: proceed, but retain the baseline; this never authorizes whole-tree recovery.
+- `fix = "off"`: skip this step.
+- `fix = "approve"`: warn that fixes may overlap the user's work and ask **Proceed** / **Abort**. Headless aborts.
+- `fix = "auto"`: proceed with the recorded baseline; this never authorizes whole-tree recovery.
 
 A successful config bootstrap's own `.av/config.toml` and `.gitignore` changes are not pre-existing user dirt. On a repair restart retain the first pass's `pre_loop_dirty`; do not add this invocation's fix edits or bootstrap changes to that baseline, and do not treat them as a fresh dirty-tree failure.
 
@@ -107,7 +107,7 @@ After success, cleanup is compulsory even if all later work fails.
 
 Run `services check --run <run>`.
 
-If probes fail and `up` is configured, ask once whether to start/prepare the configured services; `qa.policy.fix = "auto"` prints the scope and proceeds without a question, while headless with any other fix policy records `run stop --run <run> --reason other` with the failing probes and goes to Step 12. **Decline → `run stop --run <run> --reason user-abort` with the failing probes, then Step 12; never enter repair after a decline.** Approval → `services up --run <run>`, `services prepare --run <run>`, then re-check. Track whether this run executed `up`, so only its own services are stopped later.
+If probes fail and `up` is configured, ask once whether to start/prepare the configured services; `qa.fix = "auto"` prints the scope and proceeds without a question, while headless with any other fix policy records `run stop --run <run> --reason other` with the failing probes and goes to Step 12. **Decline → `run stop --run <run> --reason user-abort` with the failing probes, then Step 12; never enter repair after a decline.** Approval → `services up --run <run>`, `services prepare --run <run>`, then re-check. Track whether this run executed `up`, so only its own services are stopped later.
 
 Still down, no usable bring-up, or a lifecycle recipe error → interactive: **Config bootstrap** in `repair` mode with the error/failing probes; headless → stop with those diagnostics. A successful repair follows **Repair restart**, not an in-place continuation.
 
@@ -127,11 +127,11 @@ Print all remaining `need_info` service/tool/fixture gaps grouped by kind, names
 
 Load `qa:report-format` for issue prose/severity conventions, not to recompute verdicts or render the report by hand. Follow **Issue prose and report** below: `issues`, write entries only for newly assigned keys, then `report --run <run> --issues <issues-file>`.
 
-If there are zero failures at or above `qa.policy.min_severity`, go directly to Step 12, skipping fixes and the final run. Relay the engine's zero-failure, all-unverified and shallow-coverage messages rather than converting an all-SKIP/NEED_INFO human-authored plan to a pass. Coverage is disclosure, never a green-to-red gate.
+If there are zero failures, go directly to Step 12, skipping fixes and the final run. Relay the engine's zero-failure, all-unverified and shallow-coverage messages rather than converting an all-SKIP/NEED_INFO human-authored plan to a pass. Coverage is disclosure, never a green-to-red gate.
 
 ### Step 10: Iterations and fix step
 
-`qa.policy.fix = "off"`, or headless `approve` → Step 12 without opening fix work or performing a final run; disclose **test/report only** and why no fix was applied.
+`qa.fix = "off"`, or headless `approve` → Step 12 without opening fix work or performing a final run; disclose **test/report only** and why no fix was applied.
 
 Otherwise loop on `iteration open --run <run>`:
 
@@ -209,7 +209,7 @@ Keep this recovery wording:
 >
 > **Changes remain uncommitted for your control.**
 
-Use the engine's accumulated eligible paths, safely quoted with `--`, for the placeholder; this is a hint for the user, **never an instruction to restore automatically**. Never print whole-tree recovery, including with `qa.policy.dirty_tree = "allow"`. If the set is empty, state that the loop touched nothing to recover. For overlap, retain this wording with the engine's paths:
+Use the engine's accumulated eligible paths, safely quoted with `--`, for the placeholder; this is a hint for the user, **never an instruction to restore automatically**. Never print whole-tree recovery, including under `qa.fix = "auto"`. If the set is empty, state that the loop touched nothing to recover. For overlap, retain this wording with the engine's paths:
 
 > Note: <files> were already modified before the loop and also edited by a fix — left untouched for you to reconcile (not included in scoped recovery).
 
@@ -232,7 +232,7 @@ Secrets file: <dir>/secrets.env
 Secrets JSON: <dir>/secrets.json
 Redact names file: <dir>/redact-names
 Targets:
-<name> = <origin>, one per line; default for this section: <name>
+<name> = <origin>, one per line; default for this section: <name> — config.defaults.FE for FE, config.defaults.BE for BE
 Database: <postgres|mysql|sqlite|none>
 Guarded: <scenario IDs marked mutation-guard, or none>
 
@@ -265,7 +265,7 @@ Use `mkdir -p docs/testing/reports` if the directory is absent, then `report --r
 Interactive only. This is the generic `qa:env-config` detection/write contract plus the QA layer implemented by the read-only `qa:config-author`; do not establish another environment detector.
 
 1. Dispatch `qa:config-author` with `Mode: create|extend|repair`, safe `config` metadata including provenance, and the selected `Plan:` or `none`. `extend` adds `Missing:` with exactly the plan-check gaps; `repair` adds `Failure:` with the engine error/failing probes and affected keys. It may read only repository evidence with Read/Grep/Glob: **never execute a candidate command, probe a recipe or read a secret value**. Each proposed target/command/recipe must cite its repository source in a TOML comment. The return is `{proposal, questions[]}`.
-2. `proposal: null`, inaccessible evidence or an intended key supplied by `.av/local.toml` → stop and name the blocker/local key; a shared edit cannot override it. Never read/edit personal config or widen the proposal to evade provenance. In `create` only, ask the two returned policy questions **in one ask call** (disposable data and fix handling), then apply the answers to the transaction. Recommend mutations `allow` only when every target is loopback **and** the user confirms disposability; otherwise retain the safe proposal. Do not reopen policy during extend/repair.
+2. `proposal: null`, inaccessible evidence or an intended key supplied by `.av/local.toml` → stop and name the blocker/local key; a shared edit cannot override it. Never read/edit personal config or widen the proposal to evade provenance. In `create` only, ask the two returned policy questions **in one ask call**: disposable data → `qa.mutations` (`allow` only when every target is loopback and the user confirms the data is disposable, else `rejections-only`, with `deny` as the no-writes choice) and fix handling → `qa.fix`, then apply the answers to the transaction. Do not reopen policy during extend/repair.
 3. Save the proposal transaction with Write to a temporary JSON file, not directly to `.av/config.toml` or `.gitignore`. It contains full `config_text`, only necessary `gitignore_add` entries for `.av/local.toml` / `.av/secrets.local.env`, and minimal `allowed_keys`. Preserve all unrelated keys/tables/comments byte-for-byte. Run `config preview <proposal-file>`.
 4. Preview errors → **one** further author round with those errors, the original scope and already answered policy choices; save and preview the revised proposal. Remaining errors → stop. Otherwise show the complete `diff` for **both `.av/config.toml` and `.gitignore`**, including every ignore addition, **and** masked resulting `trust_subset`, including existing shared commands, and ask once to **Apply and trust** / **Decline**. Decline or an undeliverable question → no shared write; stop with Step 1's configuration guidance. A proposal is not consent to run its commands.
 5. Approval → `config apply <proposal-file> --snapshot <preview-snapshot> --approved-hash <preview-trust-hash>`. Compare-and-swap conflicts write nothing; show the error and stop. Never retry against a new snapshot without approval. The engine alone writes `.av/config.toml` and `.gitignore` atomically and records the approved trust hash.
@@ -277,21 +277,21 @@ Interactive only. This is the generic `qa:env-config` detection/write contract p
 
 ### Policy modes
 
-| `qa.policy.fix` | Fix behavior | Headless behavior |
+| `qa.fix` | Fix behavior | Headless behavior |
 |---|---|---|
 | `approve` (default) | One batch gate per iteration, including flags and prior warnings. | Baseline and report only; no fix and no final run. |
 | `auto` | Scope banner; eligible source-only fixes without a batch question. | Same eligible fix loop; trust/bootstrap/lock takeover still require a real ask. |
 | `off` | Test/report only; no source fixes. | Same test/report behavior. |
 
-There is no per-fix/step mode. `qa.policy.min_severity` selects the failure floor; `qa.budget.iterations`, `dispatches` and `minutes` bound fix work. Both tester and fixer launches count; the authoritative final pass is counted but not budget-gated. Stop/no-progress/regression decisions are engine-owned, distinct from success. There is no cost/token ceiling.
+There is no per-fix/step mode. Every failing assertion is a fix candidate. The engine's fixed limits bound fix work: 3 iterations, 50 tester/fixer dispatches and 30 minutes; the authoritative final pass is counted but not limit-gated. Stop/no-progress/regression decisions are engine-owned, distinct from success. There is no cost/token ceiling.
 
-**Loop-engineering item 4 disclosure: not met.** The bar calls for a fail-closed TTY check, but an agent's Bash stdin is never a TTY. This command instead uses the ask tool as its interactive oracle, fails closed on undeliverable questions and allows headless fixes only under explicit `qa.policy.fix = "auto"`. Do not claim full conformity or silently revise the bar.
+**Loop-engineering item 4 disclosure: not met.** The bar calls for a fail-closed TTY check, but an agent's Bash stdin is never a TTY. This command instead uses the ask tool as its interactive oracle, fails closed on undeliverable questions and allows headless fixes only under explicit `qa.fix = "auto"`. Do not claim full conformity or silently revise the bar.
 
 ### Safety Guards (Apply in All Modes)
 
 - **Origins and trust:** config targets are exact HTTP(S) origins; userinfo/off-target URLs are refused, and redirects are never followed automatically. Non-loopback targets and executable/value-source config are hash-pinned outside the repository. Changed trust requires the complete-subset gate, never a host flag or a plan-authored override.
-- **Mutation policy:** `qa.policy.mutations = "deny"` guards every detected write and refuses provisioning; `rejections-only` exempts only the engine's grounded rejection-only scenarios without other writes; `allow` requires `qa.policy.disposable_data = true`. Guarded scenarios are SKIP, not fixed. An unexpected success on an exempt rejection can write once: use disposable data.
-- **Working tree:** `qa.policy.dirty_tree = ask|allow|abort` governs pre-existing tracked changes, not ownership. Recovery excludes pre-existing dirty files and discloses overlap; changes remain uncommitted and unstaged.
+- **Mutation policy:** `qa.mutations = "deny"` guards every detected write and refuses provisioning; `rejections-only` exempts only the engine's grounded rejection-only scenarios without other writes; `allow` guards nothing and is meant for disposable data. Guarded scenarios are SKIP, not fixed. An unexpected success on an exempt rejection can write once: use disposable data.
+- **Working tree:** the dirty-tree gate follows `qa.fix` (approve asks, auto proceeds with the recorded baseline, off skips); recovery excludes pre-existing dirty files and discloses overlap; changes remain uncommitted and unstaged.
 - **Plan-suspect guards (per issue):** `candidates` excludes unverified assertions and authenticated-persona `auth` failures in `auto`, while `approve` surfaces their flags for human review. A grounded sibling failure remains independently eligible. Rejected, location-less, incomplete or ambiguously mapped issues never dispatch.
 - **Verifier authority:** only fresh tester results govern verdicts; fixer self-reports and anti-hardcoding warnings are advisory. Only the final all-assertions PASS writes Fixed. Coverage says **Exercised**, not Verified, and shallow/partial coverage is disclosed without turning green red.
 - **Drift and cleanup:** plan/config drift stops rather than repinning silently. Every started run ends through recorded-config teardown and lock release, including recipe/login failures, budget stops and user aborts.

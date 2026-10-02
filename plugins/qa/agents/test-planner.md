@@ -23,7 +23,7 @@ Both modes receive `Config:` with this JSON projection of the engine's `config` 
 
 ```text
 Config:
-{"targets": <name-to-origin map>, "defaults": <section-default target names>, "personas": <provisionable persona names>, "static_personas": <static persona names>, "values": <exposed value names>, "database": <masked database metadata or null>}
+{"targets": <name-to-origin map>, "defaults": <section origins {FE, BE}>, "personas": <provisionable persona names>, "static_personas": <static persona names>, "values": <exposed value names>, "database": <masked database metadata or null>}
 ```
 
 Otherwise the block is `Config:` followed by `none`. The lists contain names only, not their values; the block contains no resolved secrets, source outputs or recipes. Use the same block throughout draft and revision. Never execute a value source, read a secret's value or edit the config.
@@ -166,7 +166,7 @@ Emit `## Blockers / Findings` after `## Changes Summary`, with `None found.` if 
 
 Read the dispatch's `Config:` block before writing scenarios:
 
-- **Targets:** use `targets` as the allowed origins and `defaults.be_target` / `defaults.fe_target` for section-relative paths. Every absolute URL anywhere in a scenario, including expectations and edge cases, must be on a configured origin (scheme, lower-cased host, explicit or default port); request and page URLs may instead be paths. Add `- **Target:** <name>` whenever the section default does not apply. Never use an absolute URL on an unknown origin.
+- **Targets:** use `targets` as the allowed origins and `defaults.FE` / `defaults.BE` for section-relative paths. Every absolute URL anywhere in a scenario, including expectations and edge cases, must be on a configured origin (scheme, lower-cased host, explicit or default port); request and page URLs may instead be paths. Add `- **Target:** <name>` whenever the section default does not apply. Never use an absolute URL on an unknown origin.
 - **Personas:** use names from `personas` and `static_personas`, with exposed fields such as `$QA_USER_EMAIL`, `${QA_USER_PASSWORD}`, `$QA_USER_TOKEN` or `$QA_USER_COOKIE`. Read the app's auth contract to choose the needed fields; the engine provisions or resolves the account and logs in, not a human Setup prerequisite.
 - **Values:** use `$QA_<X>` / `${QA_<X>}` tokens for `values`, with names upper-cased. Never use `[env.secrets]` as a tester value or copy a literal from `.env`.
 - **Database:** use the masked `database` metadata to determine whether a DB check is configured. `**DB Check:**` names no connection; `[env.database]` supplies it through the engine's private channel, and `plan check` reports `missing.database` when needed.
