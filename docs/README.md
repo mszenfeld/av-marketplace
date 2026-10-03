@@ -4,7 +4,7 @@
 
 - [Installation & Optional Tools](installation.md) — How to install the marketplace and configure optional analysis tools
 - [Oh My Pi (OMP)](oh-my-pi.md) — Installing and updating the OMP edition, recommended models per role, and the Advisor
-- [Configuration](configuration.md) — `.av/config.toml`: files, targets, services, secrets, database, QA policy, test accounts, examples and trust
+- [Configuration](configuration.md) — `.av/config.toml`: files, targets, services, secrets, stores, QA policy, users, cleanup, examples and trust
 
 ## Plugin Guides
 
@@ -15,7 +15,7 @@
 - [PHP Developer](plugins/php-developer.md) — PHP best practices, TDD, Symfony, Doctrine, DDD patterns
 - [Python Developer](plugins/python-developer.md) — Python best practices, TDD, Django, Celery, FastAPI, async patterns
 - [Plan Review](plugins/plan-review.md) — Oh My Pi only; a second model reviews every plan-mode plan before approval
-- [QA](plugins/qa.md) — Automated QA testing: code-change analysis, FE/BE test plans, Playwright + API/DB execution, code-review-compatible reports
+- [QA](plugins/qa.md) — Automated QA testing: code-change analysis, FE/BE plans, configured users, tester registration and cleanup, Playwright + API/store execution, code-review-compatible reports
 - [Security Pipeline](plugins/security-pipeline.md) — CI/CD security scanning setup (Semgrep SAST + TruffleHog)
 - [Simple Language](plugins/simple-language.md) — Scannable, plain-language replies and documents, active from session start
 - [Superutils](plugins/superutils.md) — Bounded spec triage: lens panel, challengers for criticals, approve-gated fix batches, verification of applied edits
