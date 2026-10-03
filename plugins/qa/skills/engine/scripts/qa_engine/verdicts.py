@@ -1,15 +1,12 @@
 """Pure scenario classification, assertion evaluation and verdict precedence."""
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
 import re
 from urllib.parse import urlsplit
 
-from qa_engine.plan import TOKEN
 from qa_engine.plan import Scenario
-from qa_engine.plan import persona_token
 from qa_engine.schema import AssertionRecord
 from qa_engine.schema import Gap
 from qa_engine.schema import JSON
@@ -43,23 +40,22 @@ def scenario_kind(scenario: Scenario) -> str:
     return "feature"
 
 
-def _main_result(scenario: Scenario, main: JSON, kind: str, credentialed: bool) -> tuple[str, bool]:
+def _main_result(scenario: Scenario, main: JSON, kind: str) -> tuple[str, bool]:
     statuses = scenario.expected.statuses
     if scenario.section != "BE" or kind != "feature" or main["status"] not in {"PASS", "FAIL"}:
         return main["status"], False
     if main["observed_status"] not in {401, 403} or not statuses or not 200 <= statuses[0] < 300:
         return main["status"], False
-    return ("FAIL", True) if credentialed else ("AUTH", False)
+    return "FAIL", True
 
 
-VERDICT_PRECEDENCE = (("FAIL", "fail"), ("NEED_INFO", "need-info"), ("AUTH", "auth-unverified"), ("SKIP", "skip"))
+VERDICT_PRECEDENCE = (("FAIL", "fail"), ("NEED_INFO", "need-info"), ("SKIP", "skip"))
 
 
 def _scenario_verdict(main_result: str, edges: list[JSON]) -> str:
     results = {edge["status"] for edge in edges}
     for status, verdict in VERDICT_PRECEDENCE:
-        # AUTH is an engine-only main-flow classification, never an edge result.
-        if main_result == status or (status != "AUTH" and status in results):
+        if main_result == status or status in results:
             return verdict
     return "pass"
 
@@ -70,7 +66,7 @@ def _evaluated_assertion(evaluation: Evaluation, key: str, row: JSON, result: st
         evaluation.gaps[key] = {"kind": row["kind"], "missing": row["missing"]}
 
 
-def _evaluate(scenario: Scenario, row: JSON | None, planned: int, credentialed: bool, guarded: bool) -> Evaluation:
+def _evaluate(scenario: Scenario, row: JSON | None, planned: int, guarded: bool) -> Evaluation:
     skipped: JSON = {"status": "SKIP", "observed_status": None, "crash": False, "kind": None, "missing": [], "skip_reason": None, "refutation": None}
     given: dict[int, JSON] = row["edges"] if row is not None else {}
     complete = row is not None and len(given) == planned
@@ -80,7 +76,7 @@ def _evaluate(scenario: Scenario, row: JSON | None, planned: int, credentialed: 
         # The guard excluded this scenario; a reported result is neither credited nor minted.
         main, edges = skipped, [skipped] * planned
     kind = scenario_kind(scenario)
-    main_result, auth = _main_result(scenario, main, kind, credentialed)
+    main_result, auth = _main_result(scenario, main, kind)
     verdict = _scenario_verdict(main_result, edges)
 
     skip = main if main_result == "SKIP" else next((edge for edge in edges if edge["status"] == "SKIP"), None)
@@ -100,15 +96,13 @@ def _assertion_record(outcome: JSON, result: str, auth: bool) -> AssertionRecord
 
 
 def _reason(verdict: str, guarded: bool, skip: JSON | None) -> str | None:
-    """Normalize the reason of a non-pass, non-fail verdict: ``need-info``, then ``mutation-guard``, then ``auth-unverified``, else classified from the SKIP reason prose."""
+    """Normalize non-pass, non-fail reasons from guards, gaps and SKIP prose."""
     if verdict in {"pass", "fail"}:
         return None
     if verdict == "need-info":
         return "need-info"
     if guarded:
         return "mutation-guard"
-    if verdict == "auth-unverified":
-        return "auth-unverified"
     text = skip["skip_reason"] if skip is not None else None
     if not text or text.strip().lower().startswith(("harness error:", "out of harness scope:")):
         return "cannot-confirm"
@@ -119,17 +113,5 @@ def _reason(verdict: str, guarded: bool, skip: JSON | None) -> str | None:
     return "cannot-confirm"
 
 
-def _sends_credential(scenario: Scenario, authenticated: set[str], personas: Sequence[str], login: bool) -> bool:
-    """Whether the main flow uses a credential of a persona this dispatch logged in."""
-    if not authenticated:
-        return False
-    for first, second in TOKEN.findall(scenario.main_flow):
-        recognized = persona_token(first or second, personas)
-        if recognized:
-            persona, capability = recognized
-            sends = capability == "TOKEN" or capability.startswith("COOKIE") or (login and capability in {"EMAIL", "PASSWORD"})
-            if persona in authenticated and sends:
-                return True
-    return False
 
 

@@ -2,7 +2,7 @@
 
 Parsing never resolves a value source or runs a scenario. CLI reports contain
 identifiers and sanitized origins, not scenario payloads or credential values.
-Sections and DB checks are scenario IDs in plan order. Persona gaps carry
+Sections and DB checks are scenario IDs in plan order. User gaps carry
 ``name``, ``token``, and ``reason``; value and target gaps carry config names.
 """
 from __future__ import annotations
@@ -15,8 +15,10 @@ import re
 
 from av_config.errors import ConfigError
 from av_config.origins import Origin
+from av_config.origins import is_loopback
 from av_config.origins import parse_origin
 from qa_engine.config import Config
+from qa_engine.config import CREDENTIAL_SUFFIX
 from qa_engine.config import SECTION_TARGETS
 from qa_engine.files import display_path
 from qa_engine.common import origin_display
@@ -34,8 +36,9 @@ SQL_WRITE = re.compile(r"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|CREATE|UPSERT)\b"
 WRITE_STEP = re.compile(r"\b(create|delete|update|insert|seed)\b", re.IGNORECASE)
 CITATION = re.compile(r"\((`?[^()\s]+:\d+(?:-\d+)?`?)\)")
 STATUS = re.compile(r"(?<![A-Za-z0-9_])([1-5]\d{2})(?![A-Za-z0-9_])")
-PERSONA_FIELD = re.compile(r"(?:EMAIL|PASSWORD|ID|TOKEN|COOKIE|COOKIE_[A-Z0-9_]+)\Z")
-UNKNOWN_PERSONA = re.compile(r"(.+?)_(EMAIL|PASSWORD|ID|TOKEN|COOKIE|COOKIE_[A-Z0-9_]+)\Z")
+USER_TOKEN = re.compile(r"(.+?)_(EMAIL|PASSWORD|ID)\Z")
+ENGINE_TOKENS = frozenset({"TAG", "NEW_PASSWORD"})
+USER_LINE = re.compile(r"^[ \t]*[-*][ \t]+([a-z][a-z0-9_]*)[ \t]*:[ \t]*(existing|registered)\b", re.MULTILINE)
 RELATIVE_PATH = re.compile(r"(?<![A-Za-z0-9_:/])/(?!/)[A-Za-z0-9_{?]")
 
 
@@ -87,6 +90,7 @@ class Plan:
     branch: str | None
     head: str | None
     scenarios: list[Scenario]
+    users: dict[str, str] = field(default_factory=dict)
 
     @property
     def sections(self) -> dict[str, list[str]]:
@@ -154,6 +158,18 @@ def _source(text: str) -> tuple[str | None, str | None]:
     return metadata.get("branch"), metadata.get("head")
 
 
+def _users_section(text: str) -> dict[str, str]:
+    section = re.search(r"^## Users[ \t]*$", text, re.MULTILINE)
+    if section is None:
+        return {}
+    following = re.search(r"^## ", text[section.end():], re.MULTILINE)
+    content = text[section.end():section.end() + following.start() if following else len(text)]
+    users: dict[str, str] = {}
+    for name, kind in USER_LINE.findall(content):
+        users.setdefault(name, kind)
+    return users
+
+
 def _scenario(match: re.Match[str], text: str) -> Scenario:
     fields = _fields(text)
     values = {item.name: item.text for item in fields}
@@ -213,7 +229,7 @@ def parse_plan(path: Path) -> Plan:
         start = SCENARIO.match(text, match.start())
     if start is not None:
         scenarios.append(_scenario(start, text[start.start():].rstrip()))
-    return Plan(path, branch, head, scenarios)
+    return Plan(path, branch, head, scenarios, _users_section(text))
 
 
 def resolve_plan(repo: Path, argument: str = "") -> dict[str, object]:
@@ -260,25 +276,13 @@ def resolve_plan(repo: Path, argument: str = "") -> dict[str, object]:
     return result
 
 
-def persona_token(token: str, personas: Iterable[str]) -> tuple[str, str] | None:
-    """Recognize a persona field using the longest valid configured prefix."""
+def user_token(token: str, users: Iterable[str]) -> tuple[str, str] | None:
+    """Recognize a user field using the longest declared or configured prefix."""
     name = token.removeprefix("QA_")
-    for persona in sorted(personas, key=lambda item: (-len(item), item)):
-        prefix = persona.upper() + "_"
-        if name.startswith(prefix) and PERSONA_FIELD.fullmatch(name[len(prefix):]):
-            return persona, name[len(prefix):]
-    return None
-
-
-def _persona_reason(config: Config, persona: str, capability: str) -> str | None:
-    if persona not in config.static:
-        if config.policy["mutations"] == "deny":
-            return "provisioning is forbidden under mutations=deny"
-        if "create" not in config.recipes:
-            return "qa.accounts.create is required to provision this persona"
-    if capability not in config.persona_fields(persona):
-        recipe = "create or a static id source" if capability == "ID" else "login"
-        return f"{recipe} cannot produce {capability}"
+    for user in sorted(users, key=lambda item: (-len(item), item)):
+        prefix = user.upper() + "_"
+        if name.startswith(prefix) and name[len(prefix):] in {"EMAIL", "PASSWORD", "ID"}:
+            return user, name[len(prefix):]
     return None
 
 
@@ -288,31 +292,67 @@ def _mutates(scenario: Scenario) -> bool:
     return bool(WRITE_ACTION.search(scenario.actions) or WRITE_STEP.search(scenario.other_steps) or SQL_WRITE.search(scenario.db_check or ""))
 
 
-def _token_requirements(plan: Plan, config: Config) -> tuple[set[str], set[str], dict[str, dict[str, str]], set[str]]:
-    configured = set(config.personas) | config.static.keys()
+def _token_requirements(plan: Plan, config: Config) -> tuple[set[str], set[str], set[str], dict[str, dict[str, str]], set[str], list[dict[str, str]]]:
+    known = set(plan.users) | config.users.keys()
     value_names = {name.upper(): name for name in config.values}
-    personas: set[str] = set()
+    users: set[str] = set()
+    registrations = {name for name, kind in plan.users.items() if kind == "registered"}
     values: set[str] = set()
-    persona_gaps: dict[str, dict[str, str]] = {}
+    user_gaps: dict[str, dict[str, str]] = {}
     missing_values: set[str] = set()
+    errors: list[dict[str, str]] = []
     for scenario in plan.scenarios:
+        reasons: set[str] = set()
+        for user in registrations & config.users.keys():
+            reasons.add(f"user {user} is configured; declare it existing")
         for token in scenario.tokens:
-            recognized = persona_token(token, configured)
+            name = token.removeprefix("QA_")
+            if name in ENGINE_TOKENS:
+                continue
+            credential = CREDENTIAL_SUFFIX.fullmatch(name)
+            if credential:
+                user = name[:credential.start(1) - 1]
+                reasons.add(f"tokens and cookies are obtained by the tester; use $QA_{user}_EMAIL and $QA_{user}_PASSWORD")
+                continue
+            recognized = user_token(token, known)
             if recognized:
-                persona, capability = recognized
-                personas.add(persona)
-                reason = _persona_reason(config, persona, capability)
-                if reason:
-                    persona_gaps[token] = {"name": persona, "token": token, "reason": reason}
-            elif token[3:] in value_names:
-                values.add(value_names[token[3:]])
+                user, field = recognized
+                if user not in plan.users:
+                    reasons.add(f"user {user} is configured but not declared under ## Users")
+                elif plan.users[user] == "existing":
+                    users.add(user)
+                    reason = "user is not configured" if user not in config.users else "id source is not configured" if field == "ID" and field not in config.user_fields(user) else None
+                    if reason:
+                        user_gaps[token] = {"name": user, "token": token, "reason": reason}
+            elif name in value_names:
+                values.add(value_names[name])
+            elif unknown := USER_TOKEN.fullmatch(name):
+                reasons.add(f"user {unknown.group(1).lower()} is not declared under ## Users")
             else:
-                unknown = UNKNOWN_PERSONA.fullmatch(token[3:])
-                if unknown:
-                    persona_gaps[token] = {"name": unknown.group(1).lower(), "token": token, "reason": "persona is not configured"}
-                else:
-                    missing_values.add(token[3:])
-    return personas, values, persona_gaps, missing_values
+                missing_values.add(name)
+        errors.extend({"scenario": scenario.id, "reason": reason} for reason in sorted(reasons))
+    return users, registrations, values, user_gaps, missing_values, errors
+
+
+def _cleartext_errors(plan: Plan, config: Config) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    known = set(plan.users) | config.users.keys()
+    for scenario in plan.scenarios:
+        if not any(token[3:] in ENGINE_TOKENS or user_token(token, known) for token in scenario.tokens):
+            continue
+        target = scenario.target or config.section_target(scenario.section)
+        urls = ([config.targets[target]] if target in config.targets else []) + scenario.urls
+        refused: set[str] = set()
+        for url in urls:
+            try:
+                scheme, host, port = parse_origin(url)
+            except ConfigError:
+                continue
+            if scheme == "http" and not is_loopback(host):
+                host = f"[{host}]" if ":" in host else host
+                refused.add(f"http://{host}" + (f":{port}" if port != 80 else ""))
+        errors.extend({"scenario": scenario.id, "reason": f"credentials over cleartext origin {origin}"} for origin in sorted(refused))
+    return errors
 
 
 def _missing_target(scenario: Scenario, config: Config) -> str | None:
@@ -347,12 +387,9 @@ def _mutation_guards(plan: Plan, config: Config) -> list[str]:
 
 
 def check_plan(plan: Plan, config: Config) -> dict[str, object]:
-    """Return the plan's persona and value requirements, config gaps, refused origins, and mutation guards.
-
-    Persona recognition precedes value lookup; otherwise configured values win
-    before the unknown-token field grammar determines the gap category.
-    """
-    personas, values, persona_gaps, missing_values = _token_requirements(plan, config)
+    """Return user and value requirements, configuration gaps and execution guards."""
+    users, registrations, values, user_gaps, missing_values, plan_errors = _token_requirements(plan, config)
+    plan_errors.extend(_cleartext_errors(plan, config))
     missing_targets: set[str] = set()
     db_checks: list[str] = []
     off_target: list[dict[str, object]] = []
@@ -366,13 +403,14 @@ def check_plan(plan: Plan, config: Config) -> dict[str, object]:
             db_checks.append(scenario.id)
     guarded = _mutation_guards(plan, config)
     missing = {
-        "personas": [persona_gaps[token] for token in sorted(persona_gaps)],
+        "users": [user_gaps[token] for token in sorted(user_gaps)],
         "values": sorted(missing_values), "targets": sorted(missing_targets),
         "database": bool(db_checks and not config.database),
+        "cleanup": bool(registrations) and config.cleanup_recipe is None,
     }
     return {
-        "ok": not any(missing.values()) and not off_target,
-        "sections": plan.sections, "personas": sorted(personas), "values": sorted(values),
-        "missing": missing, "off_target": off_target, "guarded": guarded,
+        "ok": not any(value for key, value in missing.items() if key != "cleanup") and not off_target and not plan_errors,
+        "sections": plan.sections, "users": sorted(users), "registrations": sorted(registrations), "values": sorted(values),
+        "missing": missing, "off_target": off_target, "plan_errors": plan_errors, "guarded": guarded,
         "db_checks": db_checks,
     }

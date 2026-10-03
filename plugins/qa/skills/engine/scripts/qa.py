@@ -22,9 +22,9 @@ if sys.version_info < (3, 11):
 from av_config.errors import ConfigError
 from av_config.errors import InvalidConfig
 from qa_engine.config import Config
-from qa_engine.accounts import provision
-from qa_engine.accounts import refresh
-from qa_engine.accounts import teardown
+from qa_engine.users import provision
+from qa_engine.users import record_account_cli
+from qa_engine.users import teardown
 from qa_engine.services import services
 from qa_engine.plan import check_plan
 from qa_engine.plan import parse_plan
@@ -145,11 +145,16 @@ def parser() -> argparse.ArgumentParser:
     iteration_operations = iteration.add_subparsers(dest="operation", required=True)
     run_option(iteration_operations.add_parser("open")).set_defaults(state_handler=_state_iteration_open)
     run_option(iteration_operations.add_parser("close")).set_defaults(state_handler=_state_iteration_close)
-    accounts = repo_option(commands.add_parser("accounts"))
-    accounts.set_defaults(handler=run_state)
-    account_operations = accounts.add_subparsers(dest="operation", required=True)
-    for operation, handler in (("provision", _state_provision), ("refresh", _state_refresh), ("teardown", _state_teardown)):
-        run_option(account_operations.add_parser(operation)).set_defaults(state_handler=handler)
+    users = repo_option(commands.add_parser("users"))
+    users.set_defaults(handler=run_state)
+    user_operations = users.add_subparsers(dest="operation", required=True)
+    for operation, handler in (("provision", _state_provision), ("teardown", _state_teardown)):
+        run_option(user_operations.add_parser(operation)).set_defaults(state_handler=handler)
+    record = run_option(user_operations.add_parser("record"))
+    record.set_defaults(state_handler=_state_record)
+    record.add_argument("--dispatch", required=True)
+    record.add_argument("--email", required=True)
+    record.add_argument("--id")
     service = repo_option(commands.add_parser("services"))
     service.set_defaults(handler=run_state, state_handler=_state_services)
     service_operations = service.add_subparsers(dest="operation", required=True)
@@ -220,10 +225,8 @@ def _state_provision(run: Run, args: argparse.Namespace) -> Mapping[str, object]
     return provision(run, config)
 
 
-def _state_refresh(run: Run, args: argparse.Namespace) -> Mapping[str, object]:
-    config = Config(run.repo)
-    check_drift(run, config)
-    return {"refreshed": refresh(run, config)}
+def _state_record(run: Run, args: argparse.Namespace) -> Mapping[str, object]:
+    return record_account_cli(run, Config(run.repo), args.dispatch, args.email, args.id)
 
 
 def _state_teardown(run: Run, args: argparse.Namespace) -> Mapping[str, object]:

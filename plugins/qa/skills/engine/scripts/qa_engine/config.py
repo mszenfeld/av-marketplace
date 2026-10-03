@@ -13,15 +13,19 @@ from av_config.trust import TrustStore
 from av_config.trust import canonical_hash
 from av_config.sources import mask
 from av_config.sources import source_subset
-from qa_engine.recipes import PLACEHOLDER
 from qa_engine.recipes import Recipe
 from qa_engine.recipes import build_recipe
-from qa_engine.recipes import cookie_name
 
-PERSONA = re.compile(r"[a-z][a-z0-9_]*\Z")
+USER_NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
+RESERVED_USER_NAMES = frozenset({"new", "captured"})
+RESERVED_USER_PREFIX = "captured_"
+RESERVED_VALUE_NAMES = frozenset({"TAG", "NEW_PASSWORD"})
+RESERVED_VALUE_PREFIX = "CAPTURED_"
+CREDENTIAL_SUFFIX = re.compile(r".+_(TOKEN|COOKIE|COOKIE_[A-Z0-9_]+)\Z")
+USER_FIELDS = ("EMAIL", "PASSWORD", "ID")
 VALUE_SOURCE_KEYS = re.compile(
     r"(?:env\.(?:secrets|values)\.[A-Za-z_][A-Za-z0-9_]*|env\.database\.password|"
-    r"qa\.accounts\.static\.[a-z][a-z0-9_]*\.(?:email|password|id))"
+    r"qa\.users\.[a-z][a-z0-9_]*\.(?:email|password|id))"
 )
 POLICY = {"fix": "approve", "mutations": "deny", "start_services": "ask"}
 FIX = ("approve", "auto", "off")
@@ -39,12 +43,6 @@ def mapping(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
-def _persona_names(value: object) -> bool:
-    if not isinstance(value, list):
-        return False
-    if not all(isinstance(name, str) and PERSONA.fullmatch(name) for name in value):
-        return False
-    return len(set(value)) == len(value)
 
 
 class Config:
@@ -67,16 +65,13 @@ class Config:
         self.qa = mapping(self.data.get("qa"))
         self.env = mapping(self.data.get("env"))
         self.targets = cast(dict[str, str], mapping(self.env.get("targets")))
-        self.accounts = mapping(self.qa.get("accounts"))
-        self.recipes: dict[str, Recipe] = {}
+        self.users = mapping(self.qa.get("users"))
+        self.cleanup = mapping(self.qa.get("cleanup"))
+        self.cleanup_recipe: Recipe | None = None
         self.policy = {**POLICY, **{key: self.qa[key] for key in POLICY if key in self.qa}}
         self.services = mapping(self.env.get("services"))
         self.values = mapping(self.env.get("values"))
         self.database = mapping(self.env.get("database"))
-        configured = self.accounts.get("personas", [])
-        self.personas = [name for name in configured if isinstance(name, str)] if isinstance(configured, list) else []
-        self.static = mapping(self.accounts.get("static"))
-        self.static_personas = sorted(self.static)
         if self.shared.exists and "qa" in self.data:
             self._validate()
         self.trust_subset = self._sensitive_subset() if not self.errors else {}
@@ -99,101 +94,64 @@ class Config:
     def _validate(self) -> None:
         validator = self.shared
         qa = validator.table(self.data["qa"], "qa")
-        validator.keys(qa, {"fix", "mutations", "start_services", "accounts"}, "qa")
-        if "accounts" in qa:
-            validator.table(qa["accounts"], "qa.accounts")
+        validator.keys(qa, {"fix", "mutations", "start_services", "users", "cleanup"}, "qa")
         for key, allowed in (("fix", FIX), ("mutations", MUTATIONS), ("start_services", START_SERVICES)):
             if key in qa and qa[key] not in allowed:
                 validator.error(f"qa.{key}", "unsupported policy value")
-        self._validate_accounts()
+        self._validate_users()
+        self._validate_cleanup()
         self._validate_names()
 
-    def _validate_accounts(self) -> None:
+    def _validate_users(self) -> None:
         validator = self.shared
-        validator.keys(self.accounts, {"personas", "email", "create", "confirm", "login", "delete", "static"}, "qa.accounts")
-        self._validate_account_templates()
-        if "static" in self.accounts:
-            validator.table(self.accounts["static"], "qa.accounts.static")
-        for persona, value in self.static.items():
-            self._validate_static_account(persona, value)
-        for name in ("create", "confirm", "login", "delete"):
-            if name in self.accounts:
-                data = validator.table(self.accounts[name], f"qa.accounts.{name}")
-                recipe = build_recipe(data, name, self)
-                if recipe is not None:
-                    self.recipes[name] = recipe
+        if "users" in self.qa:
+            validator.table(self.qa["users"], "qa.users")
+        for name, value in self.users.items():
+            prefix = f"qa.users.{name}"
+            if not USER_NAME.fullmatch(name):
+                validator.error(prefix, "invalid user name")
+            if name in RESERVED_USER_NAMES or name.startswith(RESERVED_USER_PREFIX):
+                validator.error(prefix, "reserved user name")
+            entry = validator.table(value, prefix)
+            validator.keys(entry, {"email", "password", "id", "description"}, prefix)
+            for key in ("email", "password"):
+                if key not in entry:
+                    validator.error(f"{prefix}.{key}", "required account source")
+                else:
+                    validator.source(entry[key], f"{prefix}.{key}", secret=key == "password")
+            if "id" in entry:
+                validator.source(entry["id"], f"{prefix}.id")
+            if not isinstance(entry.get("description"), str) or not entry["description"].strip():
+                validator.error(f"{prefix}.description", "expected a description")
 
-    def _validate_account_templates(self) -> None:
-        validator = self.shared
-        if "personas" in self.accounts and not _persona_names(self.accounts["personas"]):
-            validator.error("qa.accounts.personas", "expected distinct lower-case persona names")
-        if "email" in self.accounts:
-            template = self.accounts["email"]
-            if not isinstance(template, str) or not template:
-                validator.error("qa.accounts.email", "expected an email template")
-            elif any(name not in {"run", "persona"} for name in PLACEHOLDER.findall(template)):
-                validator.error("qa.accounts.email", "unsupported email placeholder")
+    def _validate_cleanup(self) -> None:
+        if "cleanup" in self.qa:
+            self.cleanup_recipe = build_recipe(self.shared.table(self.qa["cleanup"], "qa.cleanup"), "cleanup", self)
 
-    def _validate_static_account(self, persona: str, value: object) -> None:
-        validator = self.shared
-        prefix = f"qa.accounts.static.{persona}"
-        if not PERSONA.fullmatch(persona):
-            validator.error(prefix, "invalid persona name")
-        account = validator.table(value, prefix)
-        validator.keys(account, {"email", "password", "id"}, prefix)
-        for key in ("email", "password"):
-            if key not in account:
-                validator.error(f"{prefix}.{key}", "required account source")
-            else:
-                validator.source(account[key], f"{prefix}.{key}", secret=key == "password")
-        if "id" in account:
-            validator.source(account["id"], f"{prefix}.id")
-
-    def persona_fields(self, persona: str) -> set[str]:
-        """Return the fields this persona can actually supply to a tester."""
-        if persona not in self.personas and persona not in self.static:
-            return set()
-        fields = {"EMAIL", "PASSWORD"}
-        create = self.recipes.get("create")
-        static = mapping(self.static.get(persona))
-        if (persona in self.static and "id" in static) or (persona not in self.static and create is not None and "id" in create.outputs):
-            fields.add("ID")
-        login = self.recipes.get("login")
-        outputs = login.outputs if login is not None else {}
-        if "token" in outputs:
-            fields.add("TOKEN")
-        cookies = outputs.get("cookies", [])
-        if cookies:
-            fields.add("COOKIE")
-            fields.update(f"COOKIE_{cookie_name(cookie)}" for cookie in cookies if isinstance(cookie, str))
-        return fields
+    def user_fields(self, user: str) -> set[str]:
+        return {"EMAIL", "PASSWORD"} | ({"ID"} if "id" in mapping(self.users[user]) else set())
 
     def _validate_names(self) -> None:
-        seen: set[str] = set()
-        for persona in sorted(set(self.personas) | self.static.keys()):
-            upper = persona.upper()
-            if upper in seen:
-                self.shared.error("qa.accounts.personas", "persona names collide after upper-casing")
-            seen.add(upper)
         exposed: set[str] = set()
-        for persona in sorted(set(self.personas) | self.static.keys()):
-            for field in {"EMAIL", "PASSWORD", "ID", "TOKEN", "COOKIE"} | self.persona_fields(persona):
-                name = f"{persona.upper()}_{field}"
+        for user in self.users:
+            for field in self.user_fields(user):
+                name = f"{user.upper()}_{field}"
                 if name in exposed:
-                    self.shared.error("qa.accounts.personas", "persona field names collide")
+                    self.shared.error("qa.users", "user field names collide")
                 exposed.add(name)
         for name in self.values:
-            cookie_field = any(name.upper().startswith(f"{persona.upper()}_COOKIE_") for persona in set(self.personas) | self.static.keys())
-            if name.upper() in exposed or cookie_field:
+            upper = name.upper()
+            if upper in exposed or upper in RESERVED_VALUE_NAMES or upper.startswith(RESERVED_VALUE_PREFIX):
                 self.shared.error(f"env.values.{name}", "value name collides with an exposed name")
-            exposed.add(name.upper())
+            if CREDENTIAL_SUFFIX.fullmatch(upper):
+                self.shared.error(f"env.values.{name}", "value name uses a reserved credential suffix")
+            exposed.add(upper)
 
     def _sensitive_subset(self) -> dict[str, object]:
         subset = self.shared.env_sensitive_subset()
         subset.update(source_subset(self.qa, "qa"))
-        for recipe in ("create", "confirm", "login", "delete"):
-            if recipe in self.accounts:
-                subset[f"qa.accounts.{recipe}"] = self.accounts[recipe]
+        if "cleanup" in self.qa:
+            subset["qa.cleanup"] = self.qa["cleanup"]
         for key in POLICY:
             if key in self.qa:
                 subset[f"qa.{key}"] = self.qa[key]
@@ -204,10 +162,10 @@ class Config:
         report: dict[str, object] = {"state": self.state, "errors": self.errors, "warnings": self.warnings, "provenance": self.provenance, "trust": self.trust, "trust_hash": self.trust_hash, "trust_subset": mask(self.trust_subset, VALUE_SOURCE_KEYS)}
         if self.errors:
             return report
-        exposed = [f"QA_{persona.upper()}_{field}" for persona in sorted(set(self.personas) | self.static.keys()) for field in sorted(self.persona_fields(persona))]
+        exposed = [f"QA_{user.upper()}_{field}" for user in self.users for field in self.user_fields(user)]
         exposed.extend(f"QA_{name.upper()}" for name in self.values)
-        exposed.extend(DATABASE_NAMES.get(cast(str, self.database.get("kind")), []))
-        report.update({"targets": self.targets, "defaults": {"FE": self.section_target("FE"), "BE": self.section_target("BE")}, "policy": self.policy, "services": {"health": [], "up": None, "prepare": [], "down": None, **self.services}, "personas": self.personas, "static_personas": self.static_personas, "values": sorted(self.values), "exposed": sorted(exposed), "database": mask(self.database, VALUE_SOURCE_KEYS, "env.database") if self.database else None})
+        exposed.append("QA_NEW_PASSWORD")
+        report.update({"targets": self.targets, "defaults": {"FE": self.section_target("FE"), "BE": self.section_target("BE")}, "policy": self.policy, "services": {"health": [], "up": None, "prepare": [], "down": None, **self.services}, "users": {name: mapping(entry).get("description") for name, entry in self.users.items()}, "values": sorted(self.values), "exposed": sorted(exposed), "database": mask(self.database, VALUE_SOURCE_KEYS, "env.database") if self.database else None})
         return report
 
     def accept(self, approved_hash: str) -> dict[str, object]:

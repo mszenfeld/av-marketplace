@@ -12,6 +12,9 @@ while (my $name = <$names>) {
     next if $name eq 'PGPORT' || $name eq 'MYSQL_TCP_PORT'; # Connection ports are not secrets.
     my $value = $ENV{$name};
     push @DECL, $value if defined $value && length($value) >= 4;
+    if (defined $value && $name =~ /_COOKIE(?:_[0-9]+)?\z/ && $value =~ /^[^=]*=([^;]+)/) {
+        push @DECL, $1 if length($1) >= 3; # Cookies may be echoed without their name or attributes.
+    }
 }
 close $names;
 local $/; my $in = <STDIN>; $in = '' unless defined $in;

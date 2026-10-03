@@ -28,24 +28,15 @@ ui = "http://localhost:5173"
 supabase = "http://127.0.0.1:54321"
 [qa]
 '''
-ACCOUNTS = '''[qa.accounts]
-personas = ["user", "other"]
-email = "qa+{run}-{persona}@test.local"
-[qa.accounts.create]
-kind = "http"
-target = "supabase"
-method = "POST"
-path = "/auth/v1/admin/users"
-expect = [201]
-id = ".id"
-[qa.accounts.login]
-kind = "http"
-target = "supabase"
-method = "POST"
-path = "/auth/v1/token"
-expect = [200]
-token = ".access_token"
-cookies = ["sessionid", "csrftoken", "__Host-session"]
+USERS = '''[qa.users.admin]
+email = "literal:admin@test.local"
+password = "env:QA_ADMIN_SECRET"
+id = "literal:admin-1"
+description = "administrator"
+[qa.users.viewer]
+email = "literal:viewer@test.local"
+password = "env:QA_VIEWER_SECRET"
+description = "read-only viewer"
 '''
 SCENARIO = '''### BE-01: List CVs
 - **Writes:** no
@@ -119,10 +110,10 @@ class PlanTests(unittest.TestCase):
         self.assertEqual((create.method, create.path), ("POST", "/api/v1/documents"))
         self.assertEqual(create.expected.statuses, [201])
         self.assertEqual([edge.statuses for edge in create.edges], [[422], [401]])
-        self.assertEqual(create.tokens, ["QA_USER_TOKEN", "QA_USER_ID"])
+        self.assertEqual(create.tokens, ["QA_TAG", "QA_NEW_PASSWORD", "QA_USER_ID"])
         self.assertIn("SELECT COUNT(id)", create.db_check)
-        self.assertEqual(profile.urls, ["http://127.0.0.1:54321/auth/v1/user"])
-        self.assertIn("QA_OTHER_PASSWORD", profile.tokens)
+        self.assertEqual(profile.urls, ["http://127.0.0.1:54321/auth/v1/user", "http://127.0.0.1:54321/auth/v1/signup"])
+        self.assertIn("QA_NEW_PASSWORD", profile.tokens)
 
     def test_parser_ends_blocks_at_non_scenario_headings_and_ignores_setup(self) -> None:
         body = """## Setup
@@ -187,15 +178,15 @@ curl -X POST http://evil.test/x -H "Authorization: Bearer $QA_NOPE_TOKEN"
                     "scenario": "BE-01", "origin": "http://evil.test:80",
                     "reason": "origin is not a configured target",
                 }])
-                self.assertEqual(result["missing"]["personas"], [{
-                    "name": "nope", "token": "QA_NOPE_TOKEN",
-                    "reason": "persona is not configured",
+                self.assertEqual(result["plan_errors"], [{
+                    "scenario": "BE-01",
+                    "reason": "tokens and cookies are obtained by the tester; use $QA_NOPE_EMAIL and $QA_NOPE_PASSWORD",
                 }])
                 self.assertEqual(result["db_checks"], ["BE-01"])
                 self.assertTrue(result["missing"]["database"])
 
-    def test_fixture_checks_three_targets_two_personas_one_value_and_database(self) -> None:
-        config = self.config('mutations = "allow"\n' + ACCOUNTS + '''[env.values]
+    def test_fixture_checks_targets_registered_users_values_and_database(self) -> None:
+        config = self.config('mutations = "allow"\n' + '''[env.values]
 SUPABASE_ANON_KEY = "literal:public-key"
 [env.database]
 kind = "postgres"
@@ -208,7 +199,8 @@ password = "literal:postgres"
         result = check_plan(parse_plan(FIXTURE), config)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["sections"], {"FE": ["FE-01"], "BE": ["BE-01", "BE-02"]})
-        self.assertEqual(result["personas"], ["other", "user"])
+        self.assertEqual(result["users"], [])
+        self.assertEqual(result["registrations"], ["other", "user"])
         self.assertEqual(result["values"], ["SUPABASE_ANON_KEY"])
         self.assertEqual(result["db_checks"], ["BE-01"])
         self.assertEqual(result["guarded"], [])
@@ -274,101 +266,84 @@ password = "literal:postgres"
         self.assertEqual(result["action"], "reuse")
         self.assertEqual(result["plan"], "docs/testing/plans/test-plan.md")
 
-    def test_persona_token_takes_precedence_over_value_and_falls_back_to_value(self) -> None:
-        body = SCENARIO + "- **Headers:** Authorization: $QA_API_TOKEN\n"
-        cases = (
-            ('mutations="allow"\n' + ACCOUNTS.replace('["user", "other"]', '["api"]'), ["api"], []),
-            ('[env.values]\nAPI_TOKEN = "literal:public"\n', [], ["API_TOKEN"]),
-        )
-        for extra, personas, values in cases:
-            with self.subTest(extra=extra):
-                result = self.check(body, extra)
-                self.assertTrue(result["ok"], result)
-                self.assertEqual(result["personas"], personas)
-                self.assertEqual(result["values"], values)
+    def test_user_tokens_resolve_declared_and_configured_users(self) -> None:
+        body = "## Users\n- admin: existing — administrator\n- owner: registered — plain user\n## BE Test Scenarios\n" + SCENARIO
+        result = self.check(body + "- **Preconditions:** $QA_ADMIN_EMAIL ${QA_ADMIN_ID} $QA_OWNER_EMAIL $QA_OWNER_ID $QA_TAG $QA_NEW_PASSWORD\n", USERS)
+        self.assertEqual(result["users"], ["admin"])
+        self.assertEqual(result["registrations"], ["owner"])
+        self.assertEqual(result["missing"]["users"], [])
+        self.assertEqual(result["missing"]["values"], [])
+        self.assertEqual(result["plan_errors"], [])
+
+    def test_existing_user_without_config_is_a_gap_and_registered_needs_none(self) -> None:
+        body = "## Users\n- viewer_ops: existing — ops\n- viewer: existing — read only\n- owner: registered — owner\n## BE Test Scenarios\n" + SCENARIO
+        result = self.check(body + "- **Preconditions:** $QA_VIEWER_OPS_EMAIL $QA_VIEWER_ID $QA_OWNER_ID\n", USERS)
+        self.assertEqual(result["missing"]["users"], [
+            {"name": "viewer", "token": "QA_VIEWER_ID", "reason": "id source is not configured"},
+            {"name": "viewer_ops", "token": "QA_VIEWER_OPS_EMAIL", "reason": "user is not configured"},
+        ])
+
+    def test_undeclared_user_and_token_fields_are_plan_errors(self) -> None:
+        for token, reason in (
+            ("GHOST_EMAIL", "user ghost is not declared under ## Users"),
+            ("ADMIN_TOKEN", "tokens and cookies are obtained by the tester; use $QA_ADMIN_EMAIL and $QA_ADMIN_PASSWORD"),
+        ):
+            with self.subTest(token=token):
+                result = self.check(SCENARIO + f"- **Preconditions:** $QA_{token}\n")
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["plan_errors"], [{"scenario": "BE-01", "reason": reason}])
+
+    def test_registered_name_clashing_with_a_configured_user_is_a_plan_error(self) -> None:
+        result = self.check("## Users\n- admin: registered — admin\n## BE Test Scenarios\n" + SCENARIO, USERS)
+        self.assertEqual(result["plan_errors"], [{"scenario": "BE-01", "reason": "user admin is configured; declare it existing"}])
+
+    def test_longest_user_prefix_wins(self) -> None:
+        config = USERS.replace("admin", "user").replace("viewer", "user_ops")
+        body = "## Users\n- user: existing — user\n- user_ops: existing — ops\n## BE Test Scenarios\n" + SCENARIO
+        result = self.check(body + "- **Preconditions:** $QA_USER_OPS_EMAIL\n", config)
+        self.assertEqual(result["users"], ["user_ops"])
+        self.assertEqual(result["missing"]["users"], [])
+
+    def test_configured_user_must_be_declared_and_value_names_never_bypass_token_rules(self) -> None:
+        result = self.check(SCENARIO + "- **Preconditions:** $QA_ADMIN_EMAIL\n", USERS)
+        self.assertEqual(result["plan_errors"], [{"scenario": "BE-01", "reason": "user admin is configured but not declared under ## Users"}])
+        self.put(BASE + '[env.values]\nADMIN_TOKEN="env:AV_X"\n', ".av/config.toml")
+        self.assertTrue(any(error["key"] == "env.values.ADMIN_TOKEN" for error in Config(self.repo, state_home=self.state).errors))
+        result = self.check(SCENARIO + "- **Preconditions:** $QA_ADMIN_TOKEN\n")
+        self.assertIn("tokens and cookies", result["plan_errors"][0]["reason"])
+
+    def test_credentials_over_cleartext_origins_are_plan_errors(self) -> None:
+        cfg = self.config(USERS)
+        cfg.targets["backend"] = "http://staging.example.com"
+        declaration = "## Users\n- admin: existing — admin\n## BE Test Scenarios\n"
+        body = declaration + SCENARIO + "- **Preconditions:** $QA_ADMIN_EMAIL\n"
+        result = check_plan(parse_plan(self.plan(body)), cfg)
+        self.assertEqual(result["plan_errors"], [{"scenario": "BE-01", "reason": "credentials over cleartext origin http://staging.example.com"}])
+        result = check_plan(parse_plan(self.plan(body + "- **Target:** ui\n")), cfg)
+        self.assertEqual(result["plan_errors"], [])
+        body = "### FE-01: Signup\n- **Writes:** yes\n- **Steps:** $QA_TAG http://staging.example.com/signup\n"
+        self.assertIn("credentials over cleartext origin", check_plan(parse_plan(self.plan(body)), cfg)["plan_errors"][0]["reason"])
+        with self.subTest(value="TENANT_ID"):
+            cfg = self.config('[env.values]\nTENANT_ID = "literal:t1"\n')
+            cfg.targets["backend"] = "http://staging.example.com"
+            body = SCENARIO.replace("/api/v1/cvs", "/tenants/$QA_TENANT_ID/items")
+            result = check_plan(parse_plan(self.plan(body)), cfg)
+            self.assertEqual(result["plan_errors"], [])
+            self.assertEqual(result["values"], ["TENANT_ID"])
+            self.assertTrue(result["ok"])
 
     def test_both_token_forms_are_detected_in_every_scenario_field(self) -> None:
-        placements = (
-            "- **Headers:** Authorization: Bearer {token}\n",
-            '- **Payload:** `{{"token":"{token}"}}`\n',
-            "- **Preconditions:** Login with {token}.\n",
-            "  - Expired {token}: 401. (src/auth.py:401)\n",
-        )
-        for token in ("$QA_USER_TOKEN", "${QA_USER_TOKEN}"):
-            for placement in placements:
+        declarations = "## Users\n- admin: existing — admin\n## BE Test Scenarios\n"
+        for token in ("$QA_ADMIN_EMAIL", "${QA_ADMIN_EMAIL}"):
+            for placement in ("- **Headers:** {token}\n", "- **Payload:** {token}\n", "- **Preconditions:** {token}\n", "  - Invalid {token}: 401.\n"):
                 with self.subTest(token=token, placement=placement):
-                    result = self.check(SCENARIO + placement.format(token=token), 'mutations="allow"\n' + ACCOUNTS)
-                    self.assertEqual(result["personas"], ["user"])
-                    self.assertEqual(result["missing"]["personas"], [])
+                    result = self.check(declarations + SCENARIO + placement.format(token=token), USERS)
+                    self.assertEqual(result["users"], ["admin"])
+                    self.assertEqual(result["missing"]["users"], [])
 
-    def test_unknown_tokens_are_gaps_not_runtime_values(self) -> None:
-        for token, category, name in (
-            ("$QA_FOO_TOKEN", "personas", "foo"),
-            ("${QA_FOO_COOKIE_CSRFTOKEN}", "personas", "foo"),
-            ("$QA_FOO", "values", "FOO"),
-        ):
-            with self.subTest(token=token):
-                result = self.check(SCENARIO + f"- **Headers:** {token}\n")
-                self.assertFalse(result["ok"])
-                missing = result["missing"][category]
-                self.assertEqual(missing[0]["name"] if category == "personas" else missing[0], name)
-                if category == "personas":
-                    self.assertIn("not configured", missing[0]["reason"])
-
-    def test_persona_names_with_underscores_and_normalized_cookie_names(self) -> None:
-        accounts = ACCOUNTS.replace('["user", "other"]', '["power_user"]')
-        body = SCENARIO + "- **Headers:** ${QA_POWER_USER_COOKIE_HOST_SESSION}\n"
-        result = self.check(body, 'mutations="allow"\n' + accounts)
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(result["personas"], ["power_user"])
-
-    def test_capability_gaps_identify_token_and_reason(self) -> None:
-        for token, extra, reason in (
-            ("QA_USER_TOKEN", ACCOUNTS.replace('token = ".access_token"\n', ""), "TOKEN"),
-            ("QA_USER_COOKIE_CSRFTOKEN", ACCOUNTS.replace('"csrftoken", ', ""), "COOKIE_CSRFTOKEN"),
-            ("QA_USER_ID", ACCOUNTS.replace('id = ".id"\n', ""), "ID"),
-        ):
-            with self.subTest(token=token):
-                result = self.check(SCENARIO + f"- **Headers:** ${token}\n", 'mutations="allow"\n' + extra)
-                gap = result["missing"]["personas"][0]
-                self.assertEqual((gap["name"], gap["token"]), ("user", token))
-                self.assertIn(reason, gap["reason"])
-
-    def test_provisioning_requires_create_and_cannot_run_under_deny(self) -> None:
-        body = SCENARIO + "- **Headers:** $QA_USER_EMAIL\n"
-        for extra, reason in (
-            ('mutations="allow"\n[qa.accounts]\npersonas=["user"]\n', "create"),
-            ('mutations="deny"\n' + ACCOUNTS, "deny"),
-        ):
-            with self.subTest(reason=reason):
-                result = self.check(body, extra)
-                self.assertIn(reason, result["missing"]["personas"][0]["reason"])
-
-    def test_static_persona_works_without_create_under_deny(self) -> None:
-        extra = '''mutations = "deny"
-[qa.accounts.static.admin]
-email = "env:QA_ADMIN_EMAIL"
-password = "env:QA_ADMIN_PASSWORD"
-id = "env:QA_ADMIN_ID"
-'''
-        result = self.check(SCENARIO + "- **Headers:** $QA_ADMIN_EMAIL $QA_ADMIN_ID\n", extra)
-        self.assertEqual(result["missing"]["personas"], [])
-        self.assertEqual(result["personas"], ["admin"])
-
-    def test_command_recipe_outputs_supply_persona_capabilities(self) -> None:
-        extra = '''[qa.accounts]
-personas = ["user"]
-[qa.accounts.create]
-kind = "command"
-run = "create-user"
-outputs = {id = true}
-[qa.accounts.login]
-kind = "command"
-run = "login-user"
-outputs = {token = true, cookies = ["sessionid"]}
-'''
-        result = self.check(SCENARIO + "- **Headers:** $QA_USER_ID $QA_USER_TOKEN $QA_USER_COOKIE_SESSIONID\n", 'mutations="allow"\n' + extra)
-        self.assertEqual(result["missing"]["personas"], [])
+    def test_unknown_values_are_config_gaps(self) -> None:
+        result = self.check(SCENARIO + "- **Headers:** $QA_FOO\n")
+        self.assertEqual(result["missing"]["values"], ["FOO"])
 
     def test_missing_target_default_and_database_are_config_gaps(self) -> None:
         result = self.check(SCENARIO + '- **Target:** absent\n- **DB Check:** `SELECT COUNT(id) FROM cvs`\n')
@@ -439,7 +414,7 @@ outputs = {token = true, cookies = ["sessionid"]}
 - **Method:** DELETE /cvs/1
 - **Expected:** 404. (src/api.py:404)
 - **Edge cases:**
-  - Other persona: 403. (src/api.py:403)
+  - Other user: 403. (src/api.py:403)
 """
         parsed = parse_plan(self.plan(body))
         self.assertEqual(parsed.scenarios[0].expected.statuses, [404])
@@ -457,7 +432,7 @@ outputs = {token = true, cookies = ["sessionid"]}
 
     def test_write_methods_remain_guarded_with_assertions_headers_and_payload(self) -> None:
         cases = (
-            ("DELETE", "  - DELETE as another persona: 403. (src/api.py:403)\n"),
+            ("DELETE", "  - DELETE as another user: 403. (src/api.py:403)\n"),
             ("PATCH", "  - PATCH without token: 401. (src/api.py:401)\n"),
             ("PATCH", "  - Update without token: 401. (src/api.py:401)\n"),
             ("POST", '- **Payload:** {"mode":"update"}\n'),

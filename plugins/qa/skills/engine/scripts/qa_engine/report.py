@@ -7,7 +7,7 @@ Validation recognizes every Python line separator; final Status writes leave
 issue bodies unchanged.
 Carried metadata is read only before Category, and only a code-review rewritten
 Location overrides fresh orchestrator evidence.
-Missing gap kinds display as unspecified; auth-unverified counts as Skip.
+Missing gap kinds display as unspecified.
 Only remaining failures inherit the loop's budget or no-progress stop reason.
 """
 from __future__ import annotations
@@ -26,7 +26,7 @@ from typing import Any
 
 from av_config.errors import InvalidConfig
 from av_config.files import atomic_write
-from qa_engine.accounts import ledger
+from qa_engine.users import ledger
 from qa_engine.common import BLOCK_END
 from qa_engine.common import LOOP_HISTORY
 from qa_engine.common import METADATA_FIELDS
@@ -34,7 +34,6 @@ from qa_engine.common import REPORT_FIELD
 from qa_engine.common import SEVERITIES
 from qa_engine.common import assertion_keys
 from qa_engine.common import plan_assertion
-from qa_engine.common import read_object
 from qa_engine.common import report_blocks
 from qa_engine.common import report_field
 from qa_engine.common import report_fields
@@ -42,7 +41,7 @@ from qa_engine.common import report_header
 from qa_engine.config import Config
 from qa_engine.config import DATABASE_NAMES
 from qa_engine.plan import Plan
-from qa_engine.plan import persona_token
+from qa_engine.plan import user_token
 from qa_engine.plan import run_plan
 from qa_engine.models import LIMITS
 from qa_engine.models import Run
@@ -55,7 +54,7 @@ from qa_engine.verdicts import scenario_kind
 
 JSON = dict[str, Any]
 VERDICTS = ("pass", "fail", "skip", "need-info")
-LABELS = {"pass": "Pass", "fail": "Fail", "skip": "Skip", "need-info": "Need info", "auth-unverified": "Auth-unverified"}
+LABELS = {"pass": "Pass", "fail": "Fail", "skip": "Skip", "need-info": "Need info"}
 DECISION_FIELDS = ("Decision", "Decision-retired", "Verification-plan", "Decision-pin", "Dispatch", "Verification")
 ACCOUNTS = re.compile(r"^- Accounts:[^\n]*$", re.MULTILINE)
 SUMMARY = re.compile(r"^## Summary[ \t]*\n.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
@@ -171,22 +170,20 @@ def _verdicts(run: Run, plan: Plan) -> dict[str, str]:
 
 
 def _counts(verdicts: Mapping[str, str]) -> str:
-    counts = Counter("skip" if verdict == "auth-unverified" else verdict for verdict in verdicts.values())
+    counts = Counter(verdicts.values())
     return f"- Total: {len(verdicts)} | " + " | ".join(f"{LABELS[name]}: {counts[name]}" for name in VERDICTS)
 
 
-def accounts_line(run: Run) -> str:
-    """List persona names only; a failed/pending cleanup is always left."""
-    config = Config(run.repo)
-    with ledger(run, config) as accounts:
-        records = [row for row in accounts.records if row.get("run_id") == run.run_id and row.get("status") != "conflict"]
-    names: dict[str, list[bool]] = {}
-    for row in records:
-        names.setdefault(str(row["persona"]), []).append(bool(row.get("deleted")))
-    personas = [f"{name} (provisioned; {'deleted' if all(names[name]) else 'left'})" for name in sorted(names)]
-    private = read_object(run.directory / "accounts.private.json")
-    personas.extend(f"{name} (static; left)" for name in sorted(private) if private[name].get("static"))
-    return "- Accounts: " + (", ".join(personas) or "none")
+def users_line(run: Run) -> str:
+    """Summarize this run's durable registration and cleanup outcomes."""
+    with ledger(run, Config(run.repo)) as accounts:
+        records = [row for row in accounts.records if row.get("run_id") == run.run_id]
+    if not records:
+        return "- Accounts: registered 0"
+    deleted = sum(bool(row.get("deleted")) for row in records)
+    manual = sum(row.get("status") == "manual-cleanup" and not row.get("deleted") for row in records)
+    left = len(records) - deleted - manual
+    return f"- Accounts: registered {len(records)} (deleted {deleted}, left {left}, manual {manual})"
 
 
 def refresh_accounts(run: Run) -> JSON:
@@ -195,7 +192,7 @@ def refresh_accounts(run: Run) -> JSON:
     section = SUMMARY.search(text)
     if section is None:
         raise StateStop("report unavailable: render a report before updating accounts")
-    line = accounts_line(run)
+    line = users_line(run)
     summary = section[0]
     if ACCOUNTS.search(summary):
         summary = ACCOUNTS.sub(lambda _: line, summary, count=1)
@@ -221,7 +218,7 @@ def _details(run: Run, plan: Plan, verdicts: Mapping[str, str]) -> list[str]:
     lines: list[str] = []
     for scenario in plan.scenarios:
         verdict = verdicts[scenario.id]
-        label = "Skip" if verdict == "auth-unverified" else LABELS[verdict]
+        label = LABELS[verdict]
         line = f"### {label}: {scenario.id}: {scenario.title}"
         if verdict == "fail":
             issues = run.state["scenario_issues"].get(scenario.id, [])
@@ -336,7 +333,7 @@ def render_report(run: Run, issues: Path, *, final: bool = False) -> JSON:
     lines = [f"# Test Report: {run.state['topic']}", "", "## Summary", _counts(verdicts),
              f"- Plan: {run.state['plan_path']}",
              "- Plan provenance: " + ("auto-generated" if run.state["auto_generated"] else "existing"),
-             f"- Date: {run.state['created']}", f"- Duration: {run.elapsed()}s", accounts_line(run)]
+             f"- Date: {run.state['created']}", f"- Duration: {run.elapsed()}s", users_line(run)]
     gaps = _gaps(run)
     if gaps:
         lines.extend(["", "## Setup gaps", *gaps])
@@ -369,13 +366,13 @@ def _result(run: Run, verdicts: Mapping[str, str], elapsed: int) -> str:
 def _coverage(run: Run, plan: Plan, verdicts: Mapping[str, str]) -> tuple[list[str], bool]:
     kinds = {scenario.id: run.state["scenario_kind"].get(scenario.id, scenario_kind(scenario)) for scenario in plan.scenarios}
     passed = Counter(kinds[sid] for sid, verdict in verdicts.items() if verdict == "pass")
-    reasons = Counter(run.state["scenario_reason"].get(sid, "cannot-confirm") for sid, verdict in verdicts.items() if verdict in {"skip", "need-info", "auth-unverified"})
+    reasons = Counter(run.state["scenario_reason"].get(sid, "cannot-confirm") for sid, verdict in verdicts.items() if verdict in {"skip", "need-info"})
     shallow = passed["feature"] == 0 and any(kind == "feature" and verdicts[sid] != "pass" for sid, kind in kinds.items())
     not_verified = Counter(verdicts.values())
     coverage = ["## Coverage", f"- Exercised: {passed['feature']} feature · {passed['sanity']} sanity · {passed['negative']} enforcement",
-                f"- Not verified: auth-unverified {not_verified['auth-unverified']} · need-info {not_verified['need-info']} · "
+                f"- Not verified: need-info {not_verified['need-info']} · "
                 + " · ".join(f"{reason}{' SKIP' if reason == 'mutation-guard' else ''} {reasons[reason]}" for reason in ("mutation-guard", "tool-unavailable", "cannot-confirm", "transport")),
-                "- Confidence: " + ("low — no feature behavior exercised" if shallow else "low — some assertions were not verified" if run.state["need_info"] or sum(not_verified[name] for name in ("skip", "need-info", "auth-unverified")) else "high")]
+                "- Confidence: " + ("low — no feature behavior exercised" if shallow else "low — some assertions were not verified" if run.state["need_info"] or sum(not_verified[name] for name in ("skip", "need-info")) else "high")]
     return coverage, shallow
 
 
@@ -384,26 +381,17 @@ def _credential_key(run: Run, name: str) -> str:
         if name in names:
             return "env.database." + names[name]
     token = name.removeprefix("QA_")
-    accounts = run.record["config"]["qa"].get("accounts", {})
-    personas = set(accounts.get("personas", [])) | set(accounts.get("static", {}))
-    recognized = persona_token(name, personas)
+    users = run.record["config"]["qa"].get("users", {})
+    recognized = user_token(name, users)
     if recognized:
-        persona, field = recognized
-        if field == "TOKEN" or field.startswith("COOKIE"):
-            return "qa.accounts.login"
-        if persona in accounts.get("static", {}):
-            return f"qa.accounts.static.{persona}.{field.lower()}"
-        return {"ID": "qa.accounts.create", "EMAIL": "qa.accounts.email"}.get(field, "qa.accounts.personas")
-    if re.fullmatch(r".+_(TOKEN|COOKIE(?:_.+)?)", token):
-        return "qa.accounts.login"
+        user, field = recognized
+        return f"qa.users.{user}.{field.lower()}"
+    unknown = re.fullmatch(r"(.+)_(EMAIL|PASSWORD|ID)", token)
+    if unknown:
+        return f"qa.users.{unknown.group(1).lower()}.{unknown.group(2).lower()}"
     return "env.values." + token
 
 
-def _auth_unlock(run: Run, count: int) -> str:
-    accounts = run.record["config"]["qa"].get("accounts", {})
-    personas = sorted(set(accounts.get("personas", [])) | set(accounts.get("static", {})))
-    credentials = ", ".join(f"`$QA_{name.upper()}_TOKEN` or `$QA_{name.upper()}_COOKIE`" for name in personas) or "`$QA_<P>_TOKEN` or `$QA_<P>_COOKIE`"
-    return f"- auth-unverified ({count}): use the persona's {credentials} in the scenario, or add a `qa.accounts.login` recipe; re-run `/qa:run`."
 
 
 def _gap_action(run: Run, kind: str) -> str:
@@ -442,8 +430,6 @@ def _unlock(run: Run, plan: Plan, verdicts: Mapping[str, str]) -> list[str]:
     hints: list[str] = []
     if reasons["mutation-guard"]:
         hints.append(f"- mutation-guard ({reasons['mutation-guard']}): mark scenarios that do not write with `- **Writes:** no`, or set `qa.mutations = \"allow\"` in `.av/config.toml` only when the data behind every target is disposable.")
-    if reasons["auth-unverified"] or run.state["auth_gated_issues"]:
-        hints.append(_auth_unlock(run, reasons["auth-unverified"]))
     hints.extend(_gap_unlocks(run, verdicts))
     if reasons["tool-unavailable"]:
         hints.append(f"- tool-unavailable ({reasons['tool-unavailable']}): install/enable the missing browser, HTTP or database client.")

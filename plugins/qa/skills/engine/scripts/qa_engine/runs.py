@@ -50,7 +50,7 @@ from qa_engine.sidecar import _topic
 
 RUN_ID = re.compile(r"[0-9a-f]{8}\Z")
 RUN_DIRECTORY = re.compile(r"qa-run-[0-9a-f]{8}\Z")
-STOP_REASONS = frozenset({"user-abort", "config-drift", "login-failure", "plan-changed", "cleanup-error", "other"})
+STOP_REASONS = frozenset({"user-abort", "config-drift", "plan-changed", "cleanup-error", "other"})
 STALE_SECONDS = 24 * 3600
 
 

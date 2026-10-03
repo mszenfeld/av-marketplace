@@ -79,8 +79,6 @@ def _drop_reason(
         return "needs manual assertion mapping"
     if record is None or record["result"] not in FAILING:
         return "assertion not failing"
-    if key == scenario.id and qa in context.state["auth_gated_issues"]:
-        return "auth-gated main flow"
     return None
 
 

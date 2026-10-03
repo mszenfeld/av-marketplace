@@ -26,15 +26,6 @@ ui = "http://localhost:5173"
 supabase = "http://127.0.0.1:54321"
 [qa]
 fix = "approve"
-[qa.accounts]
-personas = ["user"]
-[qa.accounts.static.user]
-email = "literal:qa@test.local"
-password = "env:QA_TEST_PASSWORD"
-[qa.accounts.login]
-kind = "command"
-run = 'printf "{\\"token\\":\\"state-test-token\\"}"'
-outputs = ["token"]
 '''
 PLAN = '''# Test Plan
 ## FE Test Scenarios
@@ -46,7 +37,6 @@ PLAN = '''# Test Plan
 ### BE-01: Fetch items
 - **Writes:** no
 - **Method:** GET /items
-- **Headers:** Authorization: Bearer $QA_USER_TOKEN
 - **Request payload:** {"name": "sample-item"}
 - **Expected:** 200 items returned. (src/app.py:1)
 - **Edge cases:**
@@ -79,7 +69,6 @@ class StateTests(unittest.TestCase):
         self.git("add", "src")
         self.git("commit", "-qm", "initial")
         self.put(BASE, ".av/config.toml")
-        self.put('[qa.accounts.static.user]\npassword = "literal:password"\n', ".av/local.toml")
         self.plan = self.put(PLAN, "docs/testing/plans/2026-09-30-state-test-plan.md")
         self.trust()
 
@@ -105,7 +94,7 @@ class StateTests(unittest.TestCase):
     def start(self, **kwargs: object) -> dict[str, object]:
         result = self.cli("run", "start", str(self.plan), **kwargs)
         if kwargs.get("code", 0) == 0:
-            self.cli("accounts", "provision", "--run", result["run"])
+            self.cli("users", "provision", "--run", result["run"])
         return result
 
     def sidecar(self, run: dict[str, object]) -> dict[str, object]:
@@ -150,7 +139,7 @@ class StateTests(unittest.TestCase):
             "misspelled key": lambda state: state.update(dispatchCount=1),
             "boolean dispatch count": lambda state: state.update(dispatch_count=True),
             "invalid assertion status": lambda state: state["assertions"]["BE-01"].update(observed_status="200"),
-            "invalid authenticated persona": lambda state: state["dispatches"][dispatch["dispatch"]].update(authenticated=[1]),
+            "invalid dispatch tag": lambda state: state["dispatches"][dispatch["dispatch"]].update(tag=[1]),
         }
         for name, corrupt in corruptions.items():
             with self.subTest(name=name):
@@ -396,12 +385,11 @@ class StateTests(unittest.TestCase):
                 self.cli("run", "end", "--run", run["run"])
 
     def test_all_verdict_precedence_rules(self) -> None:
-        self.plan.write_text(PLAN.replace("- **Headers:** Authorization: Bearer $QA_USER_TOKEN\n", ""))
         cases = [(outcome("FAIL", 500), outcome("NEED_INFO", kind="tool", missing=["jq"]), "fail"),
                  (outcome("FAIL", 401), outcome("FAIL", 500), "fail"),
                  (outcome("PASS"), outcome("NEED_INFO", kind="fixture", missing=["upload"]), "need-info"),
-                 (outcome("FAIL", 401), outcome("NEED_INFO", kind="tool", missing=["jq"]), "need-info"),
-                 (outcome("FAIL", 401), outcome("SKIP"), "auth-unverified"),
+                 (outcome("FAIL", 401), outcome("NEED_INFO", kind="tool", missing=["jq"]), "fail"),
+                 (outcome("FAIL", 401), outcome("SKIP"), "fail"),
                  (outcome("PASS"), outcome("SKIP", skip_reason="harness error: failed"), "skip"),
                  (outcome("PASS"), outcome("PASS"), "pass")]
         for main, edge, verdict in cases:
@@ -423,42 +411,17 @@ class StateTests(unittest.TestCase):
         self.assertEqual(self.sidecar(run)["need_info"], {"FE-01": {"kind": "tool", "missing": ["browser"]}})
         self.assertEqual(self.sidecar(run)["scenario_kind"], {"FE-01": "feature", "BE-01": "feature", "BE-02": "sanity"})
 
-    def test_authentication_record_controls_main_flow_not_edge_failure(self) -> None:
-        self.plan.write_text(PLAN.replace("- **Headers:** Authorization: Bearer $QA_USER_TOKEN\n", ""))
-        run = self.start()
-        self.ingest(run, self.dispatch(run), outcome("FAIL", 401), outcome("FAIL", 500))
-        assigned = self.cli("issues", "--run", run["run"])["assign"]
-        self.assertEqual([(row["qa"], row["key"]) for row in assigned], [("QA-001", "BE-01"), ("QA-002", "BE-01 (edge 1)")])
-        self.report(run, "QA-002", severity="CRITICAL")
-        chosen = self.cli("candidates", "--run", run["run"])
-        self.assertEqual([row["qa"] for row in chosen["fix"]], ["QA-002"])
-        self.assertEqual(self.sidecar(run)["auth_gated_issues"], ["QA-001"])
-
-    def test_cookie_credential_uses_longest_valid_persona_prefix(self) -> None:
-        config = BASE.replace('personas = ["user"]', 'personas = ["user", "user_cookie"]')
-        config = config.replace(
-            'run = \'printf "{\\"token\\":\\"state-test-token\\"}"\'\noutputs = ["token"]',
-            'run = \'printf "{\\"cookies\\":{\\"session\\":\\"state-test-cookie\\"}}"\'\noutputs = {cookies = ["session"]}',
-        )
-        self.put(config, ".av/config.toml")
-        self.plan.write_text(PLAN.replace("$QA_USER_TOKEN", "${QA_USER_COOKIE_SESSION}"))
-        self.trust()
-        run = self.start()
-        dispatch = self.dispatch(run)
-        result = self.ingest(run, dispatch, outcome("FAIL", 401))
-        self.assertEqual(result["verdicts"]["BE-01"], "fail")
-        self.assertEqual(self.sidecar(run)["assertions"]["BE-01"]["auth"], True)
-
-    def test_authenticated_failure_is_auth_flagged_approve_or_auto(self) -> None:
+    def test_auth_failure_is_a_flagged_fail_never_auto_fixed(self) -> None:
         for mode in ("approve", "auto"):
             with self.subTest(mode=mode):
                 self.put(BASE.replace('fix = "approve"', f'fix = "{mode}"'), ".av/config.toml")
                 self.trust()
                 run = self.start()
                 dispatch = self.dispatch(run)
-                state = self.sidecar(run)
-                self.assertEqual(state["dispatches"][dispatch["dispatch"]]["authenticated"], ["user"])
+                self.assertRegex(dispatch["tag"], r"^[0-9a-f]{8}$")
+                self.assertNotIn("refreshed", dispatch)
                 self.assertEqual(self.ingest(run, dispatch, outcome("FAIL", 401))["verdicts"]["BE-01"], "fail")
+                self.assertTrue(self.sidecar(run)["assertions"]["BE-01"]["auth"])
                 self.cli("issues", "--run", run["run"])
                 self.report(run)
                 chosen = self.cli("candidates", "--run", run["run"])

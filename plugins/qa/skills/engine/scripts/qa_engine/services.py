@@ -148,7 +148,7 @@ def services(run: Run, config: Config, operation: str) -> dict[str, object]:
         for probe in cast(list[str], settings.get("health", [])):
             target, path = probe.split(":", 1)
             try:
-                status, _, _ = http_request(Request(recorded["targets"][target] + path))
+                status = http_request(Request(recorded["targets"][target] + path))
             except ConfigError:
                 status = None
             probes.append({"target": target, "path": path, "status": status})

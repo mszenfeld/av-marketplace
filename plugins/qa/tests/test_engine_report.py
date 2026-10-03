@@ -101,7 +101,7 @@ class ReportTests(unittest.TestCase):
         config = self.cli("config")
         self.cli("trust", "accept", config["trust_hash"])
         self.run = self.cli("run", "start", str(self.plan), *options)
-        self.cli("accounts", "provision", "--run", self.run["run"])
+        self.cli("users", "provision", "--run", self.run["run"])
 
     def state(self) -> Json:
         return json.loads(Path(self.run["sidecar"]).read_text())
@@ -204,8 +204,7 @@ up = {json.dumps(command)}
 ''', ".av/config.toml")
         self.start()
         directory = Path(self.run["dir"])
-        (directory / "accounts.private.json").write_text(json.dumps({"accounts": [{"password": private_value}]}))
-        (directory / "secrets.json").write_text(json.dumps({"QA_TOKEN": "private-channel-secret"}))
+        (directory / "secrets.json").write_text(json.dumps({"QA_TOKEN": "private-channel-secret", "QA_ADMIN_PASSWORD": private_value}))
 
         self.cli("services", "up", "--run", self.run["run"], code=1)
 
@@ -246,31 +245,23 @@ down = {json.dumps(command)}
 
     def test_successful_command_recipes_do_not_persist_unresolved_stderr(self) -> None:
         self.put("unresolved-recipe-secret", "service-key.txt")
-        create = 'cat service-key.txt >&2; printf \'{"id":"recipe-id"}\''
-        login = 'cat service-key.txt >&2; printf \'{"token":"recipe-token"}\''
+        command = 'cat service-key.txt >&2; printf success-marker'
         self.put(CONFIG + f'''mutations = "allow"
 [env.secrets]
 SERVICE_KEY = "cmd:touch secret-resolver-ran; cat service-key.txt"
-[qa.accounts]
-personas = ["user"]
-email = "qa+{{run}}-{{persona}}@test.local"
-[qa.accounts.create]
+[qa.cleanup]
 kind = "command"
-run = {json.dumps(create)}
-outputs = ["id"]
-[qa.accounts.login]
-kind = "command"
-run = {json.dumps(login)}
-outputs = ["token"]
+run = {json.dumps(command)}
 ''', ".av/config.toml")
-        self.plan.write_text(PLAN + "- **Headers:** Authorization: Bearer $QA_USER_TOKEN\n")
         self.start()
-
+        dispatch = self.cli("dispatch", "--run", self.run["run"], "tester", "--section", "BE", "--phase", "baseline")
+        self.cli("users", "record", "--run", self.run["run"], "--dispatch", dispatch["dispatch"],
+                 "--email", f"qa+{dispatch['tag']}-owner@test.local")
+        self.cli("users", "teardown", "--run", self.run["run"])
         directory = Path(self.run["dir"])
-        self.assertEqual(json.loads((directory / "secrets.json").read_text()), {"QA_USER_TOKEN": "recipe-token"})
         log = (directory / "engine.log").read_text()
         self.assertNotIn("unresolved-recipe-secret", log)
-        self.assertNotIn("recipe-token", log)
+        self.assertNotIn("success-marker", log)
         self.assertFalse((self.repo / "secret-resolver-ran").exists())
 
     def test_failed_service_tail_masks_before_truncating_without_short_value_noise(self) -> None:
@@ -313,7 +304,7 @@ up = {json.dumps(command)}
         self.put('[env.values]\nname = "literal:private-literal"\n', ".av/local.toml")
         self.start()
         directory = Path(self.run["dir"])
-        (directory / "accounts.private.json").write_text(json.dumps({"accounts": [{"token": "account-secret"}]}))
+        (directory / "secrets.json").write_text(json.dumps({"QA_ADMIN_PASSWORD": "account-secret"}))
         self.put(CONFIG.replace("[qa]\n", '[env.secrets]\nnew = "env:AV_NEW_SECRET"\n[qa]\n'),
                  ".av/config.toml")
         detail = "backend /api/v1/health 502 recorded-secret current-secret private-literal account-secret"
@@ -776,51 +767,32 @@ up = {json.dumps(command)}
         self.assertEqual(self.render([], final=True)["fixed"], ["QA-001"])
         self.assertIn("**Result:** Pass", self.summary())
 
-    def test_accounts_only_refresh_preserves_report_when_delete_fails(self) -> None:
-        accounts = '''[qa.accounts]
-personas = ["user"]
-email = "qa+{run}-{persona}@test.local"
-[qa.accounts.create]
-kind = "command"
-run = 'printf "{\\"id\\":\\"user-id\\"}"'
-outputs = ["id"]
-[qa.accounts.login]
-kind = "command"
-run = 'printf "{\\"token\\":\\"private-token\\"}"'
-outputs = ["token"]
-[qa.accounts.delete]
-kind = "command"
-run = "exit 1"
-outputs = []
-[qa.accounts.static.admin]
-email = "literal:admin@test.local"
-password = "env:QA_ADMIN_PASSWORD"
-'''
-        self.put(CONFIG.replace('fix = "approve"', 'fix = "approve"\nmutations = "allow"') + accounts, ".av/config.toml")
-        self.put('[qa.accounts.static.admin]\npassword = "literal:private-password"\n', ".av/local.toml")
-        self.plan.write_text(PLAN.replace("- **Method:** GET /items", "- **Method:** GET /items\n- **Headers:** Authorization: Bearer $QA_USER_TOKEN, $QA_ADMIN_TOKEN"))
+    def test_accounts_only_refresh_preserves_report_when_cleanup_fails(self) -> None:
+        command = 'case "$QA_EMAIL" in *-deleted@test.local) exit 0 ;; *) exit 1 ;; esac'
+        self.put(CONFIG + '[qa.cleanup]\nkind="command"\nrun=' + json.dumps(command) + '\n', ".av/config.toml")
         self.start()
+        dispatch = self.cli("dispatch", "--run", self.run["run"], "tester", "--section", "BE", "--phase", "baseline")
+        email = f"qa+{dispatch['tag']}-owner@test.local"
+        self.cli("users", "record", "--run", self.run["run"], "--dispatch", dispatch["dispatch"], "--email", email)
+        deleted_email = f"qa+{dispatch['tag']}-deleted@test.local"
+        self.cli("users", "record", "--run", self.run["run"], "--dispatch", dispatch["dispatch"], "--email", deleted_email)
         self.ingest(main=outcome("FAIL", 500))
         self.cli("issues", "--run", self.run["run"])
         self.render([issue("QA-001", "CRITICAL")])
         before = self.text()
-        self.assertIn("user (provisioned; left)", before)
-        self.assertIn("admin (static; left)", before)
-        cleanup = self.cli("accounts", "teardown", "--run", self.run["run"])
-        self.assertEqual(cleanup["left"], ["user"])
-        # Teardown/Accounts must not consult changed policy or overwrite prior verdicts.
+        self.assertIn("- Accounts: registered 2 (deleted 0, left 2, manual 0)", before)
+        cleanup = self.cli("users", "teardown", "--run", self.run["run"])
+        self.assertEqual(cleanup["left"], [email])
+        self.assertEqual(cleanup["deleted"], [deleted_email])
         self.change_state(current={"FE-01": "pass", "BE-01": "pass", "BE-02": "pass"})
         self.cli("report", "--run", self.run["run"], "--accounts")
         after = self.text()
         self.assertEqual(without_accounts(before), without_accounts(after))
-        self.assertNotIn("private-token", after)
-        self.assertNotIn("private-password", after)
-        path = self.root / "state/av-marketplace/qa-accounts.json"
-        ledger = json.loads(path.read_text())
-        ledger[str(self.repo.resolve())][0]["deleted"] = True
-        path.write_text(json.dumps(ledger))
+        self.assertIn("- Accounts: registered 2 (deleted 1, left 1, manual 0)", after)
+        self.cli("users", "teardown", "--run", self.run["run"])
+        self.assertEqual(self.cli("users", "teardown", "--run", self.run["run"])["manual"], [email])
         self.cli("report", "--run", self.run["run"], "--accounts")
-        self.assertIn("user (provisioned; deleted)", self.text())
+        self.assertIn("- Accounts: registered 2 (deleted 1, left 0, manual 1)", self.text())
 
     def test_final_main_pass_with_skipped_edge_closes_no_issue(self) -> None:
         self.start()
@@ -835,69 +807,40 @@ password = "env:QA_ADMIN_PASSWORD"
     def test_edge_credential_gap_names_config_keys_even_when_fail_wins(self) -> None:
         self.start()
         self.ingest(main=outcome("FAIL", 500), edge=outcome("NEED_INFO", None, kind="credentials",
-                    missing=["QA_USER_TOKEN", "QA_FOO", "PGPORT"]))
+                    missing=["QA_ADMIN_EMAIL", "QA_FOO", "PGPORT"]))
         self.cli("issues", "--run", self.run["run"])
         self.render([issue("QA-001", "CRITICAL")])
         summary = self.summary()
         self.assertIn("need-info (0)", summary)
-        self.assertIn("qa.accounts.login", summary)
+        self.assertIn("qa.users.admin.email", summary)
         self.assertIn("env.values.FOO", summary)
         self.assertIn("env.database.port", summary)
         self.assertIn("Confidence: low", summary)
         self.assertIn("cannot-confirm 0", summary)
 
-    def test_credential_unlocks_distinguish_persona_fields_from_prefixed_values(self) -> None:
+    def test_credential_unlocks_name_user_and_value_keys(self) -> None:
         config = CONFIG + '''[env.values]
 USER_AGENT = "literal:qa-agent"
-USER_TOKENIZED = "literal:public-label"
-USER_COOKIEJAR = "literal:public-label"
-[qa.accounts]
-personas = ["user", "user_ops", "guest"]
-[qa.accounts.static.user]
-email = "literal:qa@test.local"
-password = "env:QA_TEST_PASSWORD"
-[qa.accounts.static.user_ops]
-email = "literal:ops@test.local"
-password = "env:QA_TEST_PASSWORD"
+[qa.users.admin]
+email = "literal:admin@test.local"
+password = "env:QA_ADMIN_SECRET"
+description = "administrator"
 '''
         self.put(config, ".av/config.toml")
-        self.plan.write_text(PLAN.replace(
-            "- **Method:** GET /items",
-            "- **Method:** GET /items\n- **Headers:** User-Agent: $QA_USER_AGENT $QA_USER_TOKENIZED ${QA_USER_COOKIEJAR}",
-        ))
         self.start()
-        missing = ["QA_USER_AGENT", "QA_USER_TOKENIZED", "QA_USER_COOKIEJAR", "QA_USER_EMAIL",
-                   "QA_USER_OPS_EMAIL", "QA_USER_COOKIE_SESSION", "QA_USER_TOKEN", "QA_GUEST_PASSWORD", "QA_USER_PASSWORD", "PGPORT"]
-        self.ingest(edge=outcome("NEED_INFO", None, kind="credentials", missing=missing))
+        self.ingest(edge=outcome("NEED_INFO", None, kind="credentials", missing=["QA_ADMIN_EMAIL", "QA_USER_AGENT", "PGPORT"]))
         summary = self.summary()
-        for key in ("env.values.USER_AGENT", "env.values.USER_TOKENIZED", "env.values.USER_COOKIEJAR",
-                    "qa.accounts.static.user.email", "qa.accounts.static.user_ops.email",
-                    "qa.accounts.personas", "qa.accounts.static.user.password", "qa.accounts.login", "env.database.port"):
-            with self.subTest(key=key):
-                self.assertIn(f"`{key}`", summary)
-        self.assertNotIn("qa.accounts.static.user.agent", summary)
-        self.assertNotIn("qa.accounts.static.user.ops_email", summary)
-
-    def test_auth_unverified_is_counted_as_skip_in_report_and_final_status(self) -> None:
-        self.start()
-        self.ingest(main=outcome("FAIL", 401))
-        self.cli("issues", "--run", self.run["run"])
-        self.render([issue("QA-001")])
-        counts = "- Total: 3 | Pass: 2 | Fail: 0 | Skip: 1 | Need info: 0"
-        self.assertIn(counts + "\n", self.text())
-        self.assertIn("### Skip: BE-01: Fetch items (auth-unverified)", self.text())
-        summary = self.summary()
-        self.assertIn("**Final Status:**\n" + counts + "\n", summary)
-        self.assertIn("- Not verified: auth-unverified 1", summary)
-        self.assertEqual(self.state()["current"]["BE-01"], "auth-unverified")
+        for key in ("qa.users.admin.email", "env.values.USER_AGENT", "env.database.port"):
+            self.assertIn(f"`{key}`", summary)
+        self.render([])
+        self.assertIn("- Accounts: registered 0", self.text())
 
     def test_summary_coverage_unlocks_and_recovery_are_config_scoped(self) -> None:
         self.start()
         self.ingest(fe=outcome("SKIP", None, skip_reason="mutation-guard"),
-                    main=outcome("FAIL", 401), edge=outcome("NEED_INFO", None, kind="service", missing=["backend:/items"]))
-        # BE-01 is need-info due to its edge; add separate authenticated-gating coverage.
-        self.change_state(current={"FE-01": "skip", "BE-01": "auth-unverified", "BE-02": "pass"},
-                          scenario_reason={"FE-01": "mutation-guard", "BE-01": "auth-unverified"},
+                    main=outcome("SKIP", None, skip_reason="connection refused"), edge=outcome("NEED_INFO", None, kind="service", missing=["backend:/items"]))
+        self.change_state(current={"FE-01": "skip", "BE-01": "skip", "BE-02": "pass"},
+                          scenario_reason={"FE-01": "mutation-guard", "BE-01": "transport"},
                           auto_generated=True, fix_touched_files=["src/new file.py"], pre_loop_dirty=["src/app.py"],
                           iterations=[{"iteration": 1, "failing_in": [], "attempted_fixes": [], "fix_results": {}, "now_passing": [],
                                        "still_failing": [], "regressions": [], "warnings": [], "dispatch_count": 0, "elapsed_s": 0,
@@ -906,13 +849,11 @@ password = "env:QA_TEST_PASSWORD"
         summary = self.summary()
         self.assertIn("**Result:** Pass", summary)
         self.assertIn("Exercised: 0 feature · 1 sanity · 0 enforcement", summary)
-        self.assertIn("auth-unverified 1", summary)
+        self.assertIn("transport 1", summary)
         self.assertIn("Confidence: low", summary)
         self.assertIn("Low-confidence green", summary)
         self.assertNotIn("Warning: shallow coverage", summary)
         self.assertIn("qa.mutations", summary)
-        self.assertIn("$QA_<P>_TOKEN", summary)
-        self.assertIn("qa.accounts.login", summary)
         self.assertIn("need-info (0)", summary)
         self.assertIn("env.services", summary)
         self.assertIn("backend:/items", summary)

@@ -125,38 +125,31 @@ class ConfigTests(unittest.TestCase):
             (BASE + '[qa.policy]\nfix = "approve"\n', "qa.policy"),
             (BASE + '[qa.budget]\niterations = 3\n', "qa.budget"),
             (BASE + '[qa.defaults]\nbe_target = "backend"\n', "qa.defaults"),
-            (BASE + '[qa.accounts]\npersonas = ["Bad"]\n', "qa.accounts.personas"),
-            (BASE + '[qa.accounts]\npersonas = ["user", "user"]\n', "qa.accounts.personas"),
-            (BASE + '[qa.accounts]\npassword = "generate"\n', "qa.accounts.password"),
+            (BASE + '[qa.accounts]\npersonas=["user"]\n', "qa.accounts"),
+            (BASE + '[qa.users.new]\nemail="literal:a@b"\npassword="env:QA_X"\ndescription="d"\n', "qa.users.new"),
+            (BASE + '[qa.users.Admin]\nemail="literal:a@b"\npassword="env:QA_X"\ndescription="d"\n', "qa.users.Admin"),
+            (BASE + '[qa.users.admin]\nemail="literal:a@b"\npassword="env:QA_X"\n', "qa.users.admin.description"),
+            (BASE + '[qa.users.admin]\npassword="env:QA_X"\ndescription="d"\n', "qa.users.admin.email"),
+            (BASE + '[env.values]\nTAG="literal:x"\n', "env.values.TAG"),
+            (BASE + '[env.values]\nNEW_PASSWORD="literal:x"\n', "env.values.NEW_PASSWORD"),
             (BASE + '[env.services]\nenv = { up = [] }\n', "env.services.env"),
-            (BASE + '[qa.accounts.create]\nkind="command"\nrun="true"\nenv=[]\n', "qa.accounts.create.env"),
-            (BASE + '[qa.accounts.create]\nkind="http"\ntarget="sensitive"\nmethod="POST"\npath="/"\nexpect=[201]\n', "qa.accounts.create.target"),
-            (BASE + '[qa.accounts.delete]\nkind="http"\ntarget="backend"\nmethod="DELETE"\npath="/users/{password}"\nexpect=[204]\n', "qa.accounts.delete.path"),
-            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[200]\nheaders={x="{secret.MISSING}"}\n', "qa.accounts.login.headers.x"),
-            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[200]\njson={x="{value.MISSING}"}\n', "qa.accounts.login.json.x"),
+            (BASE + '[qa.cleanup]\nkind="command"\nrun="true"\nenv=[]\n', "qa.cleanup.env"),
+            (BASE + '[qa.cleanup]\nkind="http"\ntarget="sensitive"\nmethod="DELETE"\npath="/{email}"\nexpect=[200]\n', "qa.cleanup.target"),
+            (BASE + '[qa.cleanup]\nkind="http"\ntarget="backend"\nmethod="DELETE"\npath="/users/{password}"\nexpect=[204]\n', "qa.cleanup.path"),
+            (BASE + '[qa.cleanup]\nkind="http"\ntarget="backend"\nmethod="DELETE"\npath="/{email}"\nexpect=[200]\nheaders={x="{secret.MISSING}"}\n', "qa.cleanup.headers.x"),
+            (BASE + '[qa.cleanup]\nkind="http"\ntarget="backend"\nmethod="DELETE"\npath="/{email}"\nexpect=[200]\njson={x="{value.MISSING}"}\n', "qa.cleanup.json.x"),
             (BASE + '[env.services]\nhealth=["missing:/"]\n', "env.services.health"),
             (BASE + '[env.services]\nunknown="sensitive"\n', "env.services.unknown"),
             (BASE + '[env.database]\nkind="sensitive"\n', "env.database.kind"),
             (BASE + '[env.database]\nkind="sqlite"\npath="db"\nunknown="sensitive"\n', "env.database.unknown"),
             ('version=1\nenv="sensitive"\n[qa]\n', "env"),
             (BASE + '[qa.defaults]\nunknown="sensitive"\n', "qa.defaults"),
-            (BASE + '[qa.accounts]\nunknown="sensitive"\n', "qa.accounts.unknown"),
-            (BASE + '[qa.accounts]\nemail=1\n', "qa.accounts.email"),
-            (BASE + '[qa.accounts]\nemail="{unknown}"\n', "qa.accounts.email"),
-            (BASE + '[qa.accounts]\npassword="sensitive"\n', "qa.accounts.password"),
-            (BASE + '[qa.accounts.static.Bad]\nemail="env:QA_X"\npassword="env:QA_Y"\n', "qa.accounts.static.Bad"),
-            (BASE + '[qa.accounts.static.user]\nemail="env:QA_X"\n', "qa.accounts.static.user.password"),
-            (BASE + '[qa.accounts.static.user]\nemail="env:QA_X"\npassword="env:QA_Y"\nunknown="sensitive"\n', "qa.accounts.static.user.unknown"),
-            (BASE + '[qa.accounts.create]\nkind="sensitive"\n', "qa.accounts.create.kind"),
-            (BASE + '[qa.accounts.login]\nkind="command"\nrun=1\n', "qa.accounts.login.run"),
-            (BASE + '[qa.accounts.login]\nkind="command"\nrun="true"\noutputs={unknown=true}\n', "qa.accounts.login.outputs.unknown"),
-            (BASE + '[qa.accounts.login]\nkind="command"\nrun="true"\noutputs={token="sensitive"}\n', "qa.accounts.login.outputs.token"),
-            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="sensitive"\npath="https://evil.test/"\nexpect=["sensitive"]\nheaders={x=1}\ntoken="sensitive"\ncookies=["---"]\n', "qa.accounts.login.method"),
-            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="//evil.test/"\nexpect=[200]\n', "qa.accounts.login.path"),
-            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[true]\n', "qa.accounts.login.expect"),
-            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[200]\nheaders={x=1}\n', "qa.accounts.login.headers.x"),
-            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[200]\ntoken="sensitive"\n', "qa.accounts.login.token"),
-            (BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[200]\ncookies=["---"]\n', "qa.accounts.login.cookies"),
+            (BASE + '[qa.cleanup]\nkind="sensitive"\n', "qa.cleanup.kind"),
+            (BASE + '[qa.cleanup]\nkind="command"\nrun=1\n', "qa.cleanup.run"),
+            (BASE + '[qa.cleanup]\nkind="http"\ntarget="backend"\nmethod="sensitive"\npath="https://evil.test/"\nexpect=["sensitive"]\nheaders={x=1}\n', "qa.cleanup.method"),
+            (BASE + '[qa.cleanup]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="//evil.test/{email}"\nexpect=[200]\n', "qa.cleanup.path"),
+            (BASE + '[qa.cleanup]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/{email}"\nexpect=[true]\n', "qa.cleanup.expect"),
+            (BASE + '[qa.cleanup]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/{email}"\nexpect=[200]\nheaders={x=1}\n', "qa.cleanup.headers.x"),
             (BASE + '[env.services]\nhealth=1\nup=1\ndown=1\nprepare=[1]\n', "env.services.health"),
             (BASE + '[env.services]\nhealth=["sensitive"]\n', "env.services.health"),
             (BASE + '[env.database]\nkind="sqlite"\n', "env.database.path"),
@@ -177,7 +170,7 @@ class ConfigTests(unittest.TestCase):
                 report = self.config().report()
                 self.assertEqual(report["state"], "invalid")
                 self.assertTrue(any(e["file"] == ".av/config.toml" and e["key"] == key for e in report["errors"]), report["errors"])
-                if key in {"qa.defaults", "qa.accounts.password", "env.services.env", "qa.accounts.create.env"}:
+                if key in {"qa.defaults", "qa.accounts", "env.services.env", "qa.cleanup.env"}:
                     self.assertIn({"file": ".av/config.toml", "key": key, "error": "unknown key"}, report["errors"])
                 if key in expected_errors:
                     self.assertIn({"file": ".av/config.toml", "key": key, "error": expected_errors[key]}, report["errors"])
@@ -203,11 +196,10 @@ class ConfigTests(unittest.TestCase):
                 self.assertTrue(any(e["key"] == "env.targets.backend" for e in self.config().errors))
 
     def test_recipe_and_health_targets_require_https_outside_loopback(self) -> None:
-        usages = ['[env.services]\nhealth=["backend:/health"]\n']
-        usages.extend(
-            f'[qa.accounts.{name}]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/accounts"\nexpect=[200]\n'
-            for name in ("create", "confirm", "login", "delete")
-        )
+        usages = [
+            '[env.services]\nhealth=["backend:/health"]\n',
+            '[qa.cleanup]\nkind="http"\ntarget="backend"\nmethod="DELETE"\npath="/users/{email}"\nexpect=[200]\n',
+        ]
         origins = (
             ("http://localhost:8000", "ok"),
             ("http://127.0.0.1:8000", "ok"),
@@ -231,7 +223,7 @@ class ConfigTests(unittest.TestCase):
                         self.assertTrue(any(error["key"] == "env.targets.backend" for error in report["errors"]), report["errors"])
 
     def test_trust_cannot_override_cleartext_recipe_target_from_local_config(self) -> None:
-        recipe = '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/login"\nexpect=[200]\njson={password="{password}"}\n'
+        recipe = '[qa.cleanup]\nkind="http"\ntarget="backend"\nmethod="DELETE"\npath="/users/{email}"\nexpect=[200]\n'
         self.put('version=1\n[env.targets]\nbackend="https://staging.example.com"\n[qa]\n' + recipe)
         secure = self.config()
         secure.accept(secure.trust_hash)
@@ -272,8 +264,8 @@ class ConfigTests(unittest.TestCase):
                 self.put(f'[env.values]\nX={json.dumps(source)}\n', ".av/local.toml")
                 self.assertEqual(self.config().report()["state"], "ok")
                 (self.repo / ".av/local.toml").unlink()
-        self.put(BASE + '[qa.accounts.static.user]\nemail="env:QA_USER_EMAIL"\npassword="literal:secret"\n')
-        self.assertTrue(any(e["key"] == "qa.accounts.static.user.password" for e in self.config().errors))
+        self.put(BASE + '[qa.users.user]\nemail="env:QA_USER_EMAIL"\npassword="literal:secret"\ndescription="plain user"\n')
+        self.assertTrue(any(e["key"] == "qa.users.user.password" for e in self.config().errors))
         self.put(BASE + '[env.secrets]\nX="literal:secret"\n')
         self.assertTrue(self.config().errors)
         self.put(BASE + '[env.database]\nkind="postgres"\nhost="localhost"\nport=5432\nuser="user"\nname="db"\npassword="literal:secret"\n')
@@ -388,7 +380,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_local_password_changes_hash_but_is_never_displayed(self) -> None:
         self.put(BASE)
-        self.put('[qa.accounts.static.user]\nemail="literal:user@test.local"\npassword="literal:never-display-me"\n', ".av/local.toml")
+        self.put('[qa.users.user]\nemail="literal:user@test.local"\npassword="literal:never-display-me"\ndescription="plain user"\n', ".av/local.toml")
         cfg = self.config()
         old = cfg.trust_hash
         self.assertNotIn("never-display-me", json.dumps(cfg.report()))
@@ -397,34 +389,34 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("never-display-me", result.stdout + result.stderr)
         proposal = {"config_text": BASE, "gitignore_add": [], "allowed_keys": []}
         self.assertNotIn("never-display-me", json.dumps(cfg.preview(proposal)))
-        self.put('[qa.accounts.static.user]\nemail="literal:user@test.local"\npassword="literal:different"\n', ".av/local.toml")
+        self.put('[qa.users.user]\nemail="literal:user@test.local"\npassword="literal:different"\ndescription="plain user"\n', ".av/local.toml")
         self.assertNotEqual(self.config().trust_hash, old)
-        self.put('[qa.accounts.static.user]\npassword="literal:never-display-me"\nunknown="literal:never-display-me"\n', ".av/local.toml")
+        self.put('[qa.users.user]\npassword="literal:never-display-me"\nunknown="literal:never-display-me"\n', ".av/local.toml")
         result = self.cli("config")
         self.assertEqual(result.returncode, 2)
         self.assertNotIn("never-display-me", result.stdout + result.stderr)
 
     def test_trust_mask_preserves_commands_and_masks_only_value_sources(self) -> None:
         command = "literal:; touch HIDDEN_LOGIN_COMMAND_RAN"
-        recipe = {"kind": "command", "run": command, "outputs": ["token"]}
+        recipe = {"kind": "command", "run": command}
         services = {"up": command, "prepare": [command], "down": command}
         subset = {
             "env.secrets.KEY": "literal:private-secret",
             "env.values.VALUE": "literal:private-value",
             "env.database.password": "literal:private-database",
-            "qa.accounts.static.user.email": "literal:private-email",
-            "qa.accounts.static.user.password": "literal:private-static-password",
-            "qa.accounts.static.user.id": "literal:private-id",
-            "qa.accounts.login": recipe,
-            "qa.accounts.login.run": command,
+            "qa.users.user.email": "literal:private-email",
+            "qa.users.user.password": "literal:private-static-password",
+            "qa.users.user.id": "literal:private-id",
+            "qa.cleanup": recipe,
+            "qa.cleanup.run": command,
             "env.services": services,
             "env.services.up": command,
         }
         shown = mask(subset, VALUE_SOURCE_KEYS)
         self.assertEqual(shown, {
-            **{key: "literal:***" for key in subset if key.startswith(("env.secrets.", "env.values.", "env.database.password", "qa.accounts.static."))},
-            "qa.accounts.login": recipe,
-            "qa.accounts.login.run": command,
+            **{key: "literal:***" for key in subset if key.startswith(("env.secrets.", "env.values.", "env.database.password", "qa.users."))},
+            "qa.cleanup": recipe,
+            "qa.cleanup.run": command,
             "env.services": services,
             "env.services.up": command,
         })
@@ -433,22 +425,19 @@ class ConfigTests(unittest.TestCase):
     def test_value_source_prefixes_are_invalid_in_commands_and_http_templates(self) -> None:
         for source in SOURCE_KINDS:
             value = source + "touch must-not-exist"
-            cases = [
-                (f'[qa.accounts.{name}]\nkind="command"\nrun={json.dumps(value)}\n', f"qa.accounts.{name}.run")
-                for name in ("create", "confirm", "login", "delete")
-            ]
+            cases = [(f'[qa.cleanup]\nkind="command"\nrun={json.dumps(value)}\n', "qa.cleanup.run")]
             cases.extend([
                 (f'[env.services]\nhealth=["backend:/"]\nup="true"\n{key}={json.dumps(value)}\n' if key == "down" else
                  f'[env.services]\nhealth=["backend:/"]\nup={json.dumps(value)}\n', f"env.services.{key}")
                 for key in ("up", "down")
             ])
             cases.append((f'[env.services]\nhealth=["backend:/"]\nup="true"\nprepare=["true", {json.dumps(value)}]\n', "env.services.prepare.1"))
-            http = '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\nexpect=[200]\n'
+            http = '[qa.cleanup]\nkind="http"\ntarget="backend"\nmethod="DELETE"\nexpect=[200]\n'
             cases.extend([
-                (http + f'path={json.dumps(value)}\n', "qa.accounts.login.path"),
-                (http + f'path="/login"\nheaders={{x={json.dumps(value)}}}\n', "qa.accounts.login.headers.x"),
-                (http + f'path="/login"\nform={{x={json.dumps(value)}}}\n', "qa.accounts.login.form.x"),
-                (http + f'path="/login"\njson={{nested={{items=[{{x={json.dumps(value)}}}]}}}}\n', "qa.accounts.login.json.nested.items.0.x"),
+                (http + f'path={json.dumps(value)}\n', "qa.cleanup.path"),
+                (http + f'path="/users/{{email}}"\nheaders={{x={json.dumps(value)}}}\n', "qa.cleanup.headers.x"),
+                (http + f'path="/users/{{email}}"\nform={{x={json.dumps(value)}}}\n', "qa.cleanup.form.x"),
+                (http + f'path="/users/{{email}}"\njson={{nested={{items=[{{x={json.dumps(value)}}}]}}}}\n', "qa.cleanup.json.nested.items.0.x"),
             ])
             for text, key in cases:
                 with self.subTest(source=source, key=key):
@@ -460,32 +449,43 @@ class ConfigTests(unittest.TestCase):
 
     def test_preview_repair_shows_old_command_verbatim_but_masks_value_literals(self) -> None:
         command = "literal:; touch HIDDEN_LOGIN_COMMAND_RAN"
-        old = BASE + f'[qa.accounts.login]\nkind="command"\nrun={json.dumps(command)}\noutputs=["token"]\n'
+        old = BASE + f'[qa.cleanup]\nkind="command"\nrun={json.dumps(command)}\n'
         old += '[env.values]\nVALUE="literal:private-value"\n'
         self.put(old)
-        proposal = {"config_text": old.replace(command, "printf safe"), "gitignore_add": [], "allowed_keys": ["qa.accounts.login.run"]}
+        proposal = {"config_text": old.replace(command, "printf safe"), "gitignore_add": [], "allowed_keys": ["qa.cleanup.run"]}
         preview = self.config().preview(proposal)
         self.assertTrue(preview["ok"], preview["errors"])
         self.assertIn(command, preview["diff"])
         self.assertNotIn("private-value", json.dumps(preview))
         self.assertEqual(preview["trust_subset"]["env.values.VALUE"], "literal:***")
-        self.assertEqual(preview["trust_subset"]["qa.accounts.login"]["run"], "printf safe")
+        self.assertEqual(preview["trust_subset"]["qa.cleanup"]["run"], "printf safe")
 
-    def test_names_capabilities_cookie_normalization_and_collisions(self) -> None:
-        text = BASE + '[qa.accounts]\npersonas=["user"]\n[qa.accounts.create]\nkind="command"\nrun="true"\noutputs={id=true}\n[qa.accounts.login]\nkind="command"\nrun="true"\noutputs={token=true,cookies=["__Host-session", "connect.sid"]}\n'
+    def test_user_field_and_value_name_collisions(self) -> None:
+        text = BASE + '[qa.users.user]\nemail="literal:user@test.local"\npassword="env:QA_PASSWORD"\nid="literal:u1"\ndescription="plain user"\n'
         self.put(text)
         cfg = self.config()
         self.assertFalse(cfg.errors)
-        self.assertEqual(cfg.persona_fields("user"), {"EMAIL", "PASSWORD", "ID", "TOKEN", "COOKIE", "COOKIE_HOST_SESSION", "COOKIE_CONNECT_SID"})
-        self.assertIn("QA_USER_COOKIE_HOST_SESSION", cfg.report()["exposed"])
-        self.put(text.replace('"connect.sid"', '"host_session"'))
-        self.assertTrue(any("cookies" in e["key"] for e in self.config().errors))
-        self.put(text + '[env.values]\nUSER_TOKEN="env:AV_X"\n')
-        self.assertTrue(any(e["key"] == "env.values.USER_TOKEN" for e in self.config().errors))
+        self.assertIn("QA_USER_ID", cfg.report()["exposed"])
+        self.assertEqual(cfg.report()["users"], {"user": "plain user"})
+        self.assertNotIn("personas", cfg.report())
+        for name in ("USER_EMAIL", "SUPPORT_TOKEN", "CAPTURED_X"):
+            with self.subTest(name=name):
+                self.put(text + f'[env.values]\n{name}="env:AV_X"\n')
+                self.assertTrue(any(e["key"] == f"env.values.{name}" for e in self.config().errors))
+        self.put(text.replace("qa.users.user", "qa.users.captured_owner"))
+        self.assertTrue(any(e["error"] == "reserved user name" for e in self.config().errors))
         self.put(BASE + '[env.values]\nx="env:AV_X"\nX="env:AV_Y"\n')
         self.assertTrue(any(e["key"] == "env.values.X" for e in self.config().errors))
-        self.put(BASE + '[qa.accounts]\npersonas=["user"]\n[env.values]\nUSER_COOKIE_SESSION="env:AV_X"\n')
-        self.assertTrue(any(e["key"] == "env.values.USER_COOKIE_SESSION" for e in self.config().errors))
+
+    def test_cleanup_destination_changes_require_trust(self) -> None:
+        text = BASE + '[qa.cleanup]\nkind="http"\ntarget="backend"\nmethod="DELETE"\npath="/users/{email}"\nexpect=[200]\n'
+        self.put(text)
+        cfg = self.config()
+        cfg.accept(cfg.trust_hash)
+        self.put(text.replace("/users/", "/accounts/"))
+        cfg = self.config()
+        self.assertEqual(cfg.trust, "changed")
+        self.assertEqual(cfg.trust_subset["qa.cleanup"]["path"], "/accounts/{email}")
 
     def test_preview_section_guard_and_no_writes(self) -> None:
         original = BASE + 'fix="approve"\n[delivery]\n# keep this comment\nmode="old"\n'
@@ -500,11 +500,11 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(replacement=replacement):
                 changed = {**proposal, "config_text": proposal["config_text"].replace('mode="old"', replacement)}
                 self.assertFalse(cfg.preview(changed)["ok"])
-        inline = 'version=1\n[env.targets]\nbackend = "http://localhost:8000"\n[qa]\naccounts={personas=["user"], email="qa+{run}-{persona}@test.local"}\n[delivery]\n# protected\nmode="old"\n'
+        inline = 'version=1\n[env.targets]\nbackend = "http://localhost:8000"\n[qa]\nusers={user={email="literal:user@test.local", password="env:QA_PASSWORD", description="plain user"}}\n[delivery]\n# protected\nmode="old"\n'
         self.put(inline)
-        proposal = {"config_text": inline.replace('personas=["user"]', 'personas=["user", "other"]'), "gitignore_add": [], "allowed_keys": ["qa.accounts.personas"]}
+        proposal = {"config_text": inline.replace('description="plain user"', 'description="owner"'), "gitignore_add": [], "allowed_keys": ["qa.users.user.description"]}
         self.assertTrue(self.config().preview(proposal)["ok"])
-        proposal["config_text"] = proposal["config_text"].replace("qa+{run}-{persona}@test.local", "other+{run}-{persona}@test.local")
+        proposal["config_text"] = proposal["config_text"].replace("user@test.local", "other@test.local")
         self.assertFalse(self.config().preview(proposal)["ok"])
         self.put(BASE)
         proposal = {"config_text": BASE + 'fix="auto"\n', "gitignore_add": [], "allowed_keys": ["qa.fix"]}
@@ -690,7 +690,7 @@ class ConfigTests(unittest.TestCase):
     def test_dependency_declarations_are_rejected_without_execution(self) -> None:
         sources = '[env.values]\nX="cmd:touch source-ran; printf value"\n'
         cases = (
-            ('[qa.accounts.login]\nkind="command"\nrun="sh scripts/login.sh"\nenv=["value.X"]\n', "qa.accounts.login.env"),
+            ('[qa.cleanup]\nkind="command"\nrun="sh scripts/cleanup.sh"\nenv=["value.X"]\n', "qa.cleanup.env"),
             ('[env.services]\nhealth=["backend:/"]\nup="sh scripts/up.sh"\nenv={up=["value.X"]}\n', "env.services.env"),
         )
         for fragment, key in cases:
@@ -795,7 +795,7 @@ class ConfigTests(unittest.TestCase):
         self.assertIsNotNone(resolver.validate("file:../secret.env#X", "delivery.token", local=True))
 
     def test_malformed_types_and_documents_do_not_crash_or_echo(self) -> None:
-        for text in ('version=1\n[qa]\nfix=[]\n', 'version=1\n[qa.accounts.login]\nkind=[]\n', 'version=1\n[env.database]\nkind=[]\n', 'version=1\n[qa]\nbudget=1\n', 'version=1\n[qa]\naccounts=1\n', 'version=1\n[env]\nvalues=1\n', 'version=1\n[qa]\nbudget="sensitive\n'):
+        for text in ('version=1\n[qa]\nfix=[]\n', 'version=1\n[qa.cleanup]\nkind=[]\n', 'version=1\n[env.database]\nkind=[]\n', 'version=1\n[qa]\nbudget=1\n', 'version=1\n[qa]\nusers=1\n', 'version=1\n[env]\nvalues=1\n', 'version=1\n[qa]\nbudget="sensitive\n'):
             with self.subTest(text=text):
                 self.put(text)
                 result = self.cli("config")
@@ -815,27 +815,27 @@ class ConfigTests(unittest.TestCase):
     def test_recipe_json_rejects_non_json_toml_values(self) -> None:
         for value in ("2000-01-01", "nan", "inf"):
             with self.subTest(value=value):
-                self.put(BASE + f'[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[200]\njson={{x={value}}}\n')
+                self.put(BASE + f'[qa.cleanup]\nkind="http"\ntarget="backend"\nmethod="DELETE"\npath="/users/{{email}}"\nexpect=[200]\njson={{x={value}}}\n')
                 result = self.cli("config")
                 self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 report = json.loads(result.stdout)
-                self.assertTrue(any(error["key"] == "qa.accounts.login.json.x" for error in report["errors"]))
+                self.assertTrue(any(error["key"] == "qa.cleanup.json.x" for error in report["errors"]))
 
     def test_nested_placeholder_and_shell_environment_syntax(self) -> None:
-        self.put(BASE + '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/"\nexpect=[200]\njson={items=[{secret="{secret.MISSING}"}]}\n')
+        self.put(BASE + '[qa.cleanup]\nkind="http"\ntarget="backend"\nmethod="DELETE"\npath="/users/{email}"\nexpect=[200]\njson={items=[{secret="{secret.MISSING}"}]}\n')
         self.assertTrue(any("json.items" in error["key"] for error in self.config().errors))
-        self.put(BASE + '[qa.accounts.login]\nkind="command"\nrun="printf \\"${QA_EMAIL}\\""\noutputs=["token"]\n')
+        self.put(BASE + '[qa.cleanup]\nkind="command"\nrun="printf \\"${QA_EMAIL}\\""\n')
         self.assertFalse(self.config().errors)
 
     def test_command_recipe_braces_are_not_http_placeholders(self) -> None:
         cases = (
-            ("login", "curl -s localhost | jq -c '{token: .access_token}'"),
-            ("login", 'printf \'{"token":"%s"}\' "$T"'),
-            ("delete", "echo {password}"),
+            ("cleanup", "curl -s localhost | jq -c '{count: .count}'"),
+            ("cleanup", 'printf \'{"count":"%s"}\' "$T"'),
+            ("cleanup", "echo {email}"),
         )
         for recipe, command in cases:
             with self.subTest(recipe=recipe, command=command):
-                self.put(BASE + f'[qa.accounts.{recipe}]\nkind="command"\nrun={json.dumps(command)}\n')
+                self.put(BASE + f'[qa.{recipe}]\nkind="command"\nrun={json.dumps(command)}\n')
                 report = self.config().report()
                 self.assertEqual(report["state"], "ok", report["errors"])
                 self.assertEqual(report["errors"], [])

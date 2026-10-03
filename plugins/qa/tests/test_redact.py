@@ -63,6 +63,32 @@ class RedactTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), body)
 
+    def test_captured_cookie_masks_its_value_when_echoed_under_any_key(self) -> None:
+        for name, cookie in (("QA_CAPTURED_OWNER_COOKIE", "session=x'y"), ("QA_CAPTURED_OWNER_COOKIE_2", "session=x'y; Path=/")):
+            with self.subTest(name=name):
+                result = self.redact(
+                    json.dumps({"note": "x'y", "message": cookie, "public": "welcome"}),
+                    names=(name,),
+                    values={name: cookie},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"note": "***", "message": "***", "public": "welcome"})
+
+    def test_short_captured_cookie_preserves_status_and_numbers(self) -> None:
+        for value in ("1", "12"):
+            with self.subTest(value=value):
+                cookie = f"consent={value}"
+                body = {"id": 10, "count": 1, "code": 123, "note": value, "cookie": cookie}
+                result = self.redact(
+                    f"HTTP/1.1 201 Created\r\nSet-Cookie: {cookie}\r\n\r\n" + json.dumps(body),
+                    names=("QA_CAPTURED_OWNER_COOKIE",),
+                    values={"QA_CAPTURED_OWNER_COOKIE": cookie},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                headers, sanitized = result.stdout.split("\n\n", 1)
+                self.assertEqual(headers.splitlines(), ["HTTP/1.1 201 Created", "Set-Cookie: ***"])
+                self.assertEqual(json.loads(sanitized), {**body, "cookie": "***"})
+
     def test_unknown_or_malformed_names_abort_without_emitting_the_body(self) -> None:
         invalid_names = (
             "UNDECLARED_TOKEN",
