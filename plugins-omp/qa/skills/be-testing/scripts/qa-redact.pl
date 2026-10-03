@@ -6,14 +6,19 @@ my $names_file = shift @ARGV;
 die "qa-redact: names file unavailable\n" unless defined $names_file && -f $names_file && -r $names_file && !-l $names_file && -O $names_file;
 open my $names, '<', $names_file or die "qa-redact: names file unavailable\n";
 my @DECL;
+my $CLIENT_NAMES = qr/PGHOST|PGPORT|PGUSER|PGDATABASE|PGPASSWORD|SQLITE_DB|MYSQL_HOST|MYSQL_TCP_PORT|MYSQL_USER|MYSQL_DATABASE|MYSQL_PWD|REDIS_HOST|REDIS_PORT|REDIS_DB|REDISCLI_AUTH/;
 while (my $name = <$names>) {
     chomp $name;
-    die "qa-redact: invalid names file\n" unless $name =~ /\A(?:QA_[A-Z0-9_]+|PGHOST|PGPORT|PGUSER|PGDATABASE|PGPASSWORD|SQLITE_DB|MYSQL_HOST|MYSQL_TCP_PORT|MYSQL_USER|MYSQL_DATABASE|MYSQL_PWD)\z/;
-    next if $name eq 'PGPORT' || $name eq 'MYSQL_TCP_PORT'; # Connection ports are not secrets.
+    die "qa-redact: invalid names file\n" unless $name =~ /\A(?:QA_[A-Z0-9_]+|$CLIENT_NAMES|STORE_[A-Z0-9_]+_(?:$CLIENT_NAMES))\z/;
+    next if $name =~ /(?:\A|_)(?:PGPORT|MYSQL_TCP_PORT|REDIS_PORT|REDIS_DB)\z/; # Ports and Redis indexes are not secrets.
     my $value = $ENV{$name};
     push @DECL, $value if defined $value && length($value) >= 4;
+    if (defined $value && $name =~ /_COOKIE(?:_[0-9]+)?\z/ && $value =~ /^[^=]*=([^;]+)/) {
+        push @DECL, $1 if length($1) >= 3; # Cookies may be echoed without their name or attributes.
+    }
 }
 close $names;
+@DECL = sort { length($b) <=> length($a) } @DECL; # A host or store name may be a password prefix.
 local $/; my $in = <STDIN>; $in = '' unless defined $in;
 my %SENSITIVE = map { $_ => 1 } qw(token secret password passwd pwd passphrase key session cookie auth authorization credential private dsn url uri jwt bearer otp pin sig signature);
 my $STEM = qr/token|secret|passw|apikey|accesskey|privatekey|sessionid|sessid|csrf|xsrf|credential|connectionstring|recoverycode|verificationcode|backupcode/;

@@ -30,14 +30,13 @@ class SecretSet:
                         self.remember(source[8:])
                     elif source.startswith("env:"):
                         self.remember(os.environ.get(source[4:]))
-        for name in ("accounts.private.json", "secrets.json"):
-            try:
-                value = json.loads((directory / name).read_text())
-            except FileNotFoundError:
-                continue
-            except (OSError, UnicodeError, ValueError) as error:
-                raise ConfigError(f"{name}: private state unavailable") from error
-            self.remember(value)
+        try:
+            value = json.loads((directory / "secrets.json").read_text())
+        except FileNotFoundError:
+            return
+        except (OSError, UnicodeError, ValueError) as error:
+            raise ConfigError("secrets.json: private state unavailable") from error
+        self.remember(value)
 
     def remember(self, value: object) -> None:
         """Add resolved or private values, including strings in nested objects."""

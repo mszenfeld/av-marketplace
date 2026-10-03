@@ -15,7 +15,7 @@ description: Test plan structure, naming conventions, edge case generation rules
 
 ## Plan Structure
 
-Every test plan MUST follow this structure; omit optional sections and `**Blocked-by:**` lines where they do not apply. Targets, personas, exposed values, database connections and service bring-up come from the project config, not the plan. Replace the illustrative target names, paths, expected results and citation tags with grounded project-specific details:
+Every test plan MUST follow this structure; omit optional sections and `**Blocked-by:**` lines where they do not apply. Targets, configured existing users, exposed values, stores and service bring-up come from the project config. The plan declares users and tester-owned registration/login preconditions. Replace the illustrative target names, paths, expected results and citation tags with grounded project-specific details:
 
 ~~~markdown
 # Test Plan: <title>
@@ -44,21 +44,27 @@ Defects in the code under test that obstruct how it must be tested. Mandatory �
 - **Remediation (human Setup prerequisite):** <human action before the run>
 - **Blocks:** <scenario IDs carrying `**Blocked-by:** BLK-01`>
 
+## Users
+- owner: registered — plain user who owns the resource
+- other: registered — second plain user for ownership checks
+- admin: existing — administrator (qa.users.admin)
+
 ## Detected Tools
 - Playwright MCP: <available/unavailable>
 - HTTP client: <curl/httpie/unavailable>
-- Database access: <psql/sqlite3/mysql/unavailable>
+- Store clients: <psql/sqlite3/mysql/redis-cli/unavailable>
 
 ## FE Test Scenarios
 
 ### FE-01: <scenario name>
 **Blocked-by:** BLK-01
 - **Area:** <component/page>
-- **Target:** web
-- **Preconditions:** <create any required data through browser (UI) actions as the scenario's persona; record the created identifiers>
+- **Target:** ui
+- **Writes:** yes
+- **Preconditions:** Register owner through the signup form with email `qa+$QA_TAG-owner@test.local` and password `$QA_NEW_PASSWORD`; retain the email and returned user id as owner's values. Create required data through browser (UI) actions as owner and record the identifiers.
 - **Steps:**
   1. Open `/login` in the browser
-  2. Fill Email with `$QA_USER_EMAIL` and Password with `$QA_USER_PASSWORD`
+  2. Fill Email with `$QA_OWNER_EMAIL` from the registration precondition and Password with `$QA_NEW_PASSWORD`
   3. Click "Sign In"
 - **Expected:** <welcome text shown> (path:line)
 - **Edge cases:**
@@ -70,13 +76,14 @@ Defects in the code under test that obstruct how it must be tested. Mandatory �
 ### BE-01: <scenario name>
 **Blocked-by:** BLK-01
 - **Area:** <endpoint/service>
-- **Target:** api
-- **Preconditions:** <HTTP requests that create the required data as the scenario's persona; record the created identifiers>
+- **Target:** backend
+- **Writes:** yes
+- **Preconditions:** POST `/register` with email `qa+$QA_TAG-owner@test.local` and password `$QA_NEW_PASSWORD`; retain owner's access token and user id. Create any required data through HTTP requests as owner, recording the identifiers.
 - **Method:** <HTTP method> <path>
-- **Headers:** Authorization: Bearer $QA_USER_TOKEN
+- **Headers:** Authorization: Bearer owner's access token retained from the registration precondition (tester-owned, not a plan token)
 - **Payload:** `<JSON body>`
 - **Expected:** <status code>, <response body description> (path:line)
-- **DB Check:** `SELECT COUNT(*) FROM resources WHERE id = <created-resource-id>` — <expected count>
+- **State Check:** <store>: SELECT COUNT(*) FROM resources WHERE user_id = '$QA_OWNER_ID' → <expected count>
 - **Edge cases:**
   - <edge case with expected status and response> (path:line)
   - <second edge case with expected status and response> (path:line)
@@ -110,14 +117,18 @@ The BE tester sees only the output of `qa-redact`: it replaces values under sens
 
 - `## Source` records the diff source, base, date, current checkout `Branch:` and `Head:`. These identify the branch and snapshot for plan selection and staleness checks.
 - `## Setup` is optional human notes only, directly after the title when present. No consumer parses it. Do not declare URLs, credentials, database connections or service commands there; their configuration belongs in `.av/config.toml` and its local overrides.
-- Persona names match `[a-z][a-z0-9_]*`. For persona `p`, use its upper-cased name in `QA_<P>_EMAIL`, `QA_<P>_PASSWORD`, `QA_<P>_ID`, `QA_<P>_TOKEN`, `QA_<P>_COOKIE` or `QA_<P>_COOKIE_<NAME>`. `EMAIL` and `PASSWORD` always exist; `ID`, `TOKEN` and cookie fields require the corresponding create/static-id or login capability. Cookie suffixes upper-case the cookie name, replace each run outside `A-Z0-9` with `_` and trim leading/trailing `_` (`__Host-session` → `HOST_SESSION`, `connect.sid` → `CONNECT_SID`). An `[env.values]` entry `X` is exposed as `QA_<X>`, with `X` upper-cased. `[env.secrets]` is never tester-visible.
-- Credentials and exposed values are written as `$QA_NAME` or `${QA_NAME}` anywhere in a scenario: steps, headers, payloads, preconditions and edges. The name inside either form matches `QA_[A-Z0-9_]+`. No separate declaration is needed: `plan check` derives requirements from these tokens. A configured persona plus a field from `EMAIL`, `PASSWORD`, `ID`, `TOKEN`, `COOKIE`, `COOKIE_<NAME>` is a persona field; otherwise a configured value name is a value. An unknown token ending in a persona field is reported under `missing.personas`; other unknown tokens go under `missing.values`. Unavailable persona capabilities are gaps too. These are config gaps checked before dispatch, not runtime `NEED_INFO`.
-- A credential in a header, cookie or login step (bearer token, API key, email/password) must use those names, never the project's own variable name (`API_KEY`), a literal or a placeholder such as `TOKEN`. A deliberately invalid input in a negative edge case is not a credential. Never copy secret values into the plan.
-- Every absolute URL anywhere in a scenario, including `**Expected:**` and edge cases, must match an `[env.targets]` origin exactly (scheme, lower-cased host, explicit or default port). `plan check` reports any other origin as `off_target`, and `/qa:run` stops. Request and page URLs may instead be relative paths, which use the section origin (`defaults.FE` / `defaults.BE`, the `ui` and `backend` targets) unless the scenario has `- **Target:** <name>`; write that line whenever the default does not apply. Userinfo is always refused, and redirects are never followed automatically.
-- When config is absent or lacks a needed persona, value or target, retain the repository-grounded name. Write a missing target as `- **Target:** <name>` with relative paths, never an absolute URL on an unknown origin. `plan check` reports the missing names so `/qa:run` can fill the config gaps; do not replace them with literal credentials or omit the scenario.
-- Data a scenario needs (a CV, an order, an uploaded file record) is created by that scenario's own preconditions as its persona, never assumed to exist. FE preconditions create data through browser (UI) actions only; API/HTTP preconditions belong to BE scenarios. Set up another persona's resource through that persona for ownership checks. A repository file may be an upload fixture. `NEED_INFO kind=fixture` is reserved for data the app cannot create itself. Precondition writes count toward the mutation policy, including when the main request expects rejection.
-- `**DB Check:**` names no connection; it requires `[env.database]`, and `plan check` reports `missing.database` otherwise. The engine exposes `PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD` for Postgres, `MYSQL_HOST MYSQL_TCP_PORT MYSQL_USER MYSQL_DATABASE MYSQL_PWD` for MySQL or `SQLITE_DB` for SQLite through the private run channel. These are DB-client inputs, not plan declarations. Never put passwords or DSNs in process argv.
-- Write DB checks against only the columns asserted; never put `SELECT *` in a plan. Row checks project just the needed columns to JSON and pass through the installed `qa-redact.pl` before inspection or reporting.
+- `## Users` is the section between that heading and the next `## ` heading. Each line is `- <name>: existing|registered — <description>` (a `*` bullet is also accepted). Names match `[a-z][a-z0-9_]*`; the first declaration wins if repeated. A plain user signup can create is `registered`; a role or state signup cannot produce is `existing` and must be configured under `[qa.users.<name>]`. Include owner, other user and each required role; anonymous actions use no user credential. Use at most 10 registered users per plan.
+- An existing user's uppercased name gives `QA_<U>_EMAIL`, `QA_<U>_PASSWORD` and optional `QA_<U>_ID`. A registered user's `$QA_<U>_EMAIL` / `$QA_<U>_ID` are tester-owned values from its registration step, not channel names. Its password is the run's `$QA_NEW_PASSWORD`; the dispatch supplies `$QA_TAG`, used in emails such as `qa+$QA_TAG-owner@test.local`. Using a registered user's values before registration ran is `NEED_INFO kind=fixture` naming the user at run time.
+- `$QA_NAME` / `${QA_NAME}` tokens are scanned anywhere in a scenario: steps, headers, payloads, preconditions and edges. Resolution order is: (1) engine-issued `TAG` and `NEW_PASSWORD`; (2) any name ending in `_TOKEN`, `_COOKIE` or `_COOKIE_<N>` is a plan error, because testers obtain tokens/cookies themselves; (3) `EMAIL|PASSWORD|ID` fields of the longest user-name prefix among plan declarations and configured users; (4) an `[env.values]` name; (5) an undeclared name ending in `_EMAIL|PASSWORD|ID` is a plan error; (6) any other name is `missing.values`. Never write `$QA_<U>_TOKEN` or cookie tokens in a plan; say to retain the token/cookie from a grounded registration/login precondition and use it in later requests.
+- A declared `existing` user without config is `missing.users` with reason `user is not configured`; a requested id without a configured source has reason `id source is not configured`. A declared `registered` user needs no config, but cannot share a name with a configured user (`user <n> is configured; declare it existing`). A configured user used by a token must be declared under `## Users`; otherwise it is a plan error `user <n> is configured but not declared under ## Users`. Names `new`, `captured` and `captured_*` are reserved. Values cannot collide with exposed user fields, `TAG`, `NEW_PASSWORD` or `CAPTURED_*`, or use a reserved token/cookie suffix. `[env.secrets]` is never tester-visible.
+- A login/form credential or API key uses a supported user/value token; bearer tokens and cookies instead come from tester-owned preconditions. Never use the project's own variable name (`API_KEY`), a literal credential or an ungrounded placeholder. A deliberately invalid input in a negative edge case is not a credential. Never copy secret values into the plan.
+- Every absolute URL anywhere in a scenario, including `**Expected:**` and edge cases, must match an `[env.targets]` origin exactly (scheme, lower-cased host, explicit or default port). `plan check` reports any other origin as `off_target`, and `/qa:run` stops. Request and page URLs may instead be relative paths, using `defaults.FE` / `defaults.BE` (`ui` / `backend`, or the only target of any name), unless the scenario has `- **Target:** <name>`. With multiple targets a missing section name is a gap; never use the other section's origin. A precondition on another configured origin writes an absolute URL on that origin; there is no per-step target syntax. Userinfo is always refused, and redirects are never followed automatically.
+- A scenario using any user field token, `$QA_TAG` or `$QA_NEW_PASSWORD` must resolve every touched origin — explicit Target or section origin plus every absolute URL — to loopback or HTTPS. Otherwise `plan check` reports `credentials over cleartext origin <origin>`. Testers refuse every credential-bearing request or form submission on non-loopback HTTP with `SKIP — cleartext origin refused: <origin>`.
+- When config is absent or lacks a needed user, value, target or store, retain the repository-grounded name. Write a missing target as `- **Target:** <name>` with relative paths, never an absolute URL on an unknown origin. `plan check` reports the missing names so `/qa:run` can fill the config gaps; do not replace them with literal credentials or omit the scenario. `missing.cleanup` is a soft gap when registered users exist without a cleanup recipe; it does not make `plan check.ok` false.
+- Data a scenario needs (a CV, an order, an uploaded file record) is created by that scenario's own preconditions as its user, never assumed to exist. FE preconditions create data through browser (UI) actions only; API/HTTP preconditions belong to BE scenarios. Set up another user's resource through that user for ownership checks. A repository file may be an upload fixture. `NEED_INFO kind=fixture` is reserved for data the app cannot create itself. Precondition writes, including registration, count toward the mutation policy even when the main request expects rejection.
+- Every FE and BE scenario has `- **Writes:** yes|no`, covering preconditions, main flow and edges. Under `qa.mutations = "deny"`, `yes`, a missing/invalid line or any syntactically detected write guards the whole scenario. `no` never overrides detected writes; `allow` guards nothing.
+- `- **State Check:** [<store>: ]<query> → <expected>` is repeatable and BE-only. Store prefixes may be backticked and must match a configured `[env.stores.<name>]`; an unknown prefix is `missing.stores`. Without a prefix, exactly one configured store is required, otherwise it is a plan error `state check must name its store`. Always name the store when several exist. The engine resolves checks in line order and exposes namespaced `STORE_<NAME_UPPER>_<CLIENT>` variables through the private channel; `. '<run-dir>/load.sh' --store <name> <required native names>` exports client aliases. These are store-client inputs, not plan tokens. Never put passwords or DSNs in process argv.
+- Write SQL State Checks against only the columns asserted; never put `SELECT *` in a plan. Row checks project just the needed columns to JSON and pass through the installed `qa-redact.pl` before inspection or reporting. Redis State Checks use only the be-testing skill's read-command allowlist.
 
 ## Harness scope
 
@@ -177,15 +188,18 @@ Before saving the plan, verify:
 - [ ] Every scenario has at least 2 edge cases
 - [ ] Every BE scenario has an expected status code
 - [ ] Every FE scenario has concrete steps (not "test the form")
-- [ ] DB Checks use actual table/column names from the codebase, name no connection and require `[env.database]`
+- [ ] State Checks are repeatable, BE-only, use real table/column names or supported Redis read commands, and name a configured store (mandatory with several stores)
 - [ ] API paths match actual routes from the codebase
 - [ ] No placeholder text (TBD, TODO, fill in later)
 - [ ] `## Source` records the current checkout `Branch:` and `Head:`
-- [ ] `## Setup`, if present, holds only optional human notes; targets, values, database connections and bring-up are config-owned
-- [ ] Every credential and exposed value uses a `$QA_NAME` or `${QA_NAME}` token, never a literal secret, a non-`QA_` name or a placeholder such as `TOKEN`
+- [ ] `## Setup`, if present, holds only optional human notes; targets, values, stores and bring-up are config-owned
+- [ ] Credentials and exposed values use supported `$QA_NAME` / `${QA_NAME}` tokens; tokens/cookies are retained by the tester from preconditions, never `$QA_<U>_TOKEN` / cookie plan tokens or literal secrets
 - [ ] Every absolute URL anywhere in a scenario, including Expected and edge cases, is on a config target origin; off-target response URLs are asserted by separate components, not literal URLs. Request/page paths have `- **Target:** <name>` where the section default does not apply
 - [ ] Missing config names remain explicit; a missing target is named with relative paths, not an absolute URL on an unknown origin
-- [ ] Each scenario creates its required data as its persona through browser (UI) actions for FE or API/HTTP requests for BE; only data the app cannot create requires an external fixture
+- [ ] Each scenario creates its required data as its user through browser (UI) actions for FE or API/HTTP requests for BE; only data the app cannot create requires an external fixture
+- [ ] `## Users` declares each referenced user as existing or registered, covering owner, other user, anonymous actions and each role; at most 10 users are registered
+- [ ] Every FE and BE scenario has `- **Writes:** yes|no` consistent with all executable actions, including registration and edges
+- [ ] Every credential-bearing scenario touches only loopback or HTTPS origins
 - [ ] Every `**Expected:**` and edge-case expectation has a grounded `(path:line)` or `(unverified — confirm at run time)` tag
 - [ ] BE expectations and edge cases assert only visible data after `qa-redact`: scheme/host/port/path may be observable for URL-only keys, but masked userinfo/query/fragment, one-time links and any masked path component are not
 - [ ] `## Blockers / Findings` is present (or reads `None found.`)

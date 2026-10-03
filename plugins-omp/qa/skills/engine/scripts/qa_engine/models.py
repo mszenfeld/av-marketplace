@@ -37,7 +37,7 @@ class Run:
     @property
     def policy(self) -> JSON:
         qa = self.record["config"]["qa"]
-        return {key: qa[key] for key in ("fix", "mutations")}
+        return {key: qa[key] for key in ("fix", "mutations", "start_services")}
 
     @property
     def budget(self) -> dict[str, int]:

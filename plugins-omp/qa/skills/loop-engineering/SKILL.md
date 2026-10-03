@@ -25,12 +25,12 @@ Every closed loop in this marketplace MUST meet the **Universal** items. The **C
 6. **Bound the loop with hard budgets.** Cap iterations ∧ dispatches ∧ time. Unbounded loops blow cost; weak budgets ship the first (false) green. → `/qa:run` delegates the triple-gate to engine `iteration open`, `iteration close` and `dispatch` using the engine's fixed limits (3 iterations, 50 dispatches, 30 minutes); fix work is bounded, and the authoritative final verification is counted but not budget-gated.
    - *Rider (model-heavy loops — recommended, not a universal MUST):* also cap cost/tokens. `/qa:run` has no cost ceiling despite being model-heavy, so this prescribes beyond the reference.
 7. **Stop on no-progress and oscillation, and report "stopped" as distinct from success.** A loop can stall or oscillate well under budget; "stopped / budget-exhausted" must not read as "passed." → `/qa:run`'s engine `iteration open` / `iteration close` own no-progress and regression stops; `summary` reports `Stopped` or `Budget Exhausted`, distinct from `Pass`.
-8. **Document the residual-risk list.** If you cannot enumerate what the loop fails to catch, it is not ready. → `/qa:run`'s *Residual risks* (auth-unverified, *Verifier-gaming residual*, 2xx-shaped gating).
+8. **Document the residual-risk list.** If you cannot enumerate what the loop fails to catch, it is not ready. → `/qa:run`'s *Residual risks* (`auth`-flagged FAILs, *Verifier-gaming residual*, 2xx-shaped gating).
 
 ### Conditional (MUST when the loop persists state, mutates the workspace, and/or auto-corrects)
 
 9. **Guard provenance — don't auto-fix a suspect assertion.** *(Auto-correcting loops.)* Auto-generated or guessed assertions are not auto-fixed against correct source; the failure may be the assertion, not the code. A read-only loop has nothing to auto-fix and satisfies this trivially. → `/qa:run`'s *Plan-suspect guards (per issue)*: engine `candidates` with `qa.fix = "auto"` excludes each QA issue whose failing assertion is tagged `(unverified — confirm at run time)`, from any plan, while a grounded sibling issue stays eligible; `qa.fix = "approve"` surfaces the unverified flag for human review instead.
-10. **Persist state in a durable sidecar with input hash-pinning, and be idempotent.** *(Stateful loops.)* Loop-critical state lives on disk, not in the conversation; the input is hashed to detect mid-run tampering; re-running on identical input reuses prior state by hash and never duplicates results or re-applies corrections. The orchestrator's own memory is lossy across many tool calls. → `/qa:run`'s *Step 5: Start the run* delegates sidecar idempotency and plan hash-pinning to engine `run start`; `iteration open` stops on plan drift.
+10. **Persist state in a durable sidecar with input hash-pinning, and be idempotent.** *(Stateful loops.)* Loop-critical state lives on disk, not in the conversation; the input is hashed to detect mid-run tampering; re-running on identical input reuses prior state by hash and never duplicates results or re-applies corrections. The orchestrator's own memory is lossy across many tool calls. → `/qa:run`'s *Step 5: Start the run* delegates sidecar idempotency and plan hash-pinning to engine `run start`; `iteration open` stops on plan drift. The pinned mutation policy is two-valued `qa.mutations = "allow"|"deny"`.
 11. **Keep writes scoped and recoverable.** *(Mutating loops.)* Touch only what you changed; never destroy the user's pre-existing work; leave changes uncommitted for human control. → `/qa:run`'s engine computes `fix_touched_files = post − pre_loop_dirty`; *Step 12: Teardown, summary and recovery* discloses overlap and scoped `git restore`.
 
 ## Oracle taxonomy
@@ -61,7 +61,7 @@ Rules: prefer strong oracles; a soft oracle MUST self-label its verdict *advisor
 - *Plan-suspect guards (per issue)* — engine `candidates` excludes failing assertions tagged `(unverified — confirm at run time)` from any plan under `qa.fix = "auto"`, per QA issue rather than per scenario; `approve` surfaces their flag.
 - *Safety Guards (Apply in All Modes)* — the engine's fail-closed origin/trust and mutation guards.
 - *Step 11: Authoritative final run* — engine `report --final` writes Status once, only from the authoritative final run.
-- Engine `summary`'s `## Coverage` block and the auth-unverified outcome — "Exercised vs Not verified" disclosure.
+- Engine `summary`'s `## Coverage` block and the `auth`-flagged FAIL guard — "Exercised vs Not verified" disclosure.
 - `plugins/commit/scripts/block-git-push.sh` — the deterministic, fail-closed guard exemplar (deny > ask > allow).
 
 ## Review checklist

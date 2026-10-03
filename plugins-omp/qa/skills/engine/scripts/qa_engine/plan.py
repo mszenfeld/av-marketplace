@@ -2,8 +2,8 @@
 
 Parsing never resolves a value source or runs a scenario. CLI reports contain
 identifiers and sanitized origins, not scenario payloads or credential values.
-Sections and DB checks are scenario IDs in plan order. Persona gaps carry
-``name``, ``token``, and ``reason``; value and target gaps carry config names.
+Sections list scenario IDs in plan order; State Checks map them to store names.
+User gaps carry ``name``, ``token``, and ``reason``; other gaps carry config names.
 """
 from __future__ import annotations
 
@@ -15,8 +15,10 @@ import re
 
 from av_config.errors import ConfigError
 from av_config.origins import Origin
+from av_config.origins import is_loopback
 from av_config.origins import parse_origin
 from qa_engine.config import Config
+from qa_engine.config import CREDENTIAL_SUFFIX
 from qa_engine.config import SECTION_TARGETS
 from qa_engine.files import display_path
 from qa_engine.common import origin_display
@@ -31,11 +33,14 @@ TOKEN = re.compile(r"\$\{(QA_[A-Z0-9_]+)\}|\$(QA_[A-Z0-9_]+)(?![A-Za-z0-9_])")
 URL = re.compile(r"https?://[^\s`\"'<>]+", re.IGNORECASE)
 WRITE_ACTION = re.compile(r"\b(POST|PUT|PATCH|DELETE)\b", re.IGNORECASE)
 SQL_WRITE = re.compile(r"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|CREATE|UPSERT)\b", re.IGNORECASE)
+REDIS_WRITE = re.compile(r"\b(SET|SETEX|SETNX|MSET|DEL|UNLINK|HSET|HDEL|LPUSH|RPUSH|LPOP|RPOP|SADD|SREM|ZADD|ZREM|INCR|INCRBY|DECR|DECRBY|EXPIRE|PERSIST|RENAME|APPEND|XADD|XDEL|FLUSHDB|FLUSHALL)\b", re.IGNORECASE)
+STORE_PREFIX = re.compile(r"^`?([A-Za-z_][A-Za-z0-9_]*)`?:[ \t]+(.*)\Z", re.DOTALL)
 WRITE_STEP = re.compile(r"\b(create|delete|update|insert|seed)\b", re.IGNORECASE)
 CITATION = re.compile(r"\((`?[^()\s]+:\d+(?:-\d+)?`?)\)")
 STATUS = re.compile(r"(?<![A-Za-z0-9_])([1-5]\d{2})(?![A-Za-z0-9_])")
-PERSONA_FIELD = re.compile(r"(?:EMAIL|PASSWORD|ID|TOKEN|COOKIE|COOKIE_[A-Z0-9_]+)\Z")
-UNKNOWN_PERSONA = re.compile(r"(.+?)_(EMAIL|PASSWORD|ID|TOKEN|COOKIE|COOKIE_[A-Z0-9_]+)\Z")
+USER_TOKEN = re.compile(r"(.+?)_(EMAIL|PASSWORD|ID)\Z")
+ENGINE_TOKENS = frozenset({"TAG", "NEW_PASSWORD"})
+USER_LINE = re.compile(r"^[ \t]*[-*][ \t]+([a-z][a-z0-9_]*)[ \t]*:[ \t]*(existing|registered)\b", re.MULTILINE)
 RELATIVE_PATH = re.compile(r"(?<![A-Za-z0-9_:/])/(?!/)[A-Za-z0-9_{?]")
 
 
@@ -53,6 +58,14 @@ class Assertion:
 
 
 @dataclass
+class StateCheck:
+    """One repeatable state assertion with an optional named-store prefix."""
+
+    store: str | None
+    text: str
+
+
+@dataclass
 class Scenario:
     """A scenario's original block and mechanically parsed execution requirements."""
 
@@ -63,9 +76,10 @@ class Scenario:
     method: str | None
     path: str | None
     target: str | None
+    writes: bool | None
     expected: Assertion
     edges: list[Assertion]
-    db_check: str | None
+    state_checks: list[StateCheck]
     tokens: list[str]
     urls: list[str]
     actions: str
@@ -86,6 +100,7 @@ class Plan:
     branch: str | None
     head: str | None
     scenarios: list[Scenario]
+    users: dict[str, str] = field(default_factory=dict)
 
     @property
     def sections(self) -> dict[str, list[str]]:
@@ -153,9 +168,23 @@ def _source(text: str) -> tuple[str | None, str | None]:
     return metadata.get("branch"), metadata.get("head")
 
 
+def _users_section(text: str) -> dict[str, str]:
+    section = re.search(r"^## Users[ \t]*$", text, re.MULTILINE)
+    if section is None:
+        return {}
+    following = re.search(r"^## ", text[section.end():], re.MULTILINE)
+    content = text[section.end():section.end() + following.start() if following else len(text)]
+    users: dict[str, str] = {}
+    for name, kind in USER_LINE.findall(content):
+        users.setdefault(name, kind)
+    return users
+
+
 def _scenario(match: re.Match[str], text: str) -> Scenario:
     fields = _fields(text)
     values = {item.name: item.text for item in fields}
+    writes_text = values.get("writes", "").strip().lower()
+    writes = True if writes_text == "yes" else False if writes_text == "no" else None
     method: str | None = None
     path = values.get("path") or values.get("url")
     method_text = values.get("method", "").strip("`")
@@ -167,16 +196,20 @@ def _scenario(match: re.Match[str], text: str) -> Scenario:
         path = path.split()[0].strip("`")
     tokens = list(dict.fromkeys(first or second for first, second in TOKEN.findall(text)))
     urls = list(dict.fromkeys(url.rstrip(".,;:)") for url in URL.findall(text)))
-    # Expected and DB fields describe assertions, not HTTP/UI actions. DB writes
-    # are classified separately, while edges can contain actions of their own.
-    actions = "\n".join(item.text for item in fields if item.name not in {"expected", "db check", "target", "area"})
-    other_steps = "\n".join(item.text for item in fields if item.name not in {"method", "expected", "db check", "target", "area", "path", "url"})
+    # State assertions are classified separately from HTTP/UI actions.
+    actions = "\n".join(item.text for item in fields if item.name not in {"expected", "state check", "target", "area"})
+    other_steps = "\n".join(item.text for item in fields if item.name not in {"method", "expected", "state check", "target", "area", "path", "url"})
+    state_checks: list[StateCheck] = []
+    for item in fields:
+        if item.name == "state check":
+            prefix = STORE_PREFIX.fullmatch(item.text)
+            state_checks.append(StateCheck(prefix.group(1), prefix.group(2)) if prefix else StateCheck(None, item.text))
     return Scenario(
         id=match.group(1), section=match.group(2), title=match.group(3), text=text,
-        method=method, path=path, target=values.get("target", "").strip().strip("`") or None,
+        method=method, path=path, target=values.get("target", "").strip().strip("`") or None, writes=writes,
         expected=Assertion(values.get("expected", "")),
         edges=[edge for item in fields if item.name == "edge cases" for edge in _edges(item.text)],
-        db_check=values.get("db check"), tokens=tokens, urls=urls,
+        state_checks=state_checks, tokens=tokens, urls=urls,
         actions=actions, other_steps=other_steps,
     )
 
@@ -210,7 +243,7 @@ def parse_plan(path: Path) -> Plan:
         start = SCENARIO.match(text, match.start())
     if start is not None:
         scenarios.append(_scenario(start, text[start.start():].rstrip()))
-    return Plan(path, branch, head, scenarios)
+    return Plan(path, branch, head, scenarios, _users_section(text))
 
 
 def resolve_plan(repo: Path, argument: str = "") -> dict[str, object]:
@@ -257,80 +290,84 @@ def resolve_plan(repo: Path, argument: str = "") -> dict[str, object]:
     return result
 
 
-def persona_token(token: str, personas: Iterable[str]) -> tuple[str, str] | None:
-    """Recognize a persona field using the longest valid configured prefix."""
+def user_token(token: str, users: Iterable[str]) -> tuple[str, str] | None:
+    """Recognize a user field using the longest declared or configured prefix."""
     name = token.removeprefix("QA_")
-    for persona in sorted(personas, key=lambda item: (-len(item), item)):
-        prefix = persona.upper() + "_"
-        if name.startswith(prefix) and PERSONA_FIELD.fullmatch(name[len(prefix):]):
-            return persona, name[len(prefix):]
-    return None
-
-
-def _persona_reason(config: Config, persona: str, capability: str) -> str | None:
-    if persona not in config.static:
-        if config.policy["mutations"] == "deny":
-            return "provisioning is forbidden under mutations=deny"
-        if "create" not in config.recipes:
-            return "qa.accounts.create is required to provision this persona"
-    if capability not in config.persona_fields(persona):
-        recipe = "create or a static id source" if capability == "ID" else "login"
-        return f"{recipe} cannot produce {capability}"
+    for user in sorted(users, key=lambda item: (-len(item), item)):
+        prefix = user.upper() + "_"
+        if name.startswith(prefix) and name[len(prefix):] in {"EMAIL", "PASSWORD", "ID"}:
+            return user, name[len(prefix):]
     return None
 
 
 def _mutates(scenario: Scenario) -> bool:
     if scenario.section == "FE":
         return bool(WRITE_ACTION.search(scenario.actions))
-    return bool(WRITE_ACTION.search(scenario.actions) or WRITE_STEP.search(scenario.other_steps) or SQL_WRITE.search(scenario.db_check or ""))
+    return bool(WRITE_ACTION.search(scenario.actions) or WRITE_STEP.search(scenario.other_steps)
+                or any(SQL_WRITE.search(check.text) or REDIS_WRITE.search(check.text) for check in scenario.state_checks))
 
 
-def _rejection_exempt(scenario: Scenario) -> bool:
-    if scenario.section != "BE":
-        return False
-    assertions = [scenario.expected, *scenario.edges]
-    # Assertions, DB checks, request declarations and metadata are checked
-    # separately or contain no action; scan every other label to fail closed.
-    steps = "\n".join(
-        item.text for item in _fields(scenario.text)
-        if item.name not in {
-            "method", "path", "url", "target", "area", "blocked-by",
-            "expected", "edge cases", "headers", "payload", "db check",
-        }
-    )
-    return (
-        all(not assertion.unverified and len(assertion.statuses) == 1 and assertion.statuses[0] >= 400 for assertion in assertions)
-        and not SQL_WRITE.search(scenario.db_check or "")
-        and not WRITE_STEP.search(steps)
-        and not WRITE_ACTION.search(steps)
-    )
-
-
-def _token_requirements(plan: Plan, config: Config) -> tuple[set[str], set[str], dict[str, dict[str, str]], set[str]]:
-    configured = set(config.personas) | config.static.keys()
+def _token_requirements(plan: Plan, config: Config) -> tuple[set[str], set[str], set[str], dict[str, dict[str, str]], set[str], list[dict[str, str]]]:
+    known = set(plan.users) | config.users.keys()
     value_names = {name.upper(): name for name in config.values}
-    personas: set[str] = set()
+    users: set[str] = set()
+    registrations = {name for name, kind in plan.users.items() if kind == "registered"}
     values: set[str] = set()
-    persona_gaps: dict[str, dict[str, str]] = {}
+    user_gaps: dict[str, dict[str, str]] = {}
     missing_values: set[str] = set()
+    errors: list[dict[str, str]] = []
     for scenario in plan.scenarios:
+        reasons: set[str] = set()
+        for user in registrations & config.users.keys():
+            reasons.add(f"user {user} is configured; declare it existing")
         for token in scenario.tokens:
-            recognized = persona_token(token, configured)
+            name = token.removeprefix("QA_")
+            if name in ENGINE_TOKENS:
+                continue
+            credential = CREDENTIAL_SUFFIX.fullmatch(name)
+            if credential:
+                user = name[:credential.start(1) - 1]
+                reasons.add(f"tokens and cookies are obtained by the tester; use $QA_{user}_EMAIL and $QA_{user}_PASSWORD")
+                continue
+            recognized = user_token(token, known)
             if recognized:
-                persona, capability = recognized
-                personas.add(persona)
-                reason = _persona_reason(config, persona, capability)
-                if reason:
-                    persona_gaps[token] = {"name": persona, "token": token, "reason": reason}
-            elif token[3:] in value_names:
-                values.add(value_names[token[3:]])
+                user, field = recognized
+                if user not in plan.users:
+                    reasons.add(f"user {user} is configured but not declared under ## Users")
+                elif plan.users[user] == "existing":
+                    users.add(user)
+                    reason = "user is not configured" if user not in config.users else "id source is not configured" if field == "ID" and field not in config.user_fields(user) else None
+                    if reason:
+                        user_gaps[token] = {"name": user, "token": token, "reason": reason}
+            elif name in value_names:
+                values.add(value_names[name])
+            elif unknown := USER_TOKEN.fullmatch(name):
+                reasons.add(f"user {unknown.group(1).lower()} is not declared under ## Users")
             else:
-                unknown = UNKNOWN_PERSONA.fullmatch(token[3:])
-                if unknown:
-                    persona_gaps[token] = {"name": unknown.group(1).lower(), "token": token, "reason": "persona is not configured"}
-                else:
-                    missing_values.add(token[3:])
-    return personas, values, persona_gaps, missing_values
+                missing_values.add(name)
+        errors.extend({"scenario": scenario.id, "reason": reason} for reason in sorted(reasons))
+    return users, registrations, values, user_gaps, missing_values, errors
+
+
+def _cleartext_errors(plan: Plan, config: Config) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    known = set(plan.users) | config.users.keys()
+    for scenario in plan.scenarios:
+        if not any(token[3:] in ENGINE_TOKENS or user_token(token, known) for token in scenario.tokens):
+            continue
+        target = scenario.target or config.section_target(scenario.section)
+        urls = ([config.targets[target]] if target in config.targets else []) + scenario.urls
+        refused: set[str] = set()
+        for url in urls:
+            try:
+                scheme, host, port = parse_origin(url)
+            except ConfigError:
+                continue
+            if scheme == "http" and not is_loopback(host):
+                host = f"[{host}]" if ":" in host else host
+                refused.add(f"http://{host}" + (f":{port}" if port != 80 else ""))
+        errors.extend({"scenario": scenario.id, "reason": f"credentials over cleartext origin {origin}"} for origin in sorted(refused))
+    return errors
 
 
 def _missing_target(scenario: Scenario, config: Config) -> str | None:
@@ -341,7 +378,7 @@ def _missing_target(scenario: Scenario, config: Config) -> str | None:
     without_urls = URL.sub("", scenario.actions)
     if scenario.urls and not RELATIVE_PATH.search(without_urls):
         return None
-    return None if config.section_target(scenario.section) else SECTION_TARGETS[scenario.section][0]
+    return None if config.section_target(scenario.section) else SECTION_TARGETS[scenario.section]
 
 
 def _off_target(scenario: Scenario, origins: set[Origin]) -> list[dict[str, object]]:
@@ -358,27 +395,19 @@ def _off_target(scenario: Scenario, origins: set[Origin]) -> list[dict[str, obje
     return refused
 
 
-def _mutation_guards(plan: Plan, config: Config) -> tuple[list[str], list[str]]:
-    guarded: list[str] = []
-    exempt: list[str] = []
-    for scenario in plan.scenarios:
-        if config.policy["mutations"] != "allow" and _mutates(scenario):
-            if config.policy["mutations"] == "rejections-only" and _rejection_exempt(scenario):
-                exempt.append(scenario.id)
-            else:
-                guarded.append(scenario.id)
-    return guarded, exempt
+def _mutation_guards(plan: Plan, config: Config) -> list[str]:
+    if config.policy["mutations"] == "allow":
+        return []
+    return [scenario.id for scenario in plan.scenarios if scenario.writes is not False or _mutates(scenario)]
 
 
 def check_plan(plan: Plan, config: Config) -> dict[str, object]:
-    """Return the plan's persona and value requirements, config gaps, refused origins, and mutation guards.
-
-    Persona recognition precedes value lookup; otherwise configured values win
-    before the unknown-token field grammar determines the gap category.
-    """
-    personas, values, persona_gaps, missing_values = _token_requirements(plan, config)
+    """Return user and value requirements, configuration gaps and execution guards."""
+    users, registrations, values, user_gaps, missing_values, plan_errors = _token_requirements(plan, config)
+    plan_errors.extend(_cleartext_errors(plan, config))
     missing_targets: set[str] = set()
-    db_checks: list[str] = []
+    state_checks: dict[str, list[str]] = {}
+    missing_stores: set[str] = set()
     off_target: list[dict[str, object]] = []
     origins: set[Origin] = {parse_origin(origin, origin_only=True) for origin in config.targets.values()}
     for scenario in plan.scenarios:
@@ -386,17 +415,33 @@ def check_plan(plan: Plan, config: Config) -> dict[str, object]:
         if target is not None:
             missing_targets.add(target)
         off_target.extend(_off_target(scenario, origins))
-        if scenario.db_check is not None:
-            db_checks.append(scenario.id)
-    guarded, exempt = _mutation_guards(plan, config)
+        if scenario.state_checks:
+            state_checks[scenario.id] = []
+            if scenario.section == "FE":
+                plan_errors.append({"scenario": scenario.id, "reason": "state checks are BE-only"})
+            for check in scenario.state_checks:
+                store = check.store
+                if store is None:
+                    if len(config.stores) != 1:
+                        error = {"scenario": scenario.id, "reason": "state check must name its store"}
+                        if error not in plan_errors:
+                            plan_errors.append(error)
+                        continue
+                    store = next(iter(config.stores))
+                if store not in config.stores:
+                    missing_stores.add(store)
+                else:
+                    state_checks[scenario.id].append(store)
+    guarded = _mutation_guards(plan, config)
     missing = {
-        "personas": [persona_gaps[token] for token in sorted(persona_gaps)],
+        "users": [user_gaps[token] for token in sorted(user_gaps)],
         "values": sorted(missing_values), "targets": sorted(missing_targets),
-        "database": bool(db_checks and not config.database),
+        "stores": sorted(missing_stores),
+        "cleanup": bool(registrations) and config.cleanup_recipe is None,
     }
     return {
-        "ok": not any(missing.values()) and not off_target,
-        "sections": plan.sections, "personas": sorted(personas), "values": sorted(values),
-        "missing": missing, "off_target": off_target, "guarded": guarded,
-        "exempt": exempt, "db_checks": db_checks,
+        "ok": not any(value for key, value in missing.items() if key != "cleanup") and not off_target and not plan_errors,
+        "sections": plan.sections, "users": sorted(users), "registrations": sorted(registrations), "values": sorted(values),
+        "missing": missing, "off_target": off_target, "plan_errors": plan_errors, "guarded": guarded,
+        "state_checks": state_checks,
     }

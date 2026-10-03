@@ -50,7 +50,7 @@ def _prepare_sidecar(repo: Path, plan: Plan, context: SidecarContext) -> tuple[s
     fresh = reports / f"{today}-{topic}-report.md"
     kept: PersistentState = {
         "created": today, "scenario_issues": {}, "issue_assertion": {}, "scenario_kind": {}, "scenario_reason": {},
-        "unverified_issues": [], "auth_gated_issues": [], "need_info": {}, "auto_generated": context.generated,
+        "unverified_issues": [], "need_info": {}, "auto_generated": context.generated,
     }
 
     if sidecar.exists():
