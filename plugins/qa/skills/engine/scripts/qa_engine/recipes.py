@@ -27,6 +27,8 @@ from av_config.sources import SOURCE_KINDS
 from av_config.origins import parse_origin
 from av_config.origins import require_secure_transport
 from qa_engine.common import format_origin
+from qa_engine.stores import store_lock_key
+from qa_engine.stores import store_values
 
 if TYPE_CHECKING:
     from qa_engine.config import Config
@@ -233,7 +235,64 @@ class CommandRecipe(Recipe):
         return code
 
 
-RECIPE_TYPES: dict[str, type[Recipe]] = {"http": HttpRecipe, "command": CommandRecipe}
+class SqlRecipe(Recipe):
+    needs_id = False
+
+    @classmethod
+    def validate(cls, data: Mapping[str, object], name: str, config: Config) -> None:
+        prefix = f"qa.{name}"
+        validator = config.shared
+        validator.keys(data, {"kind", "store", "query"}, prefix)
+        store = data.get("store")
+        entry = config.stores.get(store) if isinstance(store, str) else None
+        if not isinstance(entry, dict) or entry.get("kind") != "sql":
+            validator.error(f"{prefix}.store", "undefined sql store")
+        query = data.get("query")
+        if not isinstance(query, str) or not query:
+            validator.error(f"{prefix}.query", "expected a non-empty query")
+            return
+        if query.startswith(SOURCE_KINDS):
+            validator.error(f"{prefix}.query", "a query cannot be a value source")
+        if "{email}" not in query:
+            validator.error(prefix, "cleanup recipe must use {email}")
+        for placeholder in PLACEHOLDER.findall(query):
+            if placeholder not in {"email", "id", "tag"}:
+                validator.error(f"{prefix}.query", "unsupported recipe placeholder")
+
+    def destination(self, config: Config) -> str:
+        name = str(self.data["store"])
+        return store_lock_key(name, cast(Mapping[str, object], config.stores[name]), config.repo)
+
+    def succeeded(self, status: int) -> bool:
+        return status == 0
+
+    def execute(self, runtime: Runtime, identity: JSON, targets: Mapping[str, str]) -> int:
+        def literal(match: re.Match[str]) -> str:
+            value = identity.get(match.group(1))
+            if match.group(1) == "id" and not value:
+                return "NULL"
+            return "'" + str(value).replace("'", "''") + "'"
+
+        query = PLACEHOLDER.sub(literal, str(self.data["query"]))
+        name = str(self.data["store"])
+        prefix = f"STORE_{name.upper()}_"
+        environ = {key: value for key, value in os.environ.items()
+                   if not key.startswith(("PG", "MYSQL_", "SQLITE_DB", "REDIS", "STORE_", "QA_"))}
+        environ.update({key.removeprefix(prefix): value for key, value in store_values(runtime, runtime.config, [name]).items()
+                        if key != prefix + "PGOPTIONS"})
+        environ.update({"QA_SQL": query, **{f"QA_{field.upper()}": str(identity.get(field) or "") for field in ("email", "id", "tag")}})
+        engine = cast(Mapping[str, object], runtime.config.stores[name])["engine"]
+        commands = {
+            "postgres": 'psql -v ON_ERROR_STOP=1 -tAc "$QA_SQL"',
+            "mysql": 'mysql --protocol=TCP -h "$MYSQL_HOST" -P "$MYSQL_TCP_PORT" -u "$MYSQL_USER" "$MYSQL_DATABASE" -e "$QA_SQL"',
+            "sqlite": 'sqlite3 "$SQLITE_DB" "$QA_SQL"',
+        }
+        code, stdout, stderr = runtime.shell(commands[str(engine)], environ, self.name, timeout=60)
+        runtime.log_command(self.name, code, stdout, stderr)
+        return code
+
+
+RECIPE_TYPES: dict[str, type[Recipe]] = {"sql": SqlRecipe, "http": HttpRecipe, "command": CommandRecipe}
 
 
 def build_recipe(data: Mapping[str, object], name: str, config: Config | None = None) -> Recipe | None:
@@ -242,7 +301,7 @@ def build_recipe(data: Mapping[str, object], name: str, config: Config | None = 
     recipe_type = RECIPE_TYPES.get(kind) if isinstance(kind, str) else None
     if recipe_type is None:
         if config is not None:
-            config.shared.error(f"qa.{name}.kind", "expected http or command")
+            config.shared.error(f"qa.{name}.kind", "expected sql, http or command")
         return None
     if config is not None:
         previous_errors = len(config.errors)

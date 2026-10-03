@@ -122,6 +122,46 @@ class StateTests(unittest.TestCase):
                                        f"**Scenario:** BE-01\n**Location:** {location}\n**Problem:** Wrong items\n"
                                        "- **Expected:** 200 items returned. (src/app.py:1)\n**Remediation:** Fix items\n")
 
+    def test_run_record_origins_include_store_keys(self) -> None:
+        for store, expected in (
+            ('kind="sql"\nengine="postgres"\nhost="127.0.0.1"\nport=54322\nuser="u"\nname="app"\npassword="literal:pw"\n', "sql:127.0.0.1:54322/app"),
+            ('kind="sql"\nengine="sqlite"\npath="qa.sqlite"\n', f"sql:{self.repo.resolve() / 'qa.sqlite'}"),
+            ('kind="redis"\nhost="127.0.0.1"\n', "redis:127.0.0.1:6379/0"),
+        ):
+            with self.subTest(store=store):
+                self.put(BASE + '[env.stores.main]\n' + store, ".av/config.toml")
+                self.trust()
+                run = self.start()
+                record = json.loads((Path(run["dir"]) / "run.json").read_text())
+                self.assertIn(expected, record["origins"])
+                self.cli("run", "end", "--run", run["run"])
+
+    def test_store_endpoints_are_locked_across_disjoint_targets(self) -> None:
+        store = '[env.stores.main]\nkind="sql"\nengine="postgres"\nhost="127.0.0.1"\nport=54322\nuser="u"\nname="app"\npassword="literal:pw"\n'
+        self.put('version=1\n[env.targets]\nbackend="http://localhost:8000"\n[qa]\n' + store, ".av/config.toml")
+        self.trust()
+        holder = self.start()
+        second = self.root / "second"
+        second.mkdir()
+        subprocess.run(["git", "init", "-q", str(second)], check=True)
+        subprocess.run(["git", "-C", str(second), "-c", "user.name=QA", "-c", "user.email=qa@test.local", "commit", "--allow-empty", "-qm", "fixture"], check=True)
+        config = second / ".av/config.toml"
+        config.parent.mkdir()
+        config.write_text('version=1\n[env.targets]\nbackend="http://localhost:9000"\n[qa]\n' + store)
+        plan = second / "plan.md"
+        plan.write_text(PLAN)
+        def cli(*args: str) -> dict[str, object]:
+            result = subprocess.run([sys.executable, str(SCRIPTS / "qa.py"), *args, "--repo", str(second)], env=self.env, capture_output=True, text=True)
+            return json.loads(result.stdout)
+        cli("trust", "accept", str(cli("config")["trust_hash"]))
+        blocked = cli("run", "start", str(plan))
+        self.assertEqual(blocked["holder"]["run"], holder["run"])
+        self.assertEqual(blocked["holder"]["origin"], "sql:127.0.0.1:54322/app")
+        config.write_text(config.read_text().replace('name="app"', 'name="other"'))
+        other = cli("run", "start", str(plan))
+        self.assertIn("run", other)
+        cli("run", "end", "--run", str(other["run"]))
+
     def failed(self, *, second_pass: bool = True) -> dict[str, object]:
         run = self.start()
         self.ingest(run, self.dispatch(run), outcome("FAIL", 500), second=outcome() if second_pass else outcome("FAIL", 500))

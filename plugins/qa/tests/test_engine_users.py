@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -169,6 +170,111 @@ mutations = "allow"
         options = ["--id", id] if id is not None else []
         self.cli("users", "record", "--run", run, "--dispatch", str(dispatch["dispatch"]), "--email", email, *options)
         return email
+
+    def configure_stores(self, *, audit: bool = False) -> None:
+        stores = '[env.stores.main]\nkind="sql"\nengine="postgres"\nhost="127.0.0.1"\nuser="postgres"\nname="app"\npassword="literal:main-secret"\n[env.stores.cache]\nkind="redis"\nhost="127.0.0.1"\n'
+        if audit:
+            stores += '[env.stores.audit]\nkind="sql"\nengine="postgres"\nhost="127.0.0.1"\nuser="postgres"\nname="audit"\npassword="literal:audit-secret"\n'
+        self.put(self.config + stores, ".av/config.toml")
+        checks = '- **State Check:** main: SELECT 1 → 1\n- **State Check:** cache: GET k → v\n'
+        if audit:
+            checks += '- **State Check:** audit: SELECT 1 → 1\n'
+        self.plan.write_text(PLAN + checks)
+        self.trust()
+
+    def test_provision_exposes_namespaced_store_values_and_native_redact_names(self) -> None:
+        self.configure_stores()
+        self.put((self.repo / ".av/config.toml").read_text() + '[env.stores.unused]\nkind="redis"\nhost="localhost"\n', ".av/config.toml")
+        run, directory = self.start()
+        values = self.channel(directory)
+        expected = {"STORE_MAIN_PGHOST": "127.0.0.1", "STORE_MAIN_PGPORT": "5432",
+                    "STORE_MAIN_PGUSER": "postgres", "STORE_MAIN_PGDATABASE": "app",
+                    "STORE_MAIN_PGPASSWORD": "main-secret", "STORE_MAIN_PGOPTIONS": "-c default_transaction_read_only=on",
+                    "STORE_CACHE_REDIS_HOST": "127.0.0.1", "STORE_CACHE_REDIS_PORT": "6379", "STORE_CACHE_REDIS_DB": "0"}
+        self.assertEqual({key: value for key, value in values.items() if key.startswith("STORE_")}, expected)
+        names = set((directory / "redact-names").read_text().splitlines())
+        native = {"PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGPASSWORD", "REDIS_HOST", "REDIS_PORT", "REDIS_DB"}
+        self.assertEqual(names, {key for key in values if not key.endswith("_PGOPTIONS")} | native)
+        self.assertEqual(self.dispatch(run)["stores"], ["cache", "main"])
+        self.cli("run", "end", "--run", run)
+
+    def test_loader_store_option_exports_native_names_and_rejects_unknown_stores(self) -> None:
+        self.configure_stores()
+        _, directory = self.start()
+        loader = shlex.quote(str(directory / "load.sh"))
+        env = {**self.env, "PGHOST": "inherited", "STORE_X_Y": "inherited", "REDIS_HOST": "inherited"}
+        commands = (
+            (f'. {loader} --store main PGPASSWORD && printf "%s|%s|%s" "$PGHOST" "$PGOPTIONS" "$PGPASSWORD"', 0, "127.0.0.1|-c default_transaction_read_only=on|main-secret", ""),
+            (f'. {loader} --store nope', 1, "", "NOPE: unknown store"),
+            (f'. {loader} PGPASSWORD', 1, "", "PGPASSWORD: required value missing"),
+            (f'. {loader} && printf "%s|%s|%s" "${{PGHOST:-}}" "${{STORE_X_Y:-}}" "${{REDIS_HOST:-}}"', 0, "||", ""),
+        )
+        for command, code, stdout, stderr in commands:
+            with self.subTest(command=command):
+                result = subprocess.run(["sh", "-c", command], env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertEqual(result.stdout, stdout)
+                self.assertIn(stderr, result.stderr)
+
+    def test_dispatch_lists_the_section_stores(self) -> None:
+        self.configure_stores()
+        self.plan.write_text(self.plan.read_text() + '### FE-01: UI\n- **Writes:** no\n- **URL:** /items\n- **Expected:** Items visible. (src/app.py:1)\n')
+        run, _ = self.start()
+        self.assertEqual(self.dispatch(run)["stores"], ["cache", "main"])
+        self.assertEqual(self.dispatch(run, "FE")["stores"], [])
+
+    def test_store_passwords_are_masked_after_the_real_loader(self) -> None:
+        self.configure_stores(audit=True)
+        _, directory = self.start()
+        redactor = SCRIPTS.parents[1] / "be-testing/scripts/qa-redact.pl"
+        for option, main in (("", "$STORE_MAIN_PGPASSWORD"), ("--store main PGPASSWORD", "$PGPASSWORD")):
+            with self.subTest(option=option):
+                command = f'. {shlex.quote(str(directory / "load.sh"))} {option} && printf \'{{"a":"%s","b":"%s"}}\' "{main}" "$STORE_AUDIT_PGPASSWORD" | perl {shlex.quote(str(redactor))} {shlex.quote(str(directory / "redact-names"))}'
+                result = subprocess.run(["sh", "-c", command], env=self.env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"a": "***", "b": "***"})
+
+    @unittest.skipUnless(shutil.which("sqlite3"), "sqlite3 unavailable")
+    def test_sql_cleanup_deletes_by_email_in_sqlite(self) -> None:
+        self.sqlite_cleanup(null_id=False)
+
+    @unittest.skipUnless(shutil.which("sqlite3"), "sqlite3 unavailable")
+    def test_sql_cleanup_quotes_values_and_substitutes_null_id(self) -> None:
+        self.sqlite_cleanup(null_id=True)
+
+    def sqlite_cleanup(self, *, null_id: bool) -> None:
+        query = "DELETE FROM users WHERE email = {email}"
+        if null_id:
+            query += " AND (id IS {id} OR id = {id})"
+        self.put(self.base + USER + '[env.stores.main]\nkind="sql"\nengine="sqlite"\npath="qa.sqlite"\n[qa.cleanup]\nkind="sql"\nstore="main"\n' + f'query="{query}"\n', ".av/config.toml")
+        self.trust()
+        run, directory = self.start()
+        email = self.register(run, self.dispatch(run), id=None if null_id else "u1")
+        db = self.repo / "qa.sqlite"
+        subprocess.run(["sqlite3", str(db), f"CREATE TABLE users(email TEXT, id TEXT); INSERT INTO users VALUES ('{email}', NULL), ('keep@test.local', 'keep');"], check=True)
+        self.assertEqual(self.cli("users", "teardown", "--run", run), {"deleted": [email], "left": [], "manual": []})
+        result = subprocess.run(["sqlite3", str(db), "SELECT email FROM users"], capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout.strip(), "keep@test.local")
+        self.assertNotIn(email, (directory / "engine.log").read_text())
+
+    def test_sql_cleanup_runs_the_client_in_a_sanitised_environment(self) -> None:
+        self.configure_stores()
+        self.put((self.repo / ".av/config.toml").read_text().replace(CLEANUP, '[qa.cleanup]\nkind="sql"\nstore="main"\nquery="DELETE FROM users WHERE email = {email}"\n'), ".av/config.toml")
+        self.trust()
+        capture = self.root / "client-environment"
+        fake = self.put('#!/bin/sh\nenv > "$CLIENT_ENV"\n', "bin/psql")
+        fake.chmod(0o700)
+        self.env.update({"PATH": str(fake.parent) + os.pathsep + self.env["PATH"], "CLIENT_ENV": str(capture),
+                         "PGHOSTADDR": "10.0.0.9", "PGSERVICE": "x", "PGOPTIONS": "-c default_transaction_read_only=on"})
+        run, _ = self.start()
+        email = self.register(run, self.dispatch(run))
+        self.assertEqual(self.cli("users", "teardown", "--run", run)["deleted"], [email])
+        recorded = dict(line.split("=", 1) for line in capture.read_text().splitlines())
+        for name in ("PGHOSTADDR", "PGSERVICE", "PGOPTIONS", "STORE_MAIN_PGPASSWORD", "QA_NEW_PASSWORD"):
+            self.assertNotIn(name, recorded)
+        self.assertEqual(recorded["PGHOST"], "127.0.0.1")
+        self.assertEqual(recorded["PGPASSWORD"], "main-secret")
+        self.assertEqual(recorded["QA_SQL"], f"DELETE FROM users WHERE email = '{email}'")
 
     def test_provision_writes_users_values_and_new_password_only_for_plan_tokens(self) -> None:
         run, directory = self.start()
@@ -485,11 +591,11 @@ mutations = "allow"
         self.assertEqual(set(self.channel(directory)), {"QA_NEW_PASSWORD"})
         self.assertEqual(self.dispatch(run)["scenarios"], ["BE-01"])
         self.cli("run", "end", "--run", run)
-        self.plan.write_text(self.plan.read_text() + '- **DB Check:** SELECT 1\n')
-        self.put(self.config + '[env.database]\nkind="sqlite"\npath="db.sqlite"\n', ".av/config.toml")
+        self.plan.write_text(self.plan.read_text() + '- **State Check:** main: SELECT 1\n')
+        self.put(self.config + '[env.stores.main]\nkind="sql"\nengine="sqlite"\npath="db.sqlite"\n', ".av/config.toml")
         self.trust()
         _, directory = self.start()
-        self.assertEqual(self.channel(directory)["SQLITE_DB"], str(self.repo.resolve() / "db.sqlite"))
+        self.assertEqual(self.channel(directory)["STORE_MAIN_SQLITE_DB"], str(self.repo.resolve() / "db.sqlite"))
 
     def test_loader_fails_closed_and_shell_quotes_password(self) -> None:
         self.env["QA_ADMIN_SECRET"] = "pa'ss\\word"

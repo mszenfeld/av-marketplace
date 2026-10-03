@@ -39,7 +39,7 @@ from qa_engine.common import report_field
 from qa_engine.common import report_fields
 from qa_engine.common import report_header
 from qa_engine.config import Config
-from qa_engine.config import DATABASE_NAMES
+from qa_engine.config import STORE_NAMES
 from qa_engine.plan import Plan
 from qa_engine.plan import user_token
 from qa_engine.plan import run_plan
@@ -377,9 +377,9 @@ def _coverage(run: Run, plan: Plan, verdicts: Mapping[str, str]) -> tuple[list[s
 
 
 def _credential_key(run: Run, name: str) -> str:
-    for names in DATABASE_NAMES.values():
+    for names in STORE_NAMES.values():
         if name in names:
-            return "env.database." + names[name]
+            return "env.stores"
     token = name.removeprefix("QA_")
     users = run.record["config"]["qa"].get("users", {})
     recognized = user_token(name, users)
@@ -432,7 +432,7 @@ def _unlock(run: Run, plan: Plan, verdicts: Mapping[str, str]) -> list[str]:
         hints.append(f"- mutation-guard ({reasons['mutation-guard']}): mark scenarios that do not write with `- **Writes:** no`, or set `qa.mutations = \"allow\"` in `.av/config.toml` only when the data behind every target is disposable.")
     hints.extend(_gap_unlocks(run, verdicts))
     if reasons["tool-unavailable"]:
-        hints.append(f"- tool-unavailable ({reasons['tool-unavailable']}): install/enable the missing browser, HTTP or database client.")
+        hints.append(f"- tool-unavailable ({reasons['tool-unavailable']}): install/enable the missing browser, HTTP or store client.")
     if run.state["dispatch_count"] >= run.budget["dispatches"]:
         hints.append(f"- dispatch-exhausted: this run used all {LIMITS['dispatches']} tester/fixer dispatches; re-run `/qa:run` for another pass.")
     if run.state["iteration"] >= run.budget["iterations"]:

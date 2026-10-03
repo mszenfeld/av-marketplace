@@ -40,7 +40,10 @@ def dispatch_tester(run: Run, config: Config, section: str, phase: str) -> JSON:
         raise StateStop("no iteration is open; run iteration open first")
 
     scenarios = {scenario.id: scenario for scenario in plan.scenarios}
-    guarded = [sid for sid in cast(list[str], check_plan(plan, config)["guarded"]) if sid in ids]
+    checked = check_plan(plan, config)
+    guarded = [sid for sid in cast(list[str], checked["guarded"]) if sid in ids]
+    checks = cast(dict[str, list[str]], checked["state_checks"])
+    stores = sorted({store for sid in ids for store in checks.get(sid, [])})
     edges = {sid: len(scenarios[sid].edges) for sid in ids}
     tag = secrets.token_hex(4)
     dispatch = _record_dispatch(state, {
@@ -51,7 +54,7 @@ def dispatch_tester(run: Run, config: Config, section: str, phase: str) -> JSON:
     prepare_capture(run, dispatch)
 
     return {
-        "dispatch": dispatch, "scenarios": ids, "edges": edges, "guarded": guarded, "tag": tag, "stores": [],
+        "dispatch": dispatch, "scenarios": ids, "edges": edges, "guarded": guarded, "tag": tag, "stores": stores,
         "dispatch_count": state["dispatch_count"], "budget_left": _budget_left(run),
     }
 

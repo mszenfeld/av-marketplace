@@ -183,6 +183,7 @@ def repository(explicit: Path | None) -> Path:
 
 def tools() -> dict[str, object]:
     result: dict[str, object] = {name: shutil.which(name) is not None for name in ("curl", "jq", "psql", "mysql", "sqlite3")}
+    result["redis_cli"] = shutil.which("redis-cli") is not None
     perl = shutil.which("perl")
     result["perl_json_pp"] = perl is not None and subprocess.run([perl, "-MJSON::PP", "-e", "1"], capture_output=True, check=False).returncode == 0
     result["httpie"] = shutil.which("http") is not None

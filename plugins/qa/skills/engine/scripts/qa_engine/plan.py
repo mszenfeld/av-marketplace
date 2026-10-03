@@ -2,8 +2,8 @@
 
 Parsing never resolves a value source or runs a scenario. CLI reports contain
 identifiers and sanitized origins, not scenario payloads or credential values.
-Sections and DB checks are scenario IDs in plan order. User gaps carry
-``name``, ``token``, and ``reason``; value and target gaps carry config names.
+Sections list scenario IDs in plan order; State Checks map them to store names.
+User gaps carry ``name``, ``token``, and ``reason``; other gaps carry config names.
 """
 from __future__ import annotations
 
@@ -33,6 +33,8 @@ TOKEN = re.compile(r"\$\{(QA_[A-Z0-9_]+)\}|\$(QA_[A-Z0-9_]+)(?![A-Za-z0-9_])")
 URL = re.compile(r"https?://[^\s`\"'<>]+", re.IGNORECASE)
 WRITE_ACTION = re.compile(r"\b(POST|PUT|PATCH|DELETE)\b", re.IGNORECASE)
 SQL_WRITE = re.compile(r"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|CREATE|UPSERT)\b", re.IGNORECASE)
+REDIS_WRITE = re.compile(r"\b(SET|SETEX|SETNX|MSET|DEL|UNLINK|HSET|HDEL|LPUSH|RPUSH|LPOP|RPOP|SADD|SREM|ZADD|ZREM|INCR|INCRBY|DECR|DECRBY|EXPIRE|PERSIST|RENAME|APPEND|XADD|XDEL|FLUSHDB|FLUSHALL)\b", re.IGNORECASE)
+STORE_PREFIX = re.compile(r"^`?([A-Za-z_][A-Za-z0-9_]*)`?:[ \t]+(.*)\Z", re.DOTALL)
 WRITE_STEP = re.compile(r"\b(create|delete|update|insert|seed)\b", re.IGNORECASE)
 CITATION = re.compile(r"\((`?[^()\s]+:\d+(?:-\d+)?`?)\)")
 STATUS = re.compile(r"(?<![A-Za-z0-9_])([1-5]\d{2})(?![A-Za-z0-9_])")
@@ -56,6 +58,14 @@ class Assertion:
 
 
 @dataclass
+class StateCheck:
+    """One repeatable state assertion with an optional named-store prefix."""
+
+    store: str | None
+    text: str
+
+
+@dataclass
 class Scenario:
     """A scenario's original block and mechanically parsed execution requirements."""
 
@@ -69,7 +79,7 @@ class Scenario:
     writes: bool | None
     expected: Assertion
     edges: list[Assertion]
-    db_check: str | None
+    state_checks: list[StateCheck]
     tokens: list[str]
     urls: list[str]
     actions: str
@@ -186,16 +196,20 @@ def _scenario(match: re.Match[str], text: str) -> Scenario:
         path = path.split()[0].strip("`")
     tokens = list(dict.fromkeys(first or second for first, second in TOKEN.findall(text)))
     urls = list(dict.fromkeys(url.rstrip(".,;:)") for url in URL.findall(text)))
-    # Expected and DB fields describe assertions, not HTTP/UI actions. DB writes
-    # are classified separately, while edges can contain actions of their own.
-    actions = "\n".join(item.text for item in fields if item.name not in {"expected", "db check", "target", "area"})
-    other_steps = "\n".join(item.text for item in fields if item.name not in {"method", "expected", "db check", "target", "area", "path", "url"})
+    # State assertions are classified separately from HTTP/UI actions.
+    actions = "\n".join(item.text for item in fields if item.name not in {"expected", "state check", "target", "area"})
+    other_steps = "\n".join(item.text for item in fields if item.name not in {"method", "expected", "state check", "target", "area", "path", "url"})
+    state_checks: list[StateCheck] = []
+    for item in fields:
+        if item.name == "state check":
+            prefix = STORE_PREFIX.fullmatch(item.text)
+            state_checks.append(StateCheck(prefix.group(1), prefix.group(2)) if prefix else StateCheck(None, item.text))
     return Scenario(
         id=match.group(1), section=match.group(2), title=match.group(3), text=text,
         method=method, path=path, target=values.get("target", "").strip().strip("`") or None, writes=writes,
         expected=Assertion(values.get("expected", "")),
         edges=[edge for item in fields if item.name == "edge cases" for edge in _edges(item.text)],
-        db_check=values.get("db check"), tokens=tokens, urls=urls,
+        state_checks=state_checks, tokens=tokens, urls=urls,
         actions=actions, other_steps=other_steps,
     )
 
@@ -289,7 +303,8 @@ def user_token(token: str, users: Iterable[str]) -> tuple[str, str] | None:
 def _mutates(scenario: Scenario) -> bool:
     if scenario.section == "FE":
         return bool(WRITE_ACTION.search(scenario.actions))
-    return bool(WRITE_ACTION.search(scenario.actions) or WRITE_STEP.search(scenario.other_steps) or SQL_WRITE.search(scenario.db_check or ""))
+    return bool(WRITE_ACTION.search(scenario.actions) or WRITE_STEP.search(scenario.other_steps)
+                or any(SQL_WRITE.search(check.text) or REDIS_WRITE.search(check.text) for check in scenario.state_checks))
 
 
 def _token_requirements(plan: Plan, config: Config) -> tuple[set[str], set[str], set[str], dict[str, dict[str, str]], set[str], list[dict[str, str]]]:
@@ -391,7 +406,8 @@ def check_plan(plan: Plan, config: Config) -> dict[str, object]:
     users, registrations, values, user_gaps, missing_values, plan_errors = _token_requirements(plan, config)
     plan_errors.extend(_cleartext_errors(plan, config))
     missing_targets: set[str] = set()
-    db_checks: list[str] = []
+    state_checks: dict[str, list[str]] = {}
+    missing_stores: set[str] = set()
     off_target: list[dict[str, object]] = []
     origins: set[Origin] = {parse_origin(origin, origin_only=True) for origin in config.targets.values()}
     for scenario in plan.scenarios:
@@ -399,18 +415,33 @@ def check_plan(plan: Plan, config: Config) -> dict[str, object]:
         if target is not None:
             missing_targets.add(target)
         off_target.extend(_off_target(scenario, origins))
-        if scenario.db_check is not None:
-            db_checks.append(scenario.id)
+        if scenario.state_checks:
+            state_checks[scenario.id] = []
+            if scenario.section == "FE":
+                plan_errors.append({"scenario": scenario.id, "reason": "state checks are BE-only"})
+            for check in scenario.state_checks:
+                store = check.store
+                if store is None:
+                    if len(config.stores) != 1:
+                        error = {"scenario": scenario.id, "reason": "state check must name its store"}
+                        if error not in plan_errors:
+                            plan_errors.append(error)
+                        continue
+                    store = next(iter(config.stores))
+                if store not in config.stores:
+                    missing_stores.add(store)
+                else:
+                    state_checks[scenario.id].append(store)
     guarded = _mutation_guards(plan, config)
     missing = {
         "users": [user_gaps[token] for token in sorted(user_gaps)],
         "values": sorted(missing_values), "targets": sorted(missing_targets),
-        "database": bool(db_checks and not config.database),
+        "stores": sorted(missing_stores),
         "cleanup": bool(registrations) and config.cleanup_recipe is None,
     }
     return {
         "ok": not any(value for key, value in missing.items() if key != "cleanup") and not off_target and not plan_errors,
         "sections": plan.sections, "users": sorted(users), "registrations": sorted(registrations), "values": sorted(values),
         "missing": missing, "off_target": off_target, "plan_errors": plan_errors, "guarded": guarded,
-        "db_checks": db_checks,
+        "state_checks": state_checks,
     }

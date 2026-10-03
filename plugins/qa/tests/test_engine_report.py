@@ -814,7 +814,7 @@ up = {json.dumps(command)}
         self.assertIn("need-info (0)", summary)
         self.assertIn("qa.users.admin.email", summary)
         self.assertIn("env.values.FOO", summary)
-        self.assertIn("env.database.port", summary)
+        self.assertIn("env.stores", summary)
         self.assertIn("Confidence: low", summary)
         self.assertIn("cannot-confirm 0", summary)
 
@@ -828,9 +828,9 @@ description = "administrator"
 '''
         self.put(config, ".av/config.toml")
         self.start()
-        self.ingest(edge=outcome("NEED_INFO", None, kind="credentials", missing=["QA_ADMIN_EMAIL", "QA_USER_AGENT", "PGPORT"]))
+        self.ingest(edge=outcome("NEED_INFO", None, kind="credentials", missing=["QA_ADMIN_EMAIL", "QA_USER_AGENT", "PGPASSWORD", "REDISCLI_AUTH"]))
         summary = self.summary()
-        for key in ("qa.users.admin.email", "env.values.USER_AGENT", "env.database.port"):
+        for key in ("qa.users.admin.email", "env.values.USER_AGENT", "env.stores"):
             self.assertIn(f"`{key}`", summary)
         self.render([])
         self.assertIn("- Accounts: registered 0", self.text())

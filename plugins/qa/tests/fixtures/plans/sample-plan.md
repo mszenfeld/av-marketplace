@@ -36,7 +36,8 @@ None found.
 - **Preconditions:** POST http://127.0.0.1:54321/auth/v1/signup with email `qa+$QA_TAG-user@test.local` and password `$QA_NEW_PASSWORD`; keep the token in the tester's session and the returned id as `$QA_USER_ID`.
 - **Payload:** `{"title":"QA document","owner":"$QA_USER_ID"}`
 - **Expected:** 201, the response includes an id and title. (src/api/documents.py:201)
-- **DB Check:** `SELECT COUNT(id) FROM documents WHERE owner_id = '$QA_USER_ID'` — one row exists.
+- **State Check:** supabase: `SELECT COUNT(id) FROM documents WHERE owner_id = '$QA_USER_ID'` → 1
+- **State Check:** supabase: `SELECT COUNT(id) FROM storage.objects WHERE name LIKE '$QA_USER_ID/%'` → 0
 - **Edge cases:**
   - Missing title: 422 with a validation error. (src/api/documents.py:422)
   - No Authorization header: 401. (src/api/auth.py:401)

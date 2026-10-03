@@ -140,8 +140,8 @@ class ConfigTests(unittest.TestCase):
             (BASE + '[qa.cleanup]\nkind="http"\ntarget="backend"\nmethod="DELETE"\npath="/{email}"\nexpect=[200]\njson={x="{value.MISSING}"}\n', "qa.cleanup.json.x"),
             (BASE + '[env.services]\nhealth=["missing:/"]\n', "env.services.health"),
             (BASE + '[env.services]\nunknown="sensitive"\n', "env.services.unknown"),
-            (BASE + '[env.database]\nkind="sensitive"\n', "env.database.kind"),
-            (BASE + '[env.database]\nkind="sqlite"\npath="db"\nunknown="sensitive"\n', "env.database.unknown"),
+            (BASE + '[env.stores.main]\nkind="sql"\nengine="sensitive"\n', "env.stores.main.engine"),
+            (BASE + '[env.stores.main]\nkind="sql"\nengine="sqlite"\npath="db"\nunknown="sensitive"\n', "env.stores.main.unknown"),
             ('version=1\nenv="sensitive"\n[qa]\n', "env"),
             (BASE + '[qa.defaults]\nunknown="sensitive"\n', "qa.defaults"),
             (BASE + '[qa.cleanup]\nkind="sensitive"\n', "qa.cleanup.kind"),
@@ -152,10 +152,21 @@ class ConfigTests(unittest.TestCase):
             (BASE + '[qa.cleanup]\nkind="http"\ntarget="backend"\nmethod="POST"\npath="/{email}"\nexpect=[200]\nheaders={x=1}\n', "qa.cleanup.headers.x"),
             (BASE + '[env.services]\nhealth=1\nup=1\ndown=1\nprepare=[1]\n', "env.services.health"),
             (BASE + '[env.services]\nhealth=["sensitive"]\n', "env.services.health"),
-            (BASE + '[env.database]\nkind="sqlite"\n', "env.database.path"),
-            (BASE + '[env.database]\nkind="postgres"\nhost="localhost"\nuser="user"\nname="db"\npassword="env:AV_DB"\nport=true\n', "env.database.port"),
+            (BASE + '[env.stores.main]\nkind="sql"\nengine="sqlite"\n', "env.stores.main.path"),
+            (BASE + '[env.stores.main]\nkind="sql"\nengine="postgres"\nhost="localhost"\nuser="user"\nname="db"\npassword="env:AV_DB"\nport=true\n', "env.stores.main.port"),
             (BASE + '[env.values]\n"bad-name"="env:AV_X"\n', "env.values.bad-name"),
             (BASE + '[env.values]\nX="sensitive"\n', "env.values.X"),
+            (BASE + '[env.stores.x]\nkind="mongo"\n', "env.stores.x.kind"),
+            (BASE + '[env.stores.x]\nkind="sql"\nengine="oracle"\n', "env.stores.x.engine"),
+            (BASE + '[env.stores.x]\nkind="sql"\nengine="sqlite"\npath="db"\nhost="localhost"\n', "env.stores.x.host"),
+            (BASE + '[env.stores.x]\nkind="sql"\nengine="postgres"\nhost="localhost"\nuser="u"\nname="db"\n', "env.stores.x.password"),
+            (BASE + '[env.stores.x]\nkind="redis"\n', "env.stores.x.host"),
+            (BASE + '[env.stores.x]\nkind="redis"\nhost="localhost"\ndb=-1\n', "env.stores.x.db"),
+            (BASE + '[env.stores.main]\nkind="redis"\nhost="localhost"\n[env.stores.Main]\nkind="redis"\nhost="localhost"\n', "env.stores"),
+            (BASE + '[qa.cleanup]\nkind="sql"\nstore="nope"\nquery="DELETE FROM u WHERE email = {email}"\n', "qa.cleanup.store"),
+            (BASE + '[env.stores.cache]\nkind="redis"\nhost="localhost"\n[qa.cleanup]\nkind="sql"\nstore="cache"\nquery="DELETE FROM u WHERE email = {email}"\n', "qa.cleanup.store"),
+            (BASE + '[env.stores.main]\nkind="sql"\nengine="sqlite"\npath="db"\n[qa.cleanup]\nkind="sql"\nstore="main"\nquery="DELETE FROM u WHERE id = {id}"\n', "qa.cleanup"),
+            (BASE + '[env.stores.main]\nkind="sql"\nengine="sqlite"\npath="db"\n[qa.cleanup]\nkind="sql"\nstore="main"\nquery="DELETE FROM u WHERE email = {email} AND x = {secret.X}"\n', "qa.cleanup.query"),
         ]
         expected_errors = {
             "qa.mutations": "unsupported policy value",
@@ -163,6 +174,15 @@ class ConfigTests(unittest.TestCase):
             "env.services.up": "up requires at least one health probe",
             "env.services.prepare": "prepare requires up",
             "env.services.down": "down requires up",
+            "env.stores.x.kind": "expected sql or redis",
+            "env.stores.x.engine": "expected postgres, mysql or sqlite",
+            "env.stores.x.password": "expected a non-empty string",
+            "env.stores.x.db": "expected a non-negative integer",
+            "env.stores": "store names collide",
+            "qa.cleanup.kind": "expected sql, http or command",
+            "qa.cleanup.store": "undefined sql store",
+            "qa.cleanup": "cleanup recipe must use {email}",
+            "qa.cleanup.query": "unsupported recipe placeholder",
         }
         for text, key in cases:
             with self.subTest(key=key, text=text):
@@ -175,6 +195,46 @@ class ConfigTests(unittest.TestCase):
                 if key in expected_errors:
                     self.assertIn({"file": ".av/config.toml", "key": key, "error": expected_errors[key]}, report["errors"])
                 self.assertNotIn("sensitive", json.dumps(report))
+
+    def test_removed_database_is_an_environment_warning(self) -> None:
+        self.put(BASE + '[env.database]\nkind="postgres"\n')
+        report = self.config().report()
+        self.assertEqual(report["state"], "ok")
+        self.assertIn({"file": ".av/config.toml", "key": "env.database", "warning": "unknown environment sub-table"}, report["warnings"])
+
+    def test_stores_report_and_source_masking(self) -> None:
+        self.put(BASE + '[env.stores.main]\nkind="sql"\nengine="postgres"\nhost="localhost"\nuser="u"\nname="db"\npassword="literal:private-store-secret"\n[env.stores.cache]\nkind="redis"\nhost="db.example.com"\n')
+        report = self.config().report()
+        self.assertEqual(report["stores"], {"main": {"kind": "sql", "engine": "postgres"}, "cache": {"kind": "redis"}})
+        self.assertNotIn("database", report)
+        self.assertEqual(report["trust_subset"]["env.stores.main.password"], "literal:***")
+        self.assertNotIn("env.stores.main.host", report["trust_subset"])
+        self.assertEqual(report["trust_subset"]["env.stores.cache.host"], "db.example.com")
+        preview = self.config().preview({"config_text": (self.repo / ".av/config.toml").read_text().replace("private-store-secret", "changed-store-secret"),
+                                         "gitignore_add": [], "allowed_keys": ["env.stores.main.password"]})
+        self.assertNotIn("changed-store-secret", json.dumps(preview))
+
+    def test_sql_cleanup_pins_its_store_destination(self) -> None:
+        for store, key, old, new in (
+            ('kind="sql"\nengine="sqlite"\npath="a.sqlite"\n', "path", "a.sqlite", "b.sqlite"),
+            ('kind="sql"\nengine="postgres"\nhost="localhost"\nuser="u"\nname="a"\nport=5432\npassword="literal:private"\n', "name", "a", "b"),
+            ('kind="sql"\nengine="postgres"\nhost="localhost"\nuser="u"\nname="a"\nport=5432\npassword="literal:private"\n', "port", "5432", "5433"),
+        ):
+            with self.subTest(key=key):
+                text = BASE + '[env.stores.main]\n' + store + '[qa.cleanup]\nkind="sql"\nstore="main"\nquery="DELETE FROM users WHERE email = {email}"\n'
+                self.put(text)
+                cfg = self.config()
+                self.assertEqual(cfg.errors, [])
+                cfg.accept(cfg.trust_hash)
+                before = f'{key}={old}' if key == "port" else f'{key}="{old}"'
+                after = f'{key}={new}' if key == "port" else f'{key}="{new}"'
+                self.put(text.replace(before, after))
+                report = self.config().report()
+                self.assertEqual(report["trust"], "changed")
+                pinned = report["trust_subset"]["env.stores.main"]
+                self.assertEqual(str(pinned[key]), new)
+                if "password" in pinned:
+                    self.assertEqual(pinned["password"], "literal:***")
 
     def test_removed_source_dependencies_are_an_environment_warning(self) -> None:
         self.put(BASE + '[env.source_env]\n"env.values.X" = []\n')
@@ -268,10 +328,10 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(any(e["key"] == "qa.users.user.password" for e in self.config().errors))
         self.put(BASE + '[env.secrets]\nX="literal:secret"\n')
         self.assertTrue(self.config().errors)
-        self.put(BASE + '[env.database]\nkind="postgres"\nhost="localhost"\nport=5432\nuser="user"\nname="db"\npassword="literal:secret"\n')
+        self.put(BASE + '[env.stores.main]\nkind="sql"\nengine="postgres"\nhost="localhost"\nport=5432\nuser="user"\nname="db"\npassword="literal:secret"\n')
         self.assertFalse(self.config().errors)
         self.put((self.repo / ".av/config.toml").read_text().replace('host="localhost"', 'host="db.example.com"'))
-        self.assertTrue(any(e["key"] == "env.database.password" for e in self.config().errors))
+        self.assertTrue(any(e["key"] == "env.stores.main.password" for e in self.config().errors))
 
     def test_unignored_personal_config_is_not_loaded_or_trusted(self) -> None:
         self.put(BASE)
@@ -403,7 +463,7 @@ class ConfigTests(unittest.TestCase):
         subset = {
             "env.secrets.KEY": "literal:private-secret",
             "env.values.VALUE": "literal:private-value",
-            "env.database.password": "literal:private-database",
+            "env.stores.main.password": "literal:private-database",
             "qa.users.user.email": "literal:private-email",
             "qa.users.user.password": "literal:private-static-password",
             "qa.users.user.id": "literal:private-id",
@@ -414,7 +474,7 @@ class ConfigTests(unittest.TestCase):
         }
         shown = mask(subset, VALUE_SOURCE_KEYS)
         self.assertEqual(shown, {
-            **{key: "literal:***" for key in subset if key.startswith(("env.secrets.", "env.values.", "env.database.password", "qa.users."))},
+            **{key: "literal:***" for key in subset if key.startswith(("env.secrets.", "env.values.", "env.stores.main.password", "qa.users."))},
             "qa.cleanup": recipe,
             "qa.cleanup.run": command,
             "env.services": services,
@@ -739,7 +799,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("error", json.loads(result.stdout))
         tools = json.loads(self.cli("tools").stdout)
-        self.assertEqual(set(tools), {"curl", "jq", "perl_json_pp", "psql", "mysql", "sqlite3", "httpie"})
+        self.assertEqual(set(tools), {"curl", "jq", "perl_json_pp", "psql", "mysql", "sqlite3", "redis_cli", "httpie"})
         result = self.cli("no-such-command", "literal:do-not-echo")
         self.assertEqual(result.returncode, 2)
         self.assertNotIn("do-not-echo", result.stdout + result.stderr)
@@ -795,7 +855,7 @@ class ConfigTests(unittest.TestCase):
         self.assertIsNotNone(resolver.validate("file:../secret.env#X", "delivery.token", local=True))
 
     def test_malformed_types_and_documents_do_not_crash_or_echo(self) -> None:
-        for text in ('version=1\n[qa]\nfix=[]\n', 'version=1\n[qa.cleanup]\nkind=[]\n', 'version=1\n[env.database]\nkind=[]\n', 'version=1\n[qa]\nbudget=1\n', 'version=1\n[qa]\nusers=1\n', 'version=1\n[env]\nvalues=1\n', 'version=1\n[qa]\nbudget="sensitive\n'):
+        for text in ('version=1\n[qa]\nfix=[]\n', 'version=1\n[qa.cleanup]\nkind=[]\n', 'version=1\n[env.stores.main]\nkind=[]\n', 'version=1\n[qa]\nbudget=1\n', 'version=1\n[qa]\nusers=1\n', 'version=1\n[env]\nvalues=1\n', 'version=1\n[qa]\nbudget="sensitive\n'):
             with self.subTest(text=text):
                 self.put(text)
                 result = self.cli("config")
@@ -804,7 +864,7 @@ class ConfigTests(unittest.TestCase):
                 self.assertNotIn("sensitive", result.stdout + result.stderr)
 
     def test_sensitive_env_sources_and_qa_gates_are_pinned(self) -> None:
-        cases = ('[env.browser]\nsource="cmd:printf value"\n', '[env.browser]\nsources=["env:AV_BROWSER"]\n', '[env.targets]\nremote="https://example.com"\n', '[env.database]\nkind="postgres"\nhost="db.example.com"\nuser="user"\nname="db"\npassword="env:AV_DB"\n', 'fix="off"\n', 'mutations="deny"\n', 'start_services="auto"\n')
+        cases = ('[env.browser]\nsource="cmd:printf value"\n', '[env.browser]\nsources=["env:AV_BROWSER"]\n', '[env.targets]\nremote="https://example.com"\n', '[env.stores.main]\nkind="sql"\nengine="postgres"\nhost="db.example.com"\nuser="user"\nname="db"\npassword="env:AV_DB"\n', 'fix="off"\n', 'mutations="deny"\n', 'start_services="auto"\n')
         for section in cases:
             with self.subTest(section=section):
                 self.put(('version=1\n[qa]\n' if section.startswith("[env.targets]") else BASE) + section)

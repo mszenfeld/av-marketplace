@@ -24,7 +24,7 @@ RESERVED_VALUE_PREFIX = "CAPTURED_"
 CREDENTIAL_SUFFIX = re.compile(r".+_(TOKEN|COOKIE|COOKIE_[A-Z0-9_]+)\Z")
 USER_FIELDS = ("EMAIL", "PASSWORD", "ID")
 VALUE_SOURCE_KEYS = re.compile(
-    r"(?:env\.(?:secrets|values)\.[A-Za-z_][A-Za-z0-9_]*|env\.database\.password|"
+    r"(?:env\.(?:secrets|values)\.[A-Za-z_][A-Za-z0-9_]*|env\.stores\.[A-Za-z_][A-Za-z0-9_]*\.password|"
     r"qa\.users\.[a-z][a-z0-9_]*\.(?:email|password|id))"
 )
 POLICY = {"fix": "approve", "mutations": "deny", "start_services": "ask"}
@@ -32,10 +32,11 @@ FIX = ("approve", "auto", "off")
 MUTATIONS = ("allow", "deny")
 START_SERVICES = ("ask", "auto")
 SECTION_TARGETS = {"FE": "ui", "BE": "backend"}
-DATABASE_NAMES = {
-    "postgres": {"PGHOST": "host", "PGPORT": "port", "PGUSER": "user", "PGDATABASE": "name", "PGPASSWORD": "password"},
-    "mysql": {"MYSQL_HOST": "host", "MYSQL_TCP_PORT": "port", "MYSQL_USER": "user", "MYSQL_DATABASE": "name", "MYSQL_PWD": "password"},
-    "sqlite": {"SQLITE_DB": "path"},
+STORE_NAMES = {
+    "postgres": ("PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGPASSWORD", "PGOPTIONS"),
+    "mysql": ("MYSQL_HOST", "MYSQL_TCP_PORT", "MYSQL_USER", "MYSQL_DATABASE", "MYSQL_PWD"),
+    "sqlite": ("SQLITE_DB",),
+    "redis": ("REDIS_HOST", "REDIS_PORT", "REDIS_DB", "REDISCLI_AUTH"),
 }
 
 
@@ -71,7 +72,7 @@ class Config:
         self.policy = {**POLICY, **{key: self.qa[key] for key in POLICY if key in self.qa}}
         self.services = mapping(self.env.get("services"))
         self.values = mapping(self.env.get("values"))
-        self.database = mapping(self.env.get("database"))
+        self.stores = mapping(self.env.get("stores"))
         if self.shared.exists and "qa" in self.data:
             self._validate()
         self.trust_subset = self._sensitive_subset() if not self.errors else {}
@@ -131,6 +132,10 @@ class Config:
     def user_fields(self, user: str) -> set[str]:
         return {"EMAIL", "PASSWORD"} | ({"ID"} if "id" in mapping(self.users[user]) else set())
 
+    def store_kind(self, name: str) -> str:
+        store = mapping(self.stores[name])
+        return f"sql/{store['engine']}" if store["kind"] == "sql" else "redis"
+
     def _validate_names(self) -> None:
         exposed: set[str] = set()
         for user in self.users:
@@ -152,6 +157,9 @@ class Config:
         subset.update(source_subset(self.qa, "qa"))
         if "cleanup" in self.qa:
             subset["qa.cleanup"] = self.qa["cleanup"]
+        store = self.cleanup.get("store")
+        if self.cleanup.get("kind") == "sql" and isinstance(store, str) and store in self.stores:
+            subset[f"env.stores.{store}"] = self.stores[store]
         for key in POLICY:
             if key in self.qa:
                 subset[f"qa.{key}"] = self.qa[key]
@@ -165,7 +173,7 @@ class Config:
         exposed = [f"QA_{user.upper()}_{field}" for user in self.users for field in self.user_fields(user)]
         exposed.extend(f"QA_{name.upper()}" for name in self.values)
         exposed.append("QA_NEW_PASSWORD")
-        report.update({"targets": self.targets, "defaults": {"FE": self.section_target("FE"), "BE": self.section_target("BE")}, "policy": self.policy, "services": {"health": [], "up": None, "prepare": [], "down": None, **self.services}, "users": {name: mapping(entry).get("description") for name, entry in self.users.items()}, "values": sorted(self.values), "exposed": sorted(exposed), "database": mask(self.database, VALUE_SOURCE_KEYS, "env.database") if self.database else None})
+        report.update({"targets": self.targets, "defaults": {"FE": self.section_target("FE"), "BE": self.section_target("BE")}, "policy": self.policy, "services": {"health": [], "up": None, "prepare": [], "down": None, **self.services}, "users": {name: mapping(entry).get("description") for name, entry in self.users.items()}, "values": sorted(self.values), "exposed": sorted(exposed), "stores": {name: {key: entry[key] for key in ("kind", "engine") if key in entry} for name, value in self.stores.items() if (entry := mapping(value))}})
         return report
 
     def accept(self, approved_hash: str) -> dict[str, object]:

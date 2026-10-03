@@ -18,13 +18,14 @@ from av_config.files import atomic_write
 from qa_engine.common import read_object
 from qa_engine.common import write_json
 from qa_engine.config import Config
-from qa_engine.config import DATABASE_NAMES
+from qa_engine.config import STORE_NAMES
 from qa_engine.config import mapping
 from qa_engine.plan import check_plan
 from qa_engine.plan import run_plan
 from qa_engine.plan import user_token
 from qa_engine.services import Runtime
 from qa_engine.services import require_trust
+from qa_engine.stores import store_values
 
 if TYPE_CHECKING:
     from qa_engine.models import Run
@@ -61,18 +62,6 @@ def ledger(run: Run, config: Config) -> Iterator[Ledger]:
         yield Ledger(run, config)
 
 
-def database_values(runtime: Runtime, config: Config) -> dict[str, str]:
-    database = config.database
-    kind = database["kind"]
-    if kind == "sqlite":
-        path = Path(str(database["path"]))
-        return {name: str(path if path.is_absolute() else runtime.run.repo / path) for name in DATABASE_NAMES["sqlite"]}
-    names = DATABASE_NAMES[str(kind)]
-    port = database.get("port", 5432 if kind == "postgres" else 3306)
-    password = runtime.resolve(str(database["password"]), "env.database.password")
-    return dict(zip(names, (str(database["host"]), str(port), str(database["user"]), str(database["name"]), password), strict=True))
-
-
 def write_channel(directory: Path, values: Mapping[str, str], *, initial: bool = False) -> None:
     """Atomically write only the credentials and values referenced by the plan."""
     lines: list[str] = []
@@ -82,7 +71,10 @@ def write_channel(directory: Path, values: Mapping[str, str], *, initial: bool =
     atomic_write(directory / "secrets.env", "".join(lines).encode(), 0o600)
     write_json(directory / "secrets.json", dict(values), 0o600)
     if initial:
-        atomic_write(directory / "redact-names", ("".join(f"{name}\n" for name in sorted(values))).encode(), 0o600)
+        names = {name for name in values if not (name.startswith("STORE_") and name.endswith("_PGOPTIONS"))}
+        clients = {client for clients in STORE_NAMES.values() for client in clients if client != "PGOPTIONS"}
+        names.update(client for name in names.copy() if name.startswith("STORE_") for client in clients if name.endswith("_" + client))
+        atomic_write(directory / "redact-names", ("".join(f"{name}\n" for name in sorted(names))).encode(), 0o600)
         atomic_write(directory / "load.sh", loader_script(directory).encode(), 0o600)
         record = read_object(directory / "run.json")
         atomic_write(directory / "capture.sh", capture_script(directory, str(record["run_id"]), Path(str(record["repo"]))).encode(), 0o600)
@@ -108,6 +100,27 @@ set -a
 qa_channel_status=$?
 [ "$qa_channel_allexport" = yes ] || set +a
 [ "$qa_channel_status" = 0 ] || return 1
+if [ "${{1:-}}" = --store ]; then
+    [ "$#" -ge 2 ] || {{ printf '%s\\n' 'store name required' >&2; return 1; }}
+    case "$2" in ''|*[!A-Za-z0-9_]*) printf '%s\\n' 'invalid store name' >&2; return 1 ;; esac
+    qa_channel_store=$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')
+    shift 2
+    qa_channel_found=no
+    for qa_channel_name in $(set | cut -d= -f1); do
+        case "$qa_channel_name" in
+            STORE_"$qa_channel_store"_*)
+                qa_channel_native=${{qa_channel_name#STORE_${{qa_channel_store}}_}}
+                eval 'qa_channel_value=${{'"$qa_channel_name"'-}}'
+                export "$qa_channel_native=$qa_channel_value"
+                qa_channel_found=yes
+                ;;
+        esac
+    done
+    if [ "$qa_channel_found" = no ]; then
+        printf '%s: unknown store\\n' "$qa_channel_store" >&2
+        return 1
+    fi
+fi
 for qa_channel_name in "$@"; do
     case "$qa_channel_name" in
         ''|*[!A-Z0-9_]*) printf '%s\\n' 'invalid required channel name' >&2; return 1 ;;
@@ -119,7 +132,7 @@ for qa_channel_name in "$@"; do
         return 1
     fi
 done
-unset qa_channel_name qa_channel_file qa_channel_allexport qa_channel_status qa_channel_value
+unset qa_channel_name qa_channel_file qa_channel_allexport qa_channel_status qa_channel_value qa_channel_store qa_channel_native qa_channel_found
 '''
 
 
@@ -185,8 +198,8 @@ def provision(run: Run, config: Config) -> JSON:
             values[f"QA_{name.upper()}"] = runtime.named("value", name)
         previous = read_object(run.directory / "secrets.json")
         values["QA_NEW_PASSWORD"] = str(previous["QA_NEW_PASSWORD"]) if "QA_NEW_PASSWORD" in previous else secrets.token_urlsafe(18) + "Aa1!"
-        if checked["db_checks"]:
-            values.update(database_values(runtime, config))
+        checks = cast(dict[str, list[str]], checked["state_checks"])
+        values.update(store_values(runtime, config, {name for names in checks.values() for name in names}))
         runtime.secrets.remember(values)
         write_channel(run.directory, values, initial=True)
     return {"users": users, "exposed": sorted(values),
