@@ -173,7 +173,9 @@ String templates can use `{email}`, `{password}`, `{persona}`, `{run}`, `{id}`, 
 | `run` | Non-empty string / required | Shell command run in the repository root. |
 | `outputs` | Array or table / `{}` | Array entries `id`/`token`, or a table such as `{ id = true, token = true, cookies = ["sessionid", "csrftoken"] }`, declaring only needed fields. |
 
-Commands get the engine's inherited environment plus `QA_PERSONA`, `QA_EMAIL`, `QA_PASSWORD` and `QA_ID`; delete receives no `QA_PASSWORD`. Credentials are not substituted into command text or argv. A helper needing an admin key must obtain it from its own settings or `.env`, not a configured source.
+Commands get the engine's inherited environment plus `QA_PERSONA`, `QA_EMAIL`, `QA_PASSWORD` and `QA_ID`; delete receives no `QA_PASSWORD`. Credentials are not substituted into command text or argv.
+
+For an admin key, use an inherited `AV_<NAME>` variable and also declare it under `[env.secrets]` as `env:AV_<NAME>`. For example, `SERVICE_KEY = "env:AV_SUPABASE_SERVICE_ROLE_KEY"` lets `engine.log` mask the value while the helper reads `$AV_SUPABASE_SERVICE_ROLE_KEY` from its inherited environment. The runtime collects every `env:`-referenced value for masking even when no recipe resolves the source; this declaration does not inject it into the helper. A helper fetching a key any other way, including its own settings or `.env`, must never print it, including on failure.
 
 Declared outputs must be exactly one JSON object: `id`/`token` scalar strings or IDs, and a `cookies` map with precisely the declared names and non-empty values. With no outputs, no identity fields are collected; exit 0 means success. Every command delete requires a known ledger ID, while HTTP delete requires one only when its templates use `{id}`. Commands are trust-pinned, not sandboxed; multi-request session/CSRF login belongs here.
 
