@@ -39,10 +39,12 @@ outputs = ["token"]
 PLAN = '''# Test Plan
 ## FE Test Scenarios
 ### FE-01: Display items
+- **Writes:** no
 - **URL:** /items
 - **Expected:** Items are displayed. (src/app.py:1)
 ## BE Test Scenarios
 ### BE-01: Fetch items
+- **Writes:** no
 - **Method:** GET /items
 - **Headers:** Authorization: Bearer $QA_USER_TOKEN
 - **Request payload:** {"name": "sample-item"}
@@ -50,6 +52,7 @@ PLAN = '''# Test Plan
 - **Edge cases:**
   - Missing item: 404. (src/app.py:2)
 ### BE-02: Health
+- **Writes:** no
 - **Method:** GET /health
 - **Expected:** 200 healthy. (src/app.py:1)
 '''

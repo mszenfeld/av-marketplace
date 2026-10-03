@@ -63,6 +63,7 @@ class Scenario:
     method: str | None
     path: str | None
     target: str | None
+    writes: bool | None
     expected: Assertion
     edges: list[Assertion]
     db_check: str | None
@@ -156,6 +157,8 @@ def _source(text: str) -> tuple[str | None, str | None]:
 def _scenario(match: re.Match[str], text: str) -> Scenario:
     fields = _fields(text)
     values = {item.name: item.text for item in fields}
+    writes_text = values.get("writes", "").strip().lower()
+    writes = True if writes_text == "yes" else False if writes_text == "no" else None
     method: str | None = None
     path = values.get("path") or values.get("url")
     method_text = values.get("method", "").strip("`")
@@ -173,7 +176,7 @@ def _scenario(match: re.Match[str], text: str) -> Scenario:
     other_steps = "\n".join(item.text for item in fields if item.name not in {"method", "expected", "db check", "target", "area", "path", "url"})
     return Scenario(
         id=match.group(1), section=match.group(2), title=match.group(3), text=text,
-        method=method, path=path, target=values.get("target", "").strip().strip("`") or None,
+        method=method, path=path, target=values.get("target", "").strip().strip("`") or None, writes=writes,
         expected=Assertion(values.get("expected", "")),
         edges=[edge for item in fields if item.name == "edge cases" for edge in _edges(item.text)],
         db_check=values.get("db check"), tokens=tokens, urls=urls,
@@ -285,27 +288,6 @@ def _mutates(scenario: Scenario) -> bool:
     return bool(WRITE_ACTION.search(scenario.actions) or WRITE_STEP.search(scenario.other_steps) or SQL_WRITE.search(scenario.db_check or ""))
 
 
-def _rejection_exempt(scenario: Scenario) -> bool:
-    if scenario.section != "BE":
-        return False
-    assertions = [scenario.expected, *scenario.edges]
-    # Assertions, DB checks, request declarations and metadata are checked
-    # separately or contain no action; scan every other label to fail closed.
-    steps = "\n".join(
-        item.text for item in _fields(scenario.text)
-        if item.name not in {
-            "method", "path", "url", "target", "area", "blocked-by",
-            "expected", "edge cases", "headers", "payload", "db check",
-        }
-    )
-    return (
-        all(not assertion.unverified and len(assertion.statuses) == 1 and assertion.statuses[0] >= 400 for assertion in assertions)
-        and not SQL_WRITE.search(scenario.db_check or "")
-        and not WRITE_STEP.search(steps)
-        and not WRITE_ACTION.search(steps)
-    )
-
-
 def _token_requirements(plan: Plan, config: Config) -> tuple[set[str], set[str], dict[str, dict[str, str]], set[str]]:
     configured = set(config.personas) | config.static.keys()
     value_names = {name.upper(): name for name in config.values}
@@ -341,7 +323,7 @@ def _missing_target(scenario: Scenario, config: Config) -> str | None:
     without_urls = URL.sub("", scenario.actions)
     if scenario.urls and not RELATIVE_PATH.search(without_urls):
         return None
-    return None if config.section_target(scenario.section) else SECTION_TARGETS[scenario.section][0]
+    return None if config.section_target(scenario.section) else SECTION_TARGETS[scenario.section]
 
 
 def _off_target(scenario: Scenario, origins: set[Origin]) -> list[dict[str, object]]:
@@ -358,16 +340,10 @@ def _off_target(scenario: Scenario, origins: set[Origin]) -> list[dict[str, obje
     return refused
 
 
-def _mutation_guards(plan: Plan, config: Config) -> tuple[list[str], list[str]]:
-    guarded: list[str] = []
-    exempt: list[str] = []
-    for scenario in plan.scenarios:
-        if config.policy["mutations"] != "allow" and _mutates(scenario):
-            if config.policy["mutations"] == "rejections-only" and _rejection_exempt(scenario):
-                exempt.append(scenario.id)
-            else:
-                guarded.append(scenario.id)
-    return guarded, exempt
+def _mutation_guards(plan: Plan, config: Config) -> list[str]:
+    if config.policy["mutations"] == "allow":
+        return []
+    return [scenario.id for scenario in plan.scenarios if scenario.writes is not False or _mutates(scenario)]
 
 
 def check_plan(plan: Plan, config: Config) -> dict[str, object]:
@@ -388,7 +364,7 @@ def check_plan(plan: Plan, config: Config) -> dict[str, object]:
         off_target.extend(_off_target(scenario, origins))
         if scenario.db_check is not None:
             db_checks.append(scenario.id)
-    guarded, exempt = _mutation_guards(plan, config)
+    guarded = _mutation_guards(plan, config)
     missing = {
         "personas": [persona_gaps[token] for token in sorted(persona_gaps)],
         "values": sorted(missing_values), "targets": sorted(missing_targets),
@@ -398,5 +374,5 @@ def check_plan(plan: Plan, config: Config) -> dict[str, object]:
         "ok": not any(missing.values()) and not off_target,
         "sections": plan.sections, "personas": sorted(personas), "values": sorted(values),
         "missing": missing, "off_target": off_target, "guarded": guarded,
-        "exempt": exempt, "db_checks": db_checks,
+        "db_checks": db_checks,
     }

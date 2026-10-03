@@ -23,10 +23,11 @@ VALUE_SOURCE_KEYS = re.compile(
     r"(?:env\.(?:secrets|values)\.[A-Za-z_][A-Za-z0-9_]*|env\.database\.password|"
     r"qa\.accounts\.static\.[a-z][a-z0-9_]*\.(?:email|password|id))"
 )
-POLICY = {"fix": "approve", "mutations": "rejections-only"}
+POLICY = {"fix": "approve", "mutations": "deny", "start_services": "ask"}
 FIX = ("approve", "auto", "off")
-MUTATIONS = ("allow", "rejections-only", "deny")
-SECTION_TARGETS = {"FE": ("ui", "backend"), "BE": ("backend", "ui")}
+MUTATIONS = ("allow", "deny")
+START_SERVICES = ("ask", "auto")
+SECTION_TARGETS = {"FE": "ui", "BE": "backend"}
 DATABASE_NAMES = {
     "postgres": {"PGHOST": "host", "PGPORT": "port", "PGUSER": "user", "PGDATABASE": "name", "PGPASSWORD": "password"},
     "mysql": {"MYSQL_HOST": "host", "MYSQL_TCP_PORT": "port", "MYSQL_USER": "user", "MYSQL_DATABASE": "name", "MYSQL_PWD": "password"},
@@ -87,10 +88,10 @@ class Config:
         return self.shared.state("qa")
 
     def section_target(self, section: str) -> str | None:
-        """The origin name a section's relative paths use: its reserved name, the other one, or the only target."""
-        for name in SECTION_TARGETS[section]:
-            if name in self.targets:
-                return name
+        """Use the section's reserved target name, or the only configured target."""
+        name = SECTION_TARGETS[section]
+        if name in self.targets:
+            return name
         if len(self.targets) == 1:
             return next(iter(self.targets))
         return None
@@ -98,10 +99,10 @@ class Config:
     def _validate(self) -> None:
         validator = self.shared
         qa = validator.table(self.data["qa"], "qa")
-        validator.keys(qa, {"fix", "mutations", "accounts"}, "qa")
+        validator.keys(qa, {"fix", "mutations", "start_services", "accounts"}, "qa")
         if "accounts" in qa:
             validator.table(qa["accounts"], "qa.accounts")
-        for key, allowed in (("fix", FIX), ("mutations", MUTATIONS)):
+        for key, allowed in (("fix", FIX), ("mutations", MUTATIONS), ("start_services", START_SERVICES)):
             if key in qa and qa[key] not in allowed:
                 validator.error(f"qa.{key}", "unsupported policy value")
         self._validate_accounts()

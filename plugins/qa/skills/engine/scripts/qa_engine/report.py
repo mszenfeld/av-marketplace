@@ -441,7 +441,7 @@ def _unlock(run: Run, plan: Plan, verdicts: Mapping[str, str]) -> list[str]:
     reasons = Counter(run.state["scenario_reason"].values())
     hints: list[str] = []
     if reasons["mutation-guard"]:
-        hints.append(f"- mutation-guard ({reasons['mutation-guard']}): set `qa.mutations = \"allow\"` in `.av/config.toml` only when the data behind every target is disposable.")
+        hints.append(f"- mutation-guard ({reasons['mutation-guard']}): mark scenarios that do not write with `- **Writes:** no`, or set `qa.mutations = \"allow\"` in `.av/config.toml` only when the data behind every target is disposable.")
     if reasons["auth-unverified"] or run.state["auth_gated_issues"]:
         hints.append(_auth_unlock(run, reasons["auth-unverified"]))
     hints.extend(_gap_unlocks(run, verdicts))

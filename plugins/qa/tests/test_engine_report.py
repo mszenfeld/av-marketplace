@@ -27,15 +27,18 @@ fix = "approve"
 PLAN = '''# Test Plan: Items
 ## FE Test Scenarios
 ### FE-01: Display items
+- **Writes:** no
 - **URL:** /items
 - **Expected:** Items are displayed. (src/app.py:1)
 ## BE Test Scenarios
 ### BE-01: Fetch items
+- **Writes:** no
 - **Method:** GET /items
 - **Expected:** 200 items returned. (src/app.py:1)
 - **Edge cases:**
   - Missing item: 404. (src/app.py:2)
 ### BE-02: Health
+- **Writes:** no
 - **Method:** GET /health
 - **Expected:** 200 healthy. (src/app.py:1)
 '''
@@ -196,6 +199,7 @@ LITERAL = "literal:literal-source-secret"
 RESOLVED = "cmd:printf resolved-source-secret"
 UNUSED = "cmd:touch collector-must-not-run; printf never-executed-secret"
 [env.services]
+health = ["backend:/"]
 up = {json.dumps(command)}
 ''', ".av/config.toml")
         self.start()
@@ -225,6 +229,7 @@ SERVICE_KEY = "cmd:touch secret-resolver-ran; cat service-key.txt"
 [env.values]
 DISPLAY = "cmd:touch value-resolver-ran; cat value.txt"
 [env.services]
+health = ["backend:/"]
 up = {json.dumps(command)}
 prepare = [{json.dumps(command)}]
 down = {json.dumps(command)}
@@ -243,7 +248,7 @@ down = {json.dumps(command)}
         self.put("unresolved-recipe-secret", "service-key.txt")
         create = 'cat service-key.txt >&2; printf \'{"id":"recipe-id"}\''
         login = 'cat service-key.txt >&2; printf \'{"token":"recipe-token"}\''
-        self.put(CONFIG + f'''
+        self.put(CONFIG + f'''mutations = "allow"
 [env.secrets]
 SERVICE_KEY = "cmd:touch secret-resolver-ran; cat service-key.txt"
 [qa.accounts]
@@ -281,6 +286,7 @@ THREE = "env:AV_THREE"
 FOUR = "env:AV_FOUR"
 LONG = "env:AV_LONG"
 [env.services]
+health = ["backend:/"]
 up = {json.dumps(command)}
 ''', ".av/config.toml")
         self.start()

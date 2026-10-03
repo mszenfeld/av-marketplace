@@ -67,7 +67,7 @@ class ConfigTests(unittest.TestCase):
         self.put('[qa]\nfix = "auto"\n', ".av/local.toml")
         report = self.config().report()
         self.assertEqual(report["state"], "ok")
-        self.assertEqual(report["policy"], {"fix": "auto", "mutations": "deny"})
+        self.assertEqual(report["policy"], {"fix": "auto", "mutations": "deny", "start_services": "ask"})
         self.assertEqual(report["provenance"]["qa.fix"], ".av/local.toml")
         self.assertNotIn("budget", report)
 
@@ -117,6 +117,11 @@ class ConfigTests(unittest.TestCase):
             (BASE + 'surprise = "sensitive"\n', "qa.surprise"),
             (BASE + 'fix = "sensitive"\n', "qa.fix"),
             (BASE + 'mutations = "sensitive"\n', "qa.mutations"),
+            (BASE + 'mutations = "rejections-only"\n', "qa.mutations"),
+            (BASE + 'start_services = "always"\n', "qa.start_services"),
+            (BASE + '[env.services]\nup = "sh up.sh"\n', "env.services.up"),
+            (BASE + '[env.services]\nprepare = ["sh m.sh"]\n', "env.services.prepare"),
+            (BASE + '[env.services]\ndown = "sh down.sh"\n', "env.services.down"),
             (BASE + '[qa.policy]\nfix = "approve"\n', "qa.policy"),
             (BASE + '[qa.budget]\niterations = 3\n', "qa.budget"),
             (BASE + '[qa.defaults]\nbe_target = "backend"\n', "qa.defaults"),
@@ -159,6 +164,13 @@ class ConfigTests(unittest.TestCase):
             (BASE + '[env.values]\n"bad-name"="env:AV_X"\n', "env.values.bad-name"),
             (BASE + '[env.values]\nX="sensitive"\n', "env.values.X"),
         ]
+        expected_errors = {
+            "qa.mutations": "unsupported policy value",
+            "qa.start_services": "unsupported policy value",
+            "env.services.up": "up requires at least one health probe",
+            "env.services.prepare": "prepare requires up",
+            "env.services.down": "down requires up",
+        }
         for text, key in cases:
             with self.subTest(key=key, text=text):
                 self.put(text)
@@ -167,6 +179,8 @@ class ConfigTests(unittest.TestCase):
                 self.assertTrue(any(e["file"] == ".av/config.toml" and e["key"] == key for e in report["errors"]), report["errors"])
                 if key in {"qa.defaults", "qa.accounts.password", "env.services.env", "qa.accounts.create.env"}:
                     self.assertIn({"file": ".av/config.toml", "key": key, "error": "unknown key"}, report["errors"])
+                if key in expected_errors:
+                    self.assertIn({"file": ".av/config.toml", "key": key, "error": expected_errors[key]}, report["errors"])
                 self.assertNotIn("sensitive", json.dumps(report))
 
     def test_removed_source_dependencies_are_an_environment_warning(self) -> None:
@@ -362,6 +376,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.trust, "changed")
         self.assertEqual(cfg.trust_subset, {"qa.fix": "auto", "qa.mutations": "deny"})
         cfg.accept(cfg.trust_hash)
+        self.put(BASE + 'fix="auto"\nmutations="deny"\nstart_services="auto"\n')
+        cfg = self.config()
+        self.assertEqual(cfg.trust, "changed")
+        self.assertEqual(cfg.trust_subset["qa.start_services"], "auto")
+        cfg.accept(cfg.trust_hash)
         old = cfg.trust_hash
         self.put(BASE + 'fix="off"\n')
         with self.assertRaises(ConfigError):
@@ -419,10 +438,11 @@ class ConfigTests(unittest.TestCase):
                 for name in ("create", "confirm", "login", "delete")
             ]
             cases.extend([
-                (f'[env.services]\n{key}={json.dumps(value)}\n', f"env.services.{key}")
+                (f'[env.services]\nhealth=["backend:/"]\nup="true"\n{key}={json.dumps(value)}\n' if key == "down" else
+                 f'[env.services]\nhealth=["backend:/"]\nup={json.dumps(value)}\n', f"env.services.{key}")
                 for key in ("up", "down")
             ])
-            cases.append((f'[env.services]\nprepare=["true", {json.dumps(value)}]\n', "env.services.prepare.1"))
+            cases.append((f'[env.services]\nhealth=["backend:/"]\nup="true"\nprepare=["true", {json.dumps(value)}]\n', "env.services.prepare.1"))
             http = '[qa.accounts.login]\nkind="http"\ntarget="backend"\nmethod="POST"\nexpect=[200]\n'
             cases.extend([
                 (http + f'path={json.dumps(value)}\n', "qa.accounts.login.path"),
@@ -671,7 +691,7 @@ class ConfigTests(unittest.TestCase):
         sources = '[env.values]\nX="cmd:touch source-ran; printf value"\n'
         cases = (
             ('[qa.accounts.login]\nkind="command"\nrun="sh scripts/login.sh"\nenv=["value.X"]\n', "qa.accounts.login.env"),
-            ('[env.services]\nup="sh scripts/up.sh"\nenv={up=["value.X"]}\n', "env.services.env"),
+            ('[env.services]\nhealth=["backend:/"]\nup="sh scripts/up.sh"\nenv={up=["value.X"]}\n', "env.services.env"),
         )
         for fragment, key in cases:
             with self.subTest(key=key):
@@ -784,7 +804,7 @@ class ConfigTests(unittest.TestCase):
                 self.assertNotIn("sensitive", result.stdout + result.stderr)
 
     def test_sensitive_env_sources_and_qa_gates_are_pinned(self) -> None:
-        cases = ('[env.browser]\nsource="cmd:printf value"\n', '[env.browser]\nsources=["env:AV_BROWSER"]\n', '[env.targets]\nremote="https://example.com"\n', '[env.database]\nkind="postgres"\nhost="db.example.com"\nuser="user"\nname="db"\npassword="env:AV_DB"\n', 'fix="off"\n', 'mutations="deny"\n')
+        cases = ('[env.browser]\nsource="cmd:printf value"\n', '[env.browser]\nsources=["env:AV_BROWSER"]\n', '[env.targets]\nremote="https://example.com"\n', '[env.database]\nkind="postgres"\nhost="db.example.com"\nuser="user"\nname="db"\npassword="env:AV_DB"\n', 'fix="off"\n', 'mutations="deny"\n', 'start_services="auto"\n')
         for section in cases:
             with self.subTest(section=section):
                 self.put(('version=1\n[qa]\n' if section.startswith("[env.targets]") else BASE) + section)

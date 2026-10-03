@@ -25,6 +25,7 @@ from qa_engine.recipes import http_request
 PLAN = '''# Test Plan
 ## BE Test Scenarios
 ### BE-01: Authenticated request
+- **Writes:** no
 - **Method:** GET /items
 - **Headers:** Authorization: Bearer $QA_USER_TOKEN
 - **Expected:** 200 returned. (src/app.py:1)
@@ -233,6 +234,7 @@ expect = [204]
 - **Request payload:** $QA_LOGIN
 ## FE Test Scenarios
 ### FE-01: Login
+- **Writes:** no
 - **URL:** /items
 - **Steps:** Use $QA_OTHER_TOKEN
 - **Expected:** Items displayed. (src/app.py:1)
@@ -467,6 +469,8 @@ outputs=["token"]
         self.config = '''version=1
 [env.targets]
 backend="http://localhost:8000"
+[qa]
+mutations="allow"
 [qa.accounts]
 personas=["user"]
 email="qa+{run}-{persona}@test.local"
@@ -510,6 +514,7 @@ run="test -z \\\"${QA_PASSWORD+x}\\\" && test \\\"$QA_ID\\\" = command-id && tou
     def test_refresh_updates_all_auth_fields_of_section_personas_without_widening_channel(self) -> None:
         self.plan.write_text(PLAN + '''## FE Test Scenarios
 ### FE-01: Cookie login
+- **Writes:** no
 - **URL:** /items
 - **Steps:** Use $QA_USER_COOKIE
 - **Expected:** Items shown. (src/app.py:1)
@@ -532,7 +537,7 @@ run="test -z \\\"${QA_PASSWORD+x}\\\" && test \\\"$QA_ID\\\" = command-id && tou
         self.assertFalse((directory / "secrets.env").exists())
 
     def test_untrusted_cleanup_leaves_accounts_but_runs_recorded_down(self) -> None:
-        config = self.config + '[env.services]\nup="touch up"\ndown="touch down"\n'
+        config = self.config + '[env.services]\nhealth=["backend:/"]\nup="touch up"\ndown="touch down"\n'
         self.put(config, ".av/config.toml")
         self.trust()
         run, _ = self.start()
@@ -582,6 +587,7 @@ down="touch down"
 
     def test_services_up_returns_without_killing_background_child(self) -> None:
         self.put(self.config + '''[env.services]
+health=["backend:/"]
 up='sleep 60 & echo $! > service.pid; echo started; printf "%s" "$AV_ADMIN"'
 down="kill $(cat service.pid)"
 ''', ".av/config.toml")
@@ -613,7 +619,7 @@ down="kill $(cat service.pid)"
         self.assertNotIn("admin-secret", log)
 
     def test_untrusted_subset_cannot_run_accounts_or_services(self) -> None:
-        self.put(self.config + '[env.services]\nup="touch untrusted-up"\n', ".av/config.toml")
+        self.put(self.config + '[env.services]\nhealth=["backend:/"]\nup="touch untrusted-up"\n', ".av/config.toml")
         self.trust()
         run, _ = self.start()
         (self.root / "state/av-marketplace/trust.json").unlink()
@@ -658,7 +664,7 @@ expect=[200]
     def test_later_service_process_masks_existing_channel_values_before_tail_truncation(self) -> None:
         self.put("sensitive-start-" + "x" * 9000 + "-sensitive-end", "display.txt")
         config = self.config.replace('[env.values]', '[env.values]\nDISPLAY="cmd:cat display.txt"')
-        config += '[env.services]\nup=\'cat "$TMPDIR"/qa-run-*/secrets.json\'\n'
+        config += '[env.services]\nhealth=["backend:/"]\nup=\'cat "$TMPDIR"/qa-run-*/secrets.json\'\n'
         self.put(config, ".av/config.toml")
         self.plan.write_text(PLAN + '- **Steps:** $QA_DISPLAY\n')
         self.trust()

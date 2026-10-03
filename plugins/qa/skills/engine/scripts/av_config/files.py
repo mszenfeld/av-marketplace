@@ -211,6 +211,12 @@ class Configuration:
         else:
             for probe in health:
                 self._validate_probe(probe, targets)
+        if "up" in table and not table.get("health"):
+            self.error(f"{prefix}.up", "up requires at least one health probe")
+        if "prepare" in table and "up" not in table:
+            self.error(f"{prefix}.prepare", "prepare requires up")
+        if "down" in table and "up" not in table:
+            self.error(f"{prefix}.down", "down requires up")
 
     def _validate_service_command(self, command: object, key: str) -> None:
         if not isinstance(command, str) or not command:

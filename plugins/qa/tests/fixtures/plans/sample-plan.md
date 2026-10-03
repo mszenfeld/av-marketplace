@@ -12,6 +12,7 @@ None found.
 
 ### FE-01: Sign in and display the owner's document
 - **Target:** ui
+- **Writes:** no
 - **Preconditions:** POST /api/v1/documents as `$QA_USER_TOKEN` to create a document owned by the test persona.
 - **Steps:**
   1. Open http://localhost:5173/login.
@@ -26,6 +27,7 @@ None found.
 
 ### BE-01: Create an authenticated document
 - **Target:** backend
+- **Writes:** no
 - **Method:** POST /api/v1/documents
 - **Headers:** Authorization: Bearer ${QA_USER_TOKEN}
 - **Payload:** `{"title":"QA document","owner":"$QA_USER_ID"}`
@@ -37,6 +39,7 @@ None found.
 
 ### BE-02: Reject access to another persona's profile
 - **Target:** supabase
+- **Writes:** no
 - **Method:** GET http://127.0.0.1:54321/auth/v1/user
 - **Headers:** apikey: $QA_SUPABASE_ANON_KEY; Authorization: Bearer $QA_OTHER_TOKEN
 - **Preconditions:** Log in as `$QA_OTHER_EMAIL` with `${QA_OTHER_PASSWORD}`.
