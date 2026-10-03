@@ -29,7 +29,7 @@ Every test report MUST follow this structure. `## Setup gaps` is conditional: in
 - Plan provenance: auto-generated|existing
 - Date: <YYYY-MM-DD>
 - Duration: <approximate execution time>
-- Accounts: <persona names> (provisioned|static; deleted|left)
+- Accounts: registered <N> (deleted <D>, left <L>, manual <M>)
 
 ## Setup gaps
 - service: `http://127.0.0.1:8000` — BE-04
@@ -72,6 +72,8 @@ Every test report MUST follow this structure. `## Setup gaps` is conditional: in
 ### Need info: BE-05: <scenario name> (BE-05 (edge 2): fixture: fixtures/resume.pdf)
 ### Need info: BE-08: <scenario name> (BE-08: tool: psql)
 ~~~
+
+The Accounts line is `- Accounts: registered 0` when this run has no ledger records; otherwise it is `- Accounts: registered N (deleted D, left L, manual M)`. It counts tester-registered accounts for this run, not configured existing users.
 
 ---
 
@@ -194,9 +196,9 @@ Verify the onClick handler in `src/components/Header.tsx:23`. The most likely ca
 
 ## Detailed Results Format
 
-List ALL scenarios (pass, fail, skip, need info) in plan order. The engine derives one verdict per scenario: `fail` if the main Status or any edge is FAIL; otherwise `need-info` if the main Status or any edge is NEED_INFO; otherwise `auth-unverified` for a reclassified main flow; otherwise `skip` if the main Status or any edge is SKIP. The `**DB check:** SKIP` field does not count. Only when the main flow and every edge passed is the verdict `pass`. An edge gap never hides a main-flow FAIL.
+List ALL scenarios (pass, fail, skip, need info) in plan order. The engine derives one verdict per scenario: `fail` if the main Status or any edge is FAIL; otherwise `need-info` if the main Status or any edge is NEED_INFO; otherwise `skip` if the main Status or any edge is SKIP. The `**State Check:** SKIP` field does not count. Only when the main flow and every edge passed is the verdict `pass`. An edge gap never hides a main-flow FAIL.
 
-For `/qa:run`, the engine keeps `auth-unverified` as its own sidecar verdict. A main flow expecting 2xx but returning 401/403 is reclassified unless it sends a credential of a persona the engine authenticated for that dispatch; that authenticated-persona failure is instead FAIL, flagged `auth`. In the report's four-count Summary and Detailed Results, the engine displays `auth-unverified` under **Skip (auth-unverified)** so `Total = Pass + Fail + Skip + Need info`; its Coverage counts it separately as `auth-unverified`. This is a reporting bucket only: never turn the sidecar verdict into `skip`, credit it as PASS, or use it as a fix candidate.
+For `/qa:run`, a BE feature main flow expecting 2xx but returning 401/403 is always FAIL flagged `auth`, never auto-fixed; `approve` surfaces the flag for review. The engine logs nobody in. Summary counts remain `Total = Pass + Fail + Skip + Need info`.
 
 ```markdown
 ## Detailed Results
@@ -210,20 +212,20 @@ For `/qa:run`, the engine keeps `auth-unverified` as its own sidecar verdict. A 
 ### Need info: BE-04: <name> (BE-04: service: http://127.0.0.1:8000)
 ### Need info: BE-05: <name> (BE-05 (edge 2): fixture: fixtures/resume.pdf)
 ### Skip: BE-06: <name> (cannot-confirm)
-### Skip: BE-07: <name> (auth-unverified)
+### Skip: BE-07: <name> (mutation-guard)
 ### Need info: BE-08: <name> (BE-08: tool: psql)
 ```
 
 - **Pass:** just the status and scenario name
 - **Fail:** status, scenario name, reference to QA-XXX issue
-- **Skip:** status, scenario name, the engine's reason token in parentheses (`mutation-guard`, `auth-unverified`, `cannot-confirm`, `tool-unavailable`, or `transport`)
+- **Skip:** status, scenario name, the engine's reason token in parentheses (`mutation-guard`, `cannot-confirm`, `tool-unavailable`, or `transport`)
 - **Need info:** status, scenario name, each gap as `<key>: <kind>: <identifiers>` in parentheses, where `<key>` is the scenario ID or `<scenario ID> (edge N)`; separate multiple gaps with `; ` and list every gap under `## Setup gaps` too
 
 ## Setup gaps (conditional)
 
 Place directly after `## Summary` and before `## Issues Found` when any scenario or edge case returns NEED_INFO, **even if a FAIL edge/main flow wins the scenario verdict**. One bullet per kind: `- <kind>: \`<identifier>\`, \`<identifier>\` — <scenario IDs, e.g. BE-01 (edge 2)>`. Include only names/URLs, never values. No `### [SEVERITY]` headings and no `---` separators in this section. Omit it entirely if no gaps exist.
 
-Service gaps name the unreachable target origin (for example, `service: http://127.0.0.1:8000`); the engine's `summary` points to `env.targets` and `env.services` for the fix. Tool gaps name unavailable tools (`tool: psql`), and fixture gaps name fixtures the app cannot create (`fixture: fixtures/resume.pdf`). Missing persona, value, target or database configuration is a `plan check` gap to resolve before dispatch, not a runtime NEED_INFO credential gap. Scenario preconditions create ordinary application data; do not treat an assumed seed account or record as a missing fixture.
+Service gaps name the unreachable target origin (for example, `service: http://127.0.0.1:8000`); the engine's `summary` points to `env.targets` and `env.services` for the fix. Tool gaps name unavailable tools (`tool: psql`), and fixture gaps name fixtures the app cannot create (`fixture: fixtures/resume.pdf`). Missing user, value, target or store configuration is a `plan check` gap to resolve before dispatch, not a runtime NEED_INFO credential gap. Credential unlock hints name `qa.users.<user>.<email|password|id>`, `env.values.<name>` or `env.stores` for native store-client names, never values. Scenario preconditions create ordinary application data; do not treat an assumed seed account or record as a missing fixture.
 
 ---
 
@@ -234,7 +236,7 @@ An optional `## Coverage` block may appear in the Summary section, immediately a
 ```
 ## Coverage
 - Exercised: <feature-PASS> feature · <sanity-PASS> sanity · <negative-PASS> enforcement
-- Not verified: auth-unverified <N> · need-info <M> · mutation-guard SKIP <K> · tool-unavailable <J> · …
+- Not verified: need-info <N> · mutation-guard SKIP <M> · tool-unavailable <K> · cannot-confirm <J> · transport <L>
 - Confidence: <high | low — reason>
 ```
 

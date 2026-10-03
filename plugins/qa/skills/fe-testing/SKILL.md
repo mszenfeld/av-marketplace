@@ -1,7 +1,7 @@
 ---
 name: fe-testing
 description: Frontend testing patterns using Playwright MCP — navigation, interaction, assertions, screenshots on failure, and common UI testing scenarios.
-allowed-tools: mcp__plugin_playwright_playwright__browser_navigate, mcp__plugin_playwright_playwright__browser_click, mcp__plugin_playwright_playwright__browser_fill_form, mcp__plugin_playwright_playwright__browser_snapshot, mcp__plugin_playwright_playwright__browser_take_screenshot, mcp__plugin_playwright_playwright__browser_press_key, mcp__plugin_playwright_playwright__browser_select_option, mcp__plugin_playwright_playwright__browser_hover, mcp__plugin_playwright_playwright__browser_wait_for, mcp__plugin_playwright_playwright__browser_evaluate, mcp__plugin_playwright_playwright__browser_console_messages, mcp__plugin_playwright_playwright__browser_navigate_back, mcp__plugin_playwright_playwright__browser_tabs, mcp__plugin_playwright_playwright__browser_handle_dialog, mcp__plugin_playwright_playwright__browser_resize, mcp__plugin_playwright_playwright__browser_close, mcp__plugin_playwright_playwright__browser_drag, mcp__plugin_playwright_playwright__browser_type, mcp__plugin_playwright_playwright__browser_file_upload, mcp__plugin_playwright_playwright__browser_network_requests, mcp__plugin_playwright_playwright__browser_run_code, Write, Read, Bash(mkdir:*), Bash(printf:*), Bash([:*)
+allowed-tools: mcp__plugin_playwright_playwright__browser_navigate, mcp__plugin_playwright_playwright__browser_click, mcp__plugin_playwright_playwright__browser_fill_form, mcp__plugin_playwright_playwright__browser_snapshot, mcp__plugin_playwright_playwright__browser_take_screenshot, mcp__plugin_playwright_playwright__browser_press_key, mcp__plugin_playwright_playwright__browser_select_option, mcp__plugin_playwright_playwright__browser_hover, mcp__plugin_playwright_playwright__browser_wait_for, mcp__plugin_playwright_playwright__browser_evaluate, mcp__plugin_playwright_playwright__browser_console_messages, mcp__plugin_playwright_playwright__browser_navigate_back, mcp__plugin_playwright_playwright__browser_tabs, mcp__plugin_playwright_playwright__browser_handle_dialog, mcp__plugin_playwright_playwright__browser_resize, mcp__plugin_playwright_playwright__browser_close, mcp__plugin_playwright_playwright__browser_drag, mcp__plugin_playwright_playwright__browser_type, mcp__plugin_playwright_playwright__browser_file_upload, mcp__plugin_playwright_playwright__browser_network_requests, mcp__plugin_playwright_playwright__browser_run_code, Write, Read, Bash(mkdir:*), Bash(printf:*), Bash([:*), Bash(sh:*)
 ---
 
 # Frontend Testing Patterns
@@ -16,7 +16,7 @@ For each FE scenario from the test plan:
 4. **Execute edge cases** — run each edge case as a sub-test
 5. **Record result** — PASS/FAIL/SKIP/NEED_INFO with details
 
-The `/qa:run` tester dispatch supplies `Plan:`, `Run dir:`, `Secrets file:`, `Secrets JSON:`, `Redact names file:`, `Targets:` (named origins and the default target for FE), `Database:` and `Guarded:`, followed by `FE Test Scenarios:` in plan order. Do not parse the plan's optional `## Setup` notes. A scenario in `Guarded:` is `SKIP — mutation-guard`; execute none of its preconditions, main flow or edges. Credentials and exposed values come only from the engine's run-directory channel; FE never uses the database connection names.
+The `/qa:run` tester dispatch supplies `Plan:`, `Dispatch:`, `Run dir:`, `Secrets file:`, `Secrets JSON:`, `Redact names file:`, `Tag:`, `Targets:` (named origins and the default target for FE), `Stores:` and `Guarded:`, followed by `FE Test Scenarios:` in plan order. Do not parse the plan's optional `## Setup` notes. A scenario in `Guarded:` is `SKIP — mutation-guard`; execute none of its preconditions, main flow or edges. Credentials and exposed values come only from the engine's run-directory channel; FE never uses store connection names.
 
 ## Tester scope
 
@@ -39,6 +39,7 @@ browser_navigate(url: "http://localhost:3000/page")
 ```
 
 - Resolve a relative URL against the scenario's `- **Target:** <name>` or the section's default target from the dispatch's `Targets:`. Before opening an absolute URL, compare its origin (scheme, lowercased host, explicit or default port) exactly with a listed origin. Different schemes or ports are different origins. A URL with userinfo is always refused, even on a listed origin: `SKIP — off-target URL refused: <origin>`, with no userinfo, query or fragment in the identifier. Do not follow redirects automatically; navigate a scenario-requested destination explicitly only after the same origin guard. Before a credential fill, check the page's current URL again; a redirect may have left the listed origins.
+- Before filling **or submitting** any credential (including signup/login forms), require HTTPS or exact loopback (`localhost`, `127.0.0.1`, `::1`, or a host ending in `.localhost`, lowercased without IPv6 brackets). A listed non-loopback HTTP origin is still refused: `SKIP — cleartext origin refused: <origin>`.
 - After navigation, take a snapshot to verify the page loaded:
 
 ```
@@ -82,9 +83,9 @@ browser_press_key(key: "Tab")
 
 ## Credentials in FE steps
 
-Never print exposed values, headers, cookies or tokens in results, quoted snapshots, screenshots' descriptions or artifacts. Read needed names only from the dispatch's run directory; never use the inherited process environment as a fallback. Do not read `.env`, `.env.*`, `docker-compose*.yml`, framework config, engine-private secrets or account state for values. Never mint a token to satisfy a prerequisite: the engine provisions accounts and refreshes login credentials before dispatch. A login endpoint is tested only when that action is explicitly in the scenario.
+Never print exposed values, headers, cookies or tokens in results, quoted snapshots, screenshots' descriptions or artifacts. Read needed names only from the dispatch's run directory; never use the inherited process environment as a fallback. Do not read `.env`, `.env.*`, `docker-compose*.yml`, framework config, engine-private secrets or account state for values. The engine logs nobody in: testers register and log in through the forms named in preconditions.
 
-Only exposed `QA_` names may be checked, filled or typed: persona `QA_<PERSONA>_EMAIL`, `_PASSWORD`, `_ID`, `_TOKEN`, `_COOKIE`, `_COOKIE_<NAME>` and configured `QA_<VALUE>` entries. An unexposed/unsupported name is a config/plan gap, not `NEED_INFO kind=credentials`; never touch another source and refuse the step with `SKIP — cannot-confirm: name not exposed by the engine`, naming the identifier only. An exposed name that is empty in the channel is `NEED_INFO kind=credentials`, normally prevented by the engine before dispatch. If a main-flow name is empty, run none of its steps or edges; an edge-only gap remains on that edge without changing the main-flow status. An unreadable/invalid channel is `NEED_INFO kind=tool`, naming `secrets.json`, `load.sh` or `secrets.env`. Fill only after the current page passes the exact origin/userinfo guard under Navigation.
+Configured existing users expose `QA_<U>_EMAIL`, `QA_<U>_PASSWORD` and optional `QA_<U>_ID`; configured values expose `QA_<X>`. Login through the form using the existing user's email/password. For registered users, build `qa+<Tag>-<user>@…` from the dispatch's `Tag:` and the repository-grounded accepted domain, and read `QA_NEW_PASSWORD` from secrets.json (Claude Code may use load.sh). Retain the resulting email/id as that user's own values: `$QA_OWNER_EMAIL` / `$QA_OWNER_ID` are never channel names. A scenario using them before its registration precondition ran is `NEED_INFO kind=fixture` naming the user. Do not request a registered user's `QA_<U>_*` from load.sh. An unsupported name is a config/plan gap, not `NEED_INFO kind=credentials`; never touch another source and refuse the step with `SKIP — cannot-confirm: name not exposed by the engine`, naming the identifier only. An exposed name that is empty in the channel is `NEED_INFO kind=credentials`, normally prevented by the engine before dispatch. If a main-flow name is empty, run none of its steps or edges; an edge-only gap remains on that edge without changing the main-flow status. An unreadable/invalid channel is `NEED_INFO kind=tool`, naming `secrets.json`, `load.sh` or `secrets.env`. Fill only after the current page passes the exact origin/userinfo and cleartext guards under Navigation.
 
 - **OMP browser:** The **JavaScript** `eval` cell runs on Bun. Read the dispatch's `Secrets JSON:` with `await Bun.file('<run-dir>/secrets.json').json()` inside the fill cell, then validate **all names needed by that cell before any fill**. An unreadable/invalid file or empty needed name throws before filling; catch file errors without returning their raw text. Never use `process.env` or a Python cell for credentials, and never return/log the secrets object or values. OMP's eval status line still renders `fill` arguments as JSON literals (`qa.fill("aria/Password", "<value>")`), so the filled value reaches the session transcript.
 - **Claude Code Playwright MCP:** In each credential-read Bash call, source the loader with **all names needed for the fill step before any `printf`**, for example:
@@ -93,7 +94,31 @@ Only exposed `QA_` names may be checked, filled or typed: persona `QA_<PERSONA>_
   printf '%s' "$QA_USER_PASSWORD"
   ```
   Read each value once and pass it straight to the fill tool; never quote it in Details or persist it. If the loader fails, do not print or fill anything. The `printf` output and fill tool's input both put the value into the session transcript.
-- **Both harnesses:** FE plans use a disposable, non-privileged test account, never a real user's credentials. Never take a snapshot (`browser_snapshot()`, `tab.observe()`, `tab.ariaSnapshot()`) between filling a credential and submitting the form: a snapshot can render a filled field's value. After the submit, read the result with a wait for the expected text (`browser_wait_for`, `tab.waitForText`) or, in OMP, a snapshot scoped to the result region (`tab.ariaSnapshot("<result selector>")`).
+- **Both harnesses:** Use disposable test users, never a real person's credentials; use a configured role only when the plan explicitly needs it. Never take a snapshot (`browser_snapshot()`, `tab.observe()`, `tab.ariaSnapshot()`) between filling a credential and submitting the form: a snapshot can render a filled field's value. After the submit, read the result with a wait for the expected text (`browser_wait_for`, `tab.waitForText`) or, in OMP, a snapshot scoped to the result region (`tab.ariaSnapshot("<result selector>")`).
+
+### Record successful registration immediately
+
+Before any other step after successful signup, call the engine-generated helper (the id is optional when the UI does not expose it):
+
+```bash
+sh '<run-dir>/capture.sh' <dispatch> --account <email>
+```
+
+Claude Code uses Bash. OMP uses a Bun JavaScript `eval` cell and an argument array, not an interpolated shell command:
+
+```javascript
+const email = "<the tagged email just registered>";
+const id = null; // Replace only with an observed safe id; omit when unknown.
+const args = ["sh", "<run-dir>/capture.sh", "<dispatch>", "--account", email];
+if (id !== null) args.push(id);
+const result = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" });
+if (result.exitCode !== 0) {
+  throw new Error(`NEED_INFO kind=fixture: ${email}`);
+}
+return { recorded: true };
+```
+
+`child_process.spawnSync("sh", args.slice(1))` is the Node equivalent. Never log helper stdout/stderr or a secrets object. Non-zero exit is `NEED_INFO kind=fixture` naming the email; include the account in the final `accounts[]` fallback so ingest can try the same idempotent record path. Never append directly to the engine-owned ledger or invent a JSON-lines file: only `users record` through `capture.sh --account` makes cleanup durable before ingest.
 
 ### OMP eval cells
 
@@ -128,6 +153,11 @@ for (const [name, selector] of [["QA_USER_EMAIL", "aria/Email"], ["QA_USER_PASSW
   if (authority?.includes("@") || !targetOrigins.includes(pageUrl.origin)) {
     throw new Error(`SKIP — off-target URL refused: ${pageUrl.origin}`);
   }
+  const host = pageUrl.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const loopback = ["localhost", "127.0.0.1", "::1"].includes(host) || host.endsWith(".localhost");
+  if (pageUrl.protocol === "http:" && !loopback) {
+    throw new Error(`SKIP — cleartext origin refused: ${pageUrl.origin}`);
+  }
   await tab.fill(selector, secrets[name]);
 }
 ```
@@ -146,7 +176,7 @@ const tab = browser.tab("qa");
 return await tab.waitForSelector("text/Welcome back", { timeout: 5000 });
 ```
 
-An action cell is never re-run, whatever it threw. When it throws, or a later observation cannot tell whether the action took effect, treat it as an ambiguous mutating failure: read the state once in a new observation cell (`url`, `text`, a GET or a DB check), grade on that read if it settles the outcome, otherwise report `SKIP` with `harness error: <detail>; outcome unknown, action not replayed`. A failed observation cell may be re-run once, and that rerun counts as the refutation battery's one rerun.
+An action cell is never re-run, whatever it threw. When it throws, or a later observation cannot tell whether the action took effect, treat it as an ambiguous mutating failure: read the state once in a new browser observation cell (`url`, `text` or snapshot), grade on that read if it settles the outcome, otherwise report `SKIP` with `harness error: <detail>; outcome unknown, action not replayed`. A failed observation cell may be re-run once, and that rerun counts as the refutation battery's one rerun.
 
 ---
 
@@ -272,14 +302,16 @@ An edge-only gap stays on the edge line; never change the main-flow status becau
 
 After the human-readable results, end the answer with exactly one `qa-results` block:
 
+
 ```json qa-results
 {"section": "FE", "scenarios": [
   {"id": "FE-01", "status": "PASS", "observed_status": null, "crash": false, "kind": null, "missing": [], "skip_reason": null,
    "refutation": null, "edges": [{"n": 1, "status": "FAIL", "observed_status": null, "crash": true, "kind": null, "missing": [], "skip_reason": null, "refutation": "re-verified: yes; env: n/a; scope: in; harness: ok"}]}
-]}
+], "accounts": []}
 ```
 
 Use actual assigned IDs and observations. Include every assigned scenario and planned edge exactly once in plan order; edge `n` is 1-based. `status` is `PASS|FAIL|SKIP|NEED_INFO`, independently for the main flow and each edge. FE `observed_status` is always `null`; safely observed HTTP statuses may still be recorded in prose. `crash` is `true` only for an observed stack trace, framework debug page or app dying under test; include no page content. For `NEED_INFO`, use `kind: credentials|service|fixture|tool` and identifiers-only `missing`; otherwise `kind: null`, `missing: []`. `credentials` means an exposed name is empty, which the engine prevents before dispatch. `skip_reason` is the actual SKIP reason or `null`; planned edges blocked by the main flow remain unexecuted and are recorded as SKIP with that reason. Every surviving FAIL has its refutation trace, otherwise `refutation: null`. The engine reads only this block: invalid/missing output or incomplete assignments become `cannot-confirm`, never earlier PASS.
+Top-level `accounts: [{"email": "<registered email>", "id": "<observed id>" | null}]` is the fallback only for successful registrations that `capture.sh --account` could not record; use `[]` otherwise. Include no configured existing user, password or token. Acceptance requires a safe email with this dispatch's tag in its local part case-insensitively and a safe id or null. The immediate helper call remains mandatory: it makes cleanup survive an interrupted or uningested dispatch.
 
 ---
 
@@ -290,7 +322,7 @@ A FAIL is a claim — refute it before reporting ANY scenario-level or edge-case
 1. **Re-verify the observation — once, deterministically, observation-only.** Take one fresh `browser_snapshot()` or `browser_wait_for` for the expected text, then re-read. Never re-perform the action: no re-submit, no re-click through the flow. One re-check, not retry-until-pass. If the first read failed and the fresh snapshot passes, record both in Details and report `PASS` with `re-verified: first read stale`. **Carve-out:** an explicitly timing-sensitive Expected ("appears immediately", "without reload"), or a mismatch recurring on an edge-case interaction, remains `FAIL` because the discrepancy itself matters.
 2. **Environment artifact?** An exposed name empty in the run-directory channel → `NEED_INFO kind=credentials` (the engine normally prevents it); the app never reachable in this scenario → `NEED_INFO kind=service, Missing: <target origin>`; missing seed/file → `NEED_INFO kind=fixture`; unavailable browser → `NEED_INFO kind=tool, Missing: playwright`. If the app loaded earlier in this same scenario and then died, report genuine `FAIL` (crash under test). An edge-only prerequisite gap stays on its edge line, leaving the main-flow PASS/FAIL untouched. Inapplicable scenario → `SKIP`. A wrong status or failed assertion → `FAIL`, not NEED_INFO.
 3. **Deliberate omission / scope mismatch?** An observed defect outside the scenario's Expected, while Expected itself is met, is `PASS` with the out-of-scope observation noted in Details. A missing prerequisite instead uses check 2.
-4. **Harness error?** A browser tool failure or timeout permits one retry **only** of a failed navigation, snapshot or browser-open step, and only if check 1 has not already rerun it: one rerun total per failing observation. Never replay a form submit or a write-triggering click. In OMP the retried unit is the whole `eval` cell, and re-running a cell replays every action in it: re-run only a cell that holds no submit or write-triggering click, never an action cell (`### OMP eval cells`). After an ambiguous action failure, read resulting state once (snapshot, GET or DB check); grade if the outcome is established, otherwise `SKIP` with `harness error: <detail>; outcome unknown, action not replayed`. If a read-only harness step fails again, report `SKIP — harness error: <detail>`, not application FAIL.
+4. **Harness error?** A browser tool failure or timeout permits one retry **only** of a failed navigation, snapshot or browser-open step, and only if check 1 has not already rerun it: one rerun total per failing observation. Never replay a form submit or a write-triggering click. In OMP the retried unit is the whole `eval` cell, and re-running a cell replays every action in it: re-run only a cell that holds no submit or write-triggering click, never an action cell (`### OMP eval cells`). After an ambiguous action failure, read resulting state once in the browser (snapshot, URL or visible text); grade if the outcome is established, otherwise `SKIP` with `harness error: <detail>; outcome unknown, action not replayed`. If a read-only harness step fails again, report `SKIP — harness error: <detail>`, not application FAIL.
 
 **Disposition:** A surviving scenario FAIL carries `- **Refutation:** <trace>` directly after Details; an edge FAIL carries its trace inside that edge line's details clause. Example: `re-verified: yes (fresh snapshot, same result); env: n/a; scope: in; harness: ok`. Refuted FAILs become PASS, SKIP or NEED_INFO as the evidence demands. No branch replays a mutating action.
 
@@ -304,3 +336,4 @@ A FAIL is a claim — refute it before reporting ANY scenario-level or edge-case
 - Error page / HTTP 500 → `FAIL`; the app answered, so this is an app defect, not an absent service. Inspect the snapshot first and suppress the screenshot and snapshot text for a framework debug page.
 - Starting/building the app, editing files, migrations and infrastructure inspection are out of harness scope. A step requiring them → `SKIP — out of harness scope: <step>`; only browser actions against an already-running app are executable.
 - A URL with userinfo, an origin not exactly listed in `Targets:`, or a credential fill on a page that left the listed origins → `SKIP — off-target URL refused: <origin>`; the page is not opened and nothing is filled.
+- A signup/login form or other credential-bearing submission on non-loopback HTTP → `SKIP — cleartext origin refused: <origin>`; fill and submit nothing.
