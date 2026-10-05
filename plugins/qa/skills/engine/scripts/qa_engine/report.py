@@ -58,6 +58,9 @@ LABELS = {"pass": "Pass", "fail": "Fail", "skip": "Skip", "need-info": "Need inf
 DECISION_FIELDS = ("Decision", "Decision-retired", "Verification-plan", "Decision-pin", "Dispatch", "Verification")
 ACCOUNTS = re.compile(r"^- Accounts:[^\n]*$", re.MULTILINE)
 SUMMARY = re.compile(r"^## Summary[ \t]*\n.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+STORE_CLIENT_NAME = re.compile(
+    r"(?:STORE_[A-Z0-9_]+_)?(?:" + "|".join(name for names in STORE_NAMES.values() for name in names) + ")"
+)
 REQUIRED_ISSUE_FIELDS = frozenset({"qa", "title", "severity", "location", "actual", "impact", "remediation"})
 OPTIONAL_ISSUE_FIELDS = frozenset({"severity_reason", "response", "screenshot"})
 HEADING_FIELDS = ("qa", "title", "severity", "location")
@@ -377,18 +380,14 @@ def _coverage(run: Run, plan: Plan, verdicts: Mapping[str, str]) -> tuple[list[s
 
 
 def _credential_key(run: Run, name: str) -> str:
-    for names in STORE_NAMES.values():
-        if name in names:
-            return "env.stores"
+    if STORE_CLIENT_NAME.fullmatch(name):
+        return "env.stores"
     token = name.removeprefix("QA_")
     users = run.record["config"]["qa"].get("users", {})
     recognized = user_token(name, users)
     if recognized:
         user, field = recognized
         return f"qa.users.{user}.{field.lower()}"
-    unknown = re.fullmatch(r"(.+)_(EMAIL|PASSWORD|ID)", token)
-    if unknown:
-        return f"qa.users.{unknown.group(1).lower()}.{unknown.group(2).lower()}"
     return "env.values." + token
 
 

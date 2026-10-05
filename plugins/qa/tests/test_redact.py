@@ -64,6 +64,32 @@ class RedactTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), body)
 
+    def test_qa_values_with_client_port_suffixes_are_masked(self) -> None:
+        for suffix in ("PGPORT", "MYSQL_TCP_PORT", "REDIS_PORT", "REDIS_DB"):
+            with self.subTest(suffix=suffix):
+                values = {
+                    suffix: "5400",
+                    f"STORE_MAIN_{suffix}": "5401",
+                    f"QA_{suffix}": "private-direct",
+                    f"QA_LEGACY_{suffix}": "private-legacy",
+                }
+                result = self.redact(
+                    json.dumps({
+                        "native": "5400",
+                        "store": "5401",
+                        "message": ["private-direct", "private-legacy"],
+                    }),
+                    names=tuple(values),
+                    values=values,
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {
+                    "native": "5400",
+                    "store": "5401",
+                    "message": ["***", "***"],
+                })
+
     def test_captured_credential_names_are_masked_under_any_key(self) -> None:
         result = self.redact(
             '{"message":"welcome private-token"}',

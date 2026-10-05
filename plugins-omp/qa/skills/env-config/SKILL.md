@@ -43,17 +43,19 @@ Find health/readiness routes in route definitions, Compose healthcheck declarati
 
 Inspect Makefile/task definitions, package scripts, Compose service selections and development docs. Commands run in the repository root through `/bin/sh -c`; preserve needed working-directory changes in the command itself. Do not propose commands that reset unrelated stacks, erase volumes or silently seed production data. Omit optional lifecycle keys with no evidence instead of inventing commands. If a required command or probe cannot be grounded, return the missing prerequisite as a question.
 
-Validation requires `up` to have at least one `health` probe (`up requires at least one health probe`); `prepare` and `down` each require `up` (`prepare requires up`, `down requires up`). `prepare` runs only after QA's own `up`, against data that may persist, so commands must be idempotent. QA does not apply branch migrations on an already-running stack; that is the developer's job. The consuming QA plugin's `qa.start_services = "ask"|"auto"` decides the bring-up question independently of fix handling.
+Validation requires `up` to have at least one `health` probe (`up requires at least one health probe`); `prepare` and `down` each require `up` (`prepare requires up`, `down requires up`). `prepare` runs only after QA's own `up`, against data that may persist, so commands must be idempotent. QA does not apply branch migrations on an already-running stack; that is the developer's job. Whether and when bring-up runs is the consuming plugin's policy, not part of `[env]`.
 
 ### Stores
 
 Use non-secret application settings, Compose host-port mappings, migration configuration and docs to identify actual SQL and Redis connections. Never open a credential-bearing DSN to obtain them. `[env.stores.<name>]` is optional; propose only stores required by the caller. Names match `[A-Za-z_][A-Za-z0-9_]*` and must be unique case-insensitively.
 
+Postgres/MySQL and Redis hosts must be exact loopback as defined under Targets. The store schema has no TLS settings, so remote/LAN hosts are rejected with `non-loopback stores require TLS`, even after trust approval or a personal override. A required store documented only on a remote/LAN host is a blocking prerequisite: return `proposal: null` with its `env.stores.<name>.host` key rather than disguising that host as loopback or relying on inherited client TLS settings. Propose a local endpoint only when repository evidence establishes it.
+
 - `kind = "sql"`, `engine = "postgres"` or `"mysql"`: non-empty `host`, `user`, `name` strings, a required `password` **source**, and an optional integer `port` from 1 to 65535 (defaults 5432 / 3306). Include a published non-default port explicitly; never use the container port for a host client. Do not include `path`.
 - `kind = "sql"`, `engine = "sqlite"`: a non-empty `path` to the documented database file, relative to the repository root or absolute; no `host`, `port`, `user`, `name` or `password`.
 - `kind = "redis"`: required non-empty `host`, optional integer `port` from 1 to 65535 (default 6379), optional integer `db >= 0` (default 0) and optional `password` source; no SQL fields.
 
-Hosts, usernames, database names and paths are connection metadata, not value-source strings. Credentials remain sources even for loopback development stores. State Checks are read-only: PostgreSQL uses `PGOPTIONS=-c default_transaction_read_only=on`, SQLite `-readonly`, MySQL `--init-command="SET SESSION TRANSACTION READ ONLY"`, and Redis only the be-testing skill's read-command allowlist. Recommend a read-only database role as the stronger boundary. SQL cleanup is a separately trusted write recipe, not a State Check.
+Hosts, usernames, database names and paths are connection metadata, not value-source strings. Credentials remain sources even for loopback development stores. State Checks are read-only: PostgreSQL uses `PGOPTIONS=-c default_transaction_read_only=on`, SQLite `-readonly`, MySQL `--init-command="SET SESSION TRANSACTION READ ONLY"`, and Redis only the be-testing skill's read-command allowlist. Recommend a read-only database role as the stronger boundary.
 
 ### Secrets and exposed values
 

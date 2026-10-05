@@ -10,7 +10,7 @@ my $CLIENT_NAMES = qr/PGHOST|PGPORT|PGUSER|PGDATABASE|PGPASSWORD|SQLITE_DB|MYSQL
 while (my $name = <$names>) {
     chomp $name;
     die "qa-redact: invalid names file\n" unless $name =~ /\A(?:QA_[A-Z0-9_]+|$CLIENT_NAMES|STORE_[A-Z0-9_]+_(?:$CLIENT_NAMES))\z/;
-    next if $name =~ /(?:\A|_)(?:PGPORT|MYSQL_TCP_PORT|REDIS_PORT|REDIS_DB)\z/; # Ports and Redis indexes are not secrets.
+    next if $name =~ /\A(?:STORE_[A-Z0-9_]+_)?(?:PGPORT|MYSQL_TCP_PORT|REDIS_PORT|REDIS_DB)\z/; # Ports and Redis indexes are not secrets.
     my $value = $ENV{$name};
     push @DECL, $value if defined $value && length($value) >= 4;
     if (defined $value && $name =~ /_COOKIE(?:_[0-9]+)?\z/ && $value =~ /^[^=]*=([^;]+)/) {

@@ -1,7 +1,7 @@
 ---
 name: be-testing
 description: Backend testing patterns — API request construction, response verification, read-only SQL and Redis State Checks, error handling testing, and adaptive tool detection.
-allowed-tools: Bash(curl:*), Bash(httpie:*), Bash(http:*), Bash(wget:*), Bash(psql:*), Bash(sqlite3:*), Bash(mysql:*), Bash(redis-cli:*), Bash(command:*), Bash(printf:*), Bash([:*), Bash(cut:*), Bash(jq:*), Bash(grep:*), Bash(cat:*), Bash(head:*), Bash(tail:*), Bash(sh:*), Bash(sed:*), Read, Write, Bash(mkdir:*)
+allowed-tools: Bash(curl:*), Bash(httpie:*), Bash(http:*), Bash(wget:*), Bash(psql:*), Bash(sqlite3:*), Bash(mysql:*), Bash(redis-cli:*), Bash(command:*), Bash(printf:*), Bash([:*), Bash(cut:*), Bash(jq:*), Bash(grep:*), Bash(cat:*), Bash(head:*), Bash(tail:*), Read, Write, Bash(mkdir:*)
 ---
 
 # Backend Testing Patterns
@@ -30,7 +30,7 @@ Use an available HTTP client, but use `curl` for any request containing a creden
 
 ### Connection selection
 
-Tool availability alone does not establish a connection to a store. The dispatch's `Stores:` lists the configured stores this section's State Checks reference; each check selects its named store through `. '<run-dir>/load.sh' --store <name> <required native names>`. A missing client skips only that check while HTTP still runs. Never discover connection values or use an MCP store connection: the dispatch declares no such connection.
+Tool availability alone does not establish a connection to a store. The dispatch's `Stores:` lists the configured stores this section's State Checks reference; each check selects its named store through `qa_load_store='<name>' qa_load_require='<required native names>' . '<run-dir>/load.sh' || exit 1`. A missing client skips only that check while HTTP still runs. Never discover connection values or use an MCP store connection: the dispatch declares no such connection.
 
 ---
 
@@ -67,14 +67,14 @@ Handle the main `**Expected:**` and each edge-case expectation independently:
 
 ### Request Construction (curl)
 
-Capture headers and body **once** per request. Every request Bash call begins with `. '<run-dir>/load.sh' <configured names the request uses> && . '<run-dir>/results/<dispatch>/captured.env' || exit 1`, then repeats the installed-script and dispatch names-file guard below, with lower-case `qa_redact_script` / `qa_redact_names`. Both capture files exist from the first call on. Bash calls do not share variables. Resolve the path against `**Target:**` or the section default and apply the exact origin guard before sending; `target_origin` below is a listed origin, not project config. Refuse a credential-bearing request on non-loopback HTTP with `SKIP — cleartext origin refused: <origin>`. `QA_CAPTURED_OWNER_TOKEN` is a tester-owned token example, not an engine-provisioned field. Never print request headers or credentials.
+Capture headers and body **once** per request. Every request Bash call begins with `qa_load_require='<configured names the request uses>' . '<run-dir>/load.sh' && . '<run-dir>/results/<dispatch>/captured.env' || exit 1`, then repeats the installed-script and dispatch names-file guard below, with lower-case `qa_redact_script` / `qa_redact_names`. Use empty `qa_load_require` for a credential-free request. Never pass arguments to the dot script: dash ignores them. Both capture files exist from the first call on. Bash calls do not share variables. Resolve the path against `**Target:**` or the section default and apply the exact origin guard before sending; `target_origin` below is a listed origin, not project config. Refuse a credential-bearing request on non-loopback HTTP with `SKIP — cleartext origin refused: <origin>`. `QA_CAPTURED_OWNER_TOKEN` is a tester-owned token example, not an engine-provisioned field. Never print request headers or credentials.
 
 For a bearer or cookie header, reject CR/LF and escape `\` and `"` in curl config syntax, using config-on-stdin; never pass expanded credentials as HTTPie arguments or `-H`. The Perl writer below reads the captured value from the environment, keeping quotes/backslashes exact without leaking argv. For credential JSON payloads, a Perl/`JSON::PP` writer reads loaded env vars directly on a separate read-only file descriptor. Never use `-d "$SECRET"` or a credential-bearing URL argv. If curl cannot encode credentials safely, do not send the request or leak them to another client.
 
 **GET request:**
 
 ```bash
-. '<run-dir>/load.sh' && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
+qa_load_require= . '<run-dir>/load.sh' && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
 qa_redact_script='<installed skill directory>/scripts/qa-redact.pl'
 qa_redact_names='<run-dir>/results/<dispatch>/redact-names'
 [ -f "$qa_redact_names" ] && [ -r "$qa_redact_names" ] && [ ! -L "$qa_redact_names" ] && [ -O "$qa_redact_names" ] || { printf 'qa-redact: names file unavailable\n'; exit 1; }
@@ -91,7 +91,7 @@ BODY=$(printf '%s\n' "$RESP" | sed '1,/^\r\{0,1\}$/d')
 **Mutating request with a non-secret payload:** Send it once. For PUT/PATCH/DELETE, change only the method, endpoint and scenario-specified payload; keep the same loader, guard, capture, and status/body extraction. Never replay a write to re-verify a failure.
 
 ```bash
-. '<run-dir>/load.sh' && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
+qa_load_require= . '<run-dir>/load.sh' && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
 qa_redact_script='<installed skill directory>/scripts/qa-redact.pl'
 qa_redact_names='<run-dir>/results/<dispatch>/redact-names'
 [ -f "$qa_redact_names" ] && [ -r "$qa_redact_names" ] && [ ! -L "$qa_redact_names" ] && [ -O "$qa_redact_names" ] || { printf 'qa-redact: names file unavailable\n'; exit 1; }
@@ -107,12 +107,14 @@ BODY=$(printf '%s\n' "$RESP" | sed '1,/^\r\{0,1\}$/d')
 
 ### Registration and login preconditions
 
-Use the scenario's grounded endpoint, payload and response fields. Registration emails are `qa+<Tag>-<user>@…` and use the run's `QA_NEW_PASSWORD`; existing users log in with `QA_<U>_EMAIL` / `QA_<U>_PASSWORD`. A registered user's `$QA_OWNER_EMAIL` / `$QA_OWNER_ID` are this tester's captured values from registration, never channel names. If used before registration ran, return `NEED_INFO kind=fixture` naming the user. A missing `jq` for required extraction is `NEED_INFO kind=tool`, not permission to guess a token.
+Use the scenario's grounded endpoint, payload and response fields. Registration emails are `qa+<Tag>-<user>@…` and use the run's `QA_NEW_PASSWORD`; existing users log in with `QA_<U>_EMAIL` / `QA_<U>_PASSWORD`. A registered user's `$QA_OWNER_EMAIL` is rebuilt from the dispatch `Tag:` with the same user name and domain as registration (`qa+$QA_TAG-owner@test.local` in the example); `$QA_OWNER_ID` is captured from the registration response. Neither is a channel name. Rebuild the email after sourcing load.sh in every later Bash call; never capture it with `capture.sh` or add it to `redact-names`, so email assertions remain observable. If used before registration ran, return `NEED_INFO kind=fixture` naming the user. A missing `jq` for required extraction is `NEED_INFO kind=tool`, not permission to guess a token.
+
+**Claude Code permissions:** `sh`, `sed`, `perl` and `tr` deliberately have no wildcard pre-approval. Accept the normal permission prompt for each required capture-helper call, sanitiser invocation, credential-header writer or read-only extraction pipeline; approve the shown command, never `Bash(sh:*)`, `Bash(sed:*)`, `Bash(perl:*)`, `Bash(tr:*)`, unrestricted Bash or a permission bypass. If permission is denied or unavailable, do not replay registration/login or print the raw response: an unavailable credential capture is `NEED_INFO kind=tool, Missing: capture.sh`; unavailable account recording is `NEED_INFO kind=fixture` naming the email, with `accounts[]` as the fallback.
 
 For these preconditions only, hold raw HTTP in `RESP=$(curl -si …)` without printing/persisting it. Extract credentials directly into `capture.sh` from this one response, record a successful registration immediately, then source captured.env again **before sanitising the same response**. Only sanitised evidence may be inspected or saved; a newly issued token echoed under `message` is then masked too. The example registers owner on a loopback/HTTPS origin already checked against Targets:
 
 ```bash
-. '<run-dir>/load.sh' QA_NEW_PASSWORD && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
+qa_load_require=QA_NEW_PASSWORD . '<run-dir>/load.sh' && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
 qa_redact_script='<installed skill directory>/scripts/qa-redact.pl'
 qa_redact_names='<run-dir>/results/<dispatch>/redact-names'
 [ -f "$qa_redact_names" ] && [ -r "$qa_redact_names" ] && [ ! -L "$qa_redact_names" ] && [ -O "$qa_redact_names" ] || { printf 'qa-redact: names file unavailable\n'; exit 1; }
@@ -131,7 +133,6 @@ if [[ "$qa_status" = 2?? ]]; then
   printf '%s' "$RESP" | sed '1,/^\r\{0,1\}$/d' | jq -r '.id' | sh '<run-dir>/capture.sh' <dispatch> QA_CAPTURED_OWNER_ID || qa_capture_failed=1
   qa_registered_id=$(printf '%s' "$RESP" | sed '1,/^\r\{0,1\}$/d' | jq -r '.id // empty')
   sh '<run-dir>/capture.sh' <dispatch> --account "$QA_REG_EMAIL" "$qa_registered_id" || { printf 'NEED_INFO kind=fixture: %s\n' "$QA_REG_EMAIL"; exit 1; }
-  printf '%s' "$QA_REG_EMAIL" | sh '<run-dir>/capture.sh' <dispatch> QA_CAPTURED_OWNER_EMAIL || qa_capture_failed=1
   [ "$qa_capture_failed" = 0 ] || { printf 'NEED_INFO kind=tool: capture.sh\n'; exit 1; }
 fi
 . '<run-dir>/results/<dispatch>/captured.env' || exit 1
@@ -142,10 +143,10 @@ BODY=$(printf '%s\n' "$RESP" | sed '1,/^\r\{0,1\}$/d')
 
 Replace the illustrative `/register`, success status, domain and extraction paths only with the actual route contract. If no id is returned, record with `sh '<run-dir>/capture.sh' <dispatch> --account "$QA_REG_EMAIL"` and no id. Record even when later credential extraction fails; never replay registration. For login, source the configured email/password and encode those fields on fd 3, capture the returned credentials the same way, but do not record an existing account.
 
-For a session response, use this exact cookie pipeline instead of the bearer-token line above:
+For a session response, use this exact cookie pipeline instead of the bearer-token line above. Strip the header's carriage return before capture, including when `Set-Cookie` has no attributes:
 
 ```bash
-printf '%s' "$RESP" | sed -n 's/^[Ss]et-[Cc]ookie: *\([^;]*\).*/\1/p' | head -n 1 | sh '<run-dir>/capture.sh' <dispatch> QA_CAPTURED_OWNER_COOKIE
+printf '%s' "$RESP" | sed -n 's/^[Ss]et-[Cc]ookie: *\([^;]*\).*/\1/p' | tr -d '\r' | head -n 1 | sh '<run-dir>/capture.sh' <dispatch> QA_CAPTURED_OWNER_COOKIE
 ```
 
 Then source captured.env before sanitising that response. A cookie is the full `name=value` pair. Later requests send `Authorization: Bearer $QA_CAPTURED_<USER>_TOKEN` or `Cookie: $QA_CAPTURED_<USER>_COOKIE`, with the same CR/LF rejection and curl-config escaping. Keep required multi-step cookie/CSRF flows in the scenario's preconditions; never invent credentials or bypass auth. A non-zero `capture.sh --account` result is `NEED_INFO kind=fixture` naming the email, with `accounts[]` as the secondary record path.
@@ -155,7 +156,7 @@ Then source captured.env before sanitising that response. A cookie is the full `
 Use HTTPie only for requests without credentials (including credentials in a payload or URL); it passes inline headers and fields on argv. For a credential-bearing scenario, use curl above. Without curl, return `NEED_INFO kind=tool, Missing: curl` rather than leaking credentials through HTTPie. Even credential-free calls source the channel so the sanitiser can mask all exposed values:
 
 ```bash
-. '<run-dir>/load.sh' && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
+qa_load_require= . '<run-dir>/load.sh' && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
 qa_redact_script='<installed skill directory>/scripts/qa-redact.pl'
 qa_redact_names='<run-dir>/results/<dispatch>/redact-names'
 [ -f "$qa_redact_names" ] && [ -r "$qa_redact_names" ] && [ ! -L "$qa_redact_names" ] && [ -O "$qa_redact_names" ] || { printf 'qa-redact: names file unavailable\n'; exit 1; }
@@ -191,12 +192,12 @@ printf '%s' "$BODY" | grep -q '"status": "active"' && printf 'PASS\n' || printf 
 
 ### PostgreSQL (psql)
 
-For a listed store of kind `sql` / engine `postgres`, source `. '<run-dir>/load.sh' --store <name> PGPASSWORD || exit 1`. It exports `PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGOPTIONS`; `PGOPTIONS=-c default_transaction_read_only=on` makes State Checks read-only. libpq reads them without expanding a DSN/password into `psql` argv, including a non-default `PGPORT`. Do not supply a connection URI, `-h`, `-U`, `-d`, or a password flag; do not use `DATABASE_URL` (a malformed URI can appear in libpq error output). Suppress raw client errors; never print connection errors containing credentials.
+For a listed store of kind `sql` / engine `postgres`, source `qa_load_store='<name>' qa_load_require=PGPASSWORD . '<run-dir>/load.sh' || exit 1`. It exports `PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGOPTIONS`; `PGOPTIONS=-c default_transaction_read_only=on` makes State Checks read-only. The loader refuses an unknown store or an empty exported endpoint; never continue with client defaults after failure. libpq reads them without expanding a DSN/password into `psql` argv, including a non-default `PGPORT`. Do not supply a connection URI, `-h`, `-U`, `-d`, or a password flag; do not use `DATABASE_URL` (a malformed URI can appear in libpq error output). Suppress raw client errors; never print connection errors containing credentials.
 
-Select only columns needed for the assertion; never run `SELECT *` from a plan. Return JSON even for counts so output passes through the installed sanitiser **before** inspection. Begin each State Check Bash call with `load.sh --store`, then captured.env, the script/names-file guard and `set -o pipefail` in that same invocation. A client/sanitiser failure skips only the check and does not block HTTP. Suppress client stderr. Withheld non-JSON or a masked asserted value → `SKIP — cannot confirm`, never fall back to raw output. Report only an assertion-relevant sanitised count/excerpt from `DB_RESULT`, never a full row.
+Select only columns needed for the assertion; never run `SELECT *` from a plan. Return JSON even for counts so output passes through the installed sanitiser **before** inspection. Begin each State Check Bash call with `qa_load_store='<name>' qa_load_require='<required names>' . '<run-dir>/load.sh'`, then captured.env, the script/names-file guard and `set -o pipefail` in that same invocation. A client/sanitiser failure skips only the check and does not block HTTP. Suppress client stderr. Withheld non-JSON or a masked asserted value → `SKIP — cannot confirm`, never fall back to raw output. Report only an assertion-relevant sanitised count/excerpt from `DB_RESULT`, never a full row.
 
 ```bash
-. '<run-dir>/load.sh' --store <name> PGPASSWORD && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
+qa_load_store='<name>' qa_load_require=PGPASSWORD . '<run-dir>/load.sh' && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
 qa_redact_script='<installed skill directory>/scripts/qa-redact.pl'
 qa_redact_names='<run-dir>/results/<dispatch>/redact-names'
 [ -f "$qa_redact_names" ] && [ -r "$qa_redact_names" ] && [ ! -L "$qa_redact_names" ] && [ -O "$qa_redact_names" ] || { printf 'qa-redact: names file unavailable\n'; exit 1; }
@@ -209,7 +210,7 @@ DB_RESULT=$(psql -tAc "SELECT json_build_object('count',COUNT(*)) FROM resources
 For a row-level assertion, project only the asserted columns as JSON; sensitive keys and declared env values are masked by `qa-redact`. Do not assert a value hidden by the sanitiser:
 
 ```bash
-. '<run-dir>/load.sh' --store <name> PGPASSWORD && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
+qa_load_store='<name>' qa_load_require=PGPASSWORD . '<run-dir>/load.sh' && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
 qa_redact_script='<installed skill directory>/scripts/qa-redact.pl'
 qa_redact_names='<run-dir>/results/<dispatch>/redact-names'
 [ -f "$qa_redact_names" ] && [ -r "$qa_redact_names" ] && [ ! -L "$qa_redact_names" ] && [ -O "$qa_redact_names" ] || { printf 'qa-redact: names file unavailable\n'; exit 1; }
@@ -226,7 +227,7 @@ Flags: `-t` (tuples only), `-A` (unaligned output), `-c` (SQL).
 For a listed `sql` / `sqlite` store, source `SQLITE_DB` through its named loader selection and use `-readonly`:
 
 ```bash
-. '<run-dir>/load.sh' --store <name> SQLITE_DB && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
+qa_load_store='<name>' qa_load_require=SQLITE_DB . '<run-dir>/load.sh' && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
 qa_redact_script='<installed skill directory>/scripts/qa-redact.pl'
 qa_redact_names='<run-dir>/results/<dispatch>/redact-names'
 [ -f "$qa_redact_names" ] && [ -r "$qa_redact_names" ] && [ ! -L "$qa_redact_names" ] && [ -O "$qa_redact_names" ] || { printf 'qa-redact: names file unavailable\n'; exit 1; }
@@ -243,7 +244,7 @@ For a row: `SELECT json_group_array(json_object('id',id,'status',status)) FROM r
 For a listed `sql` / `mysql` store, source its named loader selection. It exports `MYSQL_HOST MYSQL_TCP_PORT MYSQL_USER MYSQL_DATABASE MYSQL_PWD`. TCP and explicit `-P` preserve a non-default port even for `localhost`; `--init-command="SET SESSION TRANSACTION READ ONLY"` makes the session read-only, and the password is read from `MYSQL_PWD`, never a command-line argument:
 
 ```bash
-. '<run-dir>/load.sh' --store <name> MYSQL_PWD && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
+qa_load_store='<name>' qa_load_require=MYSQL_PWD . '<run-dir>/load.sh' && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
 qa_redact_script='<installed skill directory>/scripts/qa-redact.pl'
 qa_redact_names='<run-dir>/results/<dispatch>/redact-names'
 [ -f "$qa_redact_names" ] && [ -r "$qa_redact_names" ] && [ ! -L "$qa_redact_names" ] && [ -O "$qa_redact_names" ] || { printf 'qa-redact: names file unavailable\n'; exit 1; }
@@ -257,12 +258,12 @@ For a row: `SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT('id',id,'status',status)),
 
 ### Redis
 
-For a listed `redis` store, the loader exports `REDIS_HOST REDIS_PORT REDIS_DB` and `REDISCLI_AUTH` only when configured. Require `REDISCLI_AUTH` after `--store <name>` only for a password-protected store; otherwise supply no required password name. A missing redis-cli skips only the check. A redis-cli without `--json` returns `NEED_INFO kind=tool` naming that capability; never fall back to raw Redis output or install a client.
+For a listed `redis` store, the loader exports `REDIS_HOST REDIS_PORT REDIS_DB` and `REDISCLI_AUTH` only when configured. Set `qa_load_require=REDISCLI_AUTH` alongside `qa_load_store='<name>'` only for a password-protected store; otherwise use empty `qa_load_require`. A missing redis-cli skips only the check. A redis-cli without `--json` returns `NEED_INFO kind=tool` naming that capability; never fall back to raw Redis output or install a client.
 
 Only these commands are allowed: `GET MGET EXISTS TTL TYPE STRLEN HGET HLEN LLEN LRANGE SCARD SISMEMBER ZCARD ZSCORE XLEN SCAN`. Refuse all other Redis commands, regardless of `qa.mutations`; State Checks never write. Wrap scalar, array and null replies as a JSON object before sanitising:
 
 ```bash
-. '<run-dir>/load.sh' --store <name> && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
+qa_load_store='<name>' qa_load_require= . '<run-dir>/load.sh' && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
 qa_redact_script='<installed skill directory>/scripts/qa-redact.pl'
 qa_redact_names='<run-dir>/results/<dispatch>/redact-names'
 [ -f "$qa_redact_names" ] && [ -r "$qa_redact_names" ] && [ ! -L "$qa_redact_names" ] && [ -O "$qa_redact_names" ] || { printf 'qa-redact: names file unavailable\n'; exit 1; }
@@ -276,14 +277,14 @@ Substitute only the check's allowlisted command and arguments. Use `REDISCLI_AUT
 
 ### Connection reference
 
-Connect only to a store in the dispatch's `Stores:` through `load.sh --store <name>`: postgres aliases (including `PGOPTIONS`), mysql aliases, `SQLITE_DB`, or Redis aliases. No inherited/default connection, `DATABASE_URL`, alternate SQLite name or MCP server is supported. A missing client skips only its State Check while HTTP runs. Never put literal connection values or a password/DSN on argv. Recommend a read-only database role in addition to client enforcement.
+Connect only to a store in the dispatch's `Stores:` through `qa_load_store='<name>' . '<run-dir>/load.sh'`: postgres aliases (including `PGOPTIONS`), mysql aliases, `SQLITE_DB`, or Redis aliases. No inherited/default connection, `DATABASE_URL`, alternate SQLite name or MCP server is supported. A missing client skips only its State Check while HTTP runs. Never put literal connection values or a password/DSN on argv. Recommend a read-only database role in addition to client enforcement.
 
 ---
 
 ## Credential Safety Rules
 
 - Never print an exposed value, header, cookie, token or DSN into output, reports or dumps. The loader reports only names on failure; no environment-value preflight is needed.
-- Credentials and configured values come from the run channel: existing users' `QA_<U>_EMAIL`, `_PASSWORD`, optional `_ID`, configured `QA_<VALUE>`, `QA_NEW_PASSWORD` and namespaced store client variables. The dispatch supplies `Tag:`; registration/login preconditions produce tester-owned `QA_CAPTURED_<USER>_*` in captured.env. Never expand an unsupported name or read another source; an unknown name is `SKIP — cannot-confirm: name not exposed by the engine`, not a runtime credential request. Registered `$QA_<U>_EMAIL|ID` mean values captured during this tester's registration, not channel fields; before registration they are `NEED_INFO kind=fixture` naming the user. Never use inherited env vars or read `.env`, `.env.*`, `docker-compose*.yml`, framework config or engine-private files for values. Never invent or mint a token outside the scenario's registration/login preconditions. Never put credential-bearing URLs, headers, payloads or store passwords/DSNs on argv; use curl config-on-stdin, JSON on a read-only file descriptor and client environment names.
+- Credentials and configured values come from the run channel: the fields of existing users that plan tokens reference among `QA_<U>_EMAIL`, `_PASSWORD` and `_ID`, configured `QA_<VALUE>`, `QA_NEW_PASSWORD` and namespaced store client variables. The dispatch supplies `Tag:`; registration/login preconditions produce tester-owned `QA_CAPTURED_<USER>_*` in captured.env. Never expand an unsupported name or read another source; an unknown name is `SKIP — cannot-confirm: name not exposed by the engine`, not a runtime credential request. Registered `$QA_<U>_EMAIL` is rebuilt from the dispatch tag and the registration's user name/domain, while `$QA_<U>_ID` is captured from its response, not a channel field; before registration they are `NEED_INFO kind=fixture` naming the user. Never use inherited env vars or read `.env`, `.env.*`, `docker-compose*.yml`, framework config or engine-private files for values. Never invent or mint a token outside the scenario's registration/login preconditions. Never put credential-bearing URLs, headers, payloads or store passwords/DSNs on argv; use curl config-on-stdin, JSON on a read-only file descriptor and client environment names.
 - Resolve paths against the scenario's `**Target:**` or the section default in `Targets:`. Before sending any absolute URL, compare its origin (scheme, lowercased host, explicit or default port) exactly with a listed origin. Different schemes or ports are different origins; userinfo is always refused. Refusal is `SKIP — off-target URL refused: <origin>` with no userinfo/query/fragment. Never follow redirects automatically (`curl -L`, `http --follow`); explicitly request a scenario-specified `Location` only after this same origin check. Before any credential-bearing request, also require loopback or HTTPS; non-loopback HTTP is `SKIP — cleartext origin refused: <origin>`, even if configured.
 - The engine owns `<run-dir>/redact-names`; use the per-dispatch `<run-dir>/results/<dispatch>/redact-names` copy for evidence, so captures are masked from their first response onward. It lists exposed user/value and namespaced/native store names, excluding PGOPTIONS; port/db-number names are accepted but not masked. Never rewrite these files yourself; `capture.sh` appends captured names. Source both loader and captured.env even for a credential-free request, so all known values are available for masking. An empty needed channel name sends nothing: `NEED_INFO kind=credentials, Missing: <names>` (normally prevented before dispatch). An unreadable/unsafe channel is `NEED_INFO kind=tool`, naming the channel file, not a request to export values or restart the harness.
 - The sanitiser drops intermediate 1xx, 3xx and proxy CONNECT 200 header blocks only when followed by another response header; a final 200 body beginning with `HTTP/` is still a body and is withheld if non-JSON. It classifies final header names and JSON keys at any depth by splitting on `_`, `-`, other non-alphanumerics and camelCase humps (`APIKey` → `api`, `key`), and dropping plural `s` from each part. Sensitive parts are `token`, `secret`, `password`, `passwd`, `pwd`, `passphrase`, `key`, `session`, `cookie`, `auth`, `authorization`, `credential`, `private`, `dsn`, `url`, `uri`, `jwt`, `bearer`, `otp`, `pin`, `sig`, `signature`; joined parts also match `token`, `secret`, `passw`, `apikey`, `accesskey`, `privatekey`, `sessionid`, `sessid`, `csrf`, `xsrf`, `credential`, `connectionstring`, `recoverycode`, `verificationcode`, `backupcode`. Sensitive values become `***` (`client_secret`, `apiKeys`, `IDToken`, `csrftoken`, `mongoUri`, `recovery_codes`, `Set-Cookie`, `access-token`; not `author`, `authorId`, `code` or `Access-Control-*`).
@@ -292,10 +293,10 @@ Connect only to a store in the dispatch's `Stores:` through `load.sh --store <na
 
 The sanitiser is shipped as `scripts/qa-redact.pl` **next to this skill's `SKILL.md`**. Do not re-type it, copy it into a temporary directory, or execute a similarly named project file. In OMP resolve its installed absolute path with `realpath skill://qa:be-testing/scripts/qa-redact.pl` (the Bash tool resolves `skill://` paths); do not guess a path under `~/.omp`. In Claude Code use the loaded skill's base directory, or `${CLAUDE_PLUGIN_ROOT}/skills/be-testing` if available. Set lower-case `qa_redact_script` to that absolute path after loading, not the skill URI. Resolution/guard failure → no request and `NEED_INFO kind=tool, Missing: qa-redact.pl`.
 
-Before **every** HTTP call or State Check, start the same Bash invocation with the loader and then captured.env, and repeat this guard. Substitute the dispatch's run directory and dispatch names-file path, and the resolved installed skill directory; none comes from a plan-supplied script path. Use required configured names after `load.sh` for an HTTP request, no names for a credential-free request, or `--store <name>` and required native client names for a State Check. Check needed captured credentials after sourcing captured.env. Assign and validate lower-case bookkeeping paths **after** loading so an exposed `QA_` name cannot overwrite them:
+Before **every** HTTP call or State Check, start the same Bash invocation with the loader and then captured.env, and repeat this guard. Substitute the dispatch's run directory and dispatch names-file path, and the resolved installed skill directory; none comes from a plan-supplied script path. Set `qa_load_require` to a quoted space-separated list of required configured names for an HTTP request, or empty for a credential-free request. For a State Check also set `qa_load_store` to the store name and use required native client names in `qa_load_require`. These are assignments before `. '<run-dir>/load.sh'`, never dot-script arguments. Check needed captured credentials after sourcing captured.env. Assign and validate lower-case bookkeeping paths **after** loading so an exposed `QA_` name cannot overwrite them:
 
 ```bash
-. '<run-dir>/load.sh' && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
+qa_load_require='<required configured names, or empty>' . '<run-dir>/load.sh' && . '<run-dir>/results/<dispatch>/captured.env' || exit 1
 qa_redact_script='<installed skill directory>/scripts/qa-redact.pl'
 qa_redact_names='<run-dir>/results/<dispatch>/redact-names'
 [ -f "$qa_redact_names" ] && [ -r "$qa_redact_names" ] && [ ! -L "$qa_redact_names" ] && [ -O "$qa_redact_names" ] || { printf 'qa-redact: names file unavailable\n'; exit 1; }

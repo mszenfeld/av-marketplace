@@ -277,14 +277,14 @@ class SqlRecipe(Recipe):
         name = str(self.data["store"])
         prefix = f"STORE_{name.upper()}_"
         environ = {key: value for key, value in os.environ.items()
-                   if not key.startswith(("PG", "MYSQL_", "SQLITE_DB", "REDIS", "STORE_", "QA_"))}
+                   if key != "PSQLRC" and not key.startswith(("PG", "MYSQL_", "SQLITE_DB", "REDIS", "STORE_", "QA_"))}
         environ.update({key.removeprefix(prefix): value for key, value in store_values(runtime, runtime.config, [name]).items()
                         if key != prefix + "PGOPTIONS"})
         environ.update({"QA_SQL": query, **{f"QA_{field.upper()}": str(identity.get(field) or "") for field in ("email", "id", "tag")}})
         engine = cast(Mapping[str, object], runtime.config.stores[name])["engine"]
         commands = {
-            "postgres": 'psql -v ON_ERROR_STOP=1 -tAc "$QA_SQL"',
-            "mysql": 'mysql --protocol=TCP -h "$MYSQL_HOST" -P "$MYSQL_TCP_PORT" -u "$MYSQL_USER" "$MYSQL_DATABASE" -e "$QA_SQL"',
+            "postgres": 'psql -X -v ON_ERROR_STOP=1 -tAc "$QA_SQL"',
+            "mysql": 'mysql --no-defaults --no-login-paths --protocol=TCP -h "$MYSQL_HOST" -P "$MYSQL_TCP_PORT" -u "$MYSQL_USER" "$MYSQL_DATABASE" -e "$QA_SQL"',
             "sqlite": 'sqlite3 "$SQLITE_DB" "$QA_SQL"',
         }
         code, stdout, stderr = runtime.shell(commands[str(engine)], environ, self.name, timeout=60)
@@ -295,19 +295,17 @@ class SqlRecipe(Recipe):
 RECIPE_TYPES: dict[str, type[Recipe]] = {"sql": SqlRecipe, "http": HttpRecipe, "command": CommandRecipe}
 
 
-def build_recipe(data: Mapping[str, object], name: str, config: Config | None = None) -> Recipe | None:
-    """Validate and compile config, or compile an already-validated run snapshot."""
+def build_recipe(data: Mapping[str, object], name: str, config: Config) -> Recipe | None:
+    """Validate and compile a cleanup recipe from configuration."""
     kind = data.get("kind")
     recipe_type = RECIPE_TYPES.get(kind) if isinstance(kind, str) else None
     if recipe_type is None:
-        if config is not None:
-            config.shared.error(f"qa.{name}.kind", "expected sql, http or command")
+        config.shared.error(f"qa.{name}.kind", "expected sql, http or command")
         return None
-    if config is not None:
-        previous_errors = len(config.errors)
-        recipe_type.validate(data, name, config)
-        if len(config.errors) != previous_errors:
-            return None
+    previous_errors = len(config.errors)
+    recipe_type.validate(data, name, config)
+    if len(config.errors) != previous_errors:
+        return None
     return recipe_type(data, name)
 
 

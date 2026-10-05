@@ -203,16 +203,57 @@ class ConfigTests(unittest.TestCase):
         self.assertIn({"file": ".av/config.toml", "key": "env.database", "warning": "unknown environment sub-table"}, report["warnings"])
 
     def test_stores_report_and_source_masking(self) -> None:
-        self.put(BASE + '[env.stores.main]\nkind="sql"\nengine="postgres"\nhost="localhost"\nuser="u"\nname="db"\npassword="literal:private-store-secret"\n[env.stores.cache]\nkind="redis"\nhost="db.example.com"\n')
+        self.put(BASE + '[env.stores.main]\nkind="sql"\nengine="postgres"\nhost="localhost"\nuser="u"\nname="db"\npassword="literal:private-store-secret"\n[env.stores.cache]\nkind="redis"\nhost="localhost"\n')
         report = self.config().report()
         self.assertEqual(report["stores"], {"main": {"kind": "sql", "engine": "postgres"}, "cache": {"kind": "redis"}})
         self.assertNotIn("database", report)
         self.assertEqual(report["trust_subset"]["env.stores.main.password"], "literal:***")
         self.assertNotIn("env.stores.main.host", report["trust_subset"])
-        self.assertEqual(report["trust_subset"]["env.stores.cache.host"], "db.example.com")
         preview = self.config().preview({"config_text": (self.repo / ".av/config.toml").read_text().replace("private-store-secret", "changed-store-secret"),
                                          "gitignore_add": [], "allowed_keys": ["env.stores.main.password"]})
         self.assertNotIn("changed-store-secret", json.dumps(preview))
+
+    def test_network_stores_require_exact_loopback_hosts(self) -> None:
+        stores = (
+            'kind="sql"\nengine="postgres"\nuser="u"\nname="db"\npassword="env:AV_DB"\n',
+            'kind="sql"\nengine="mysql"\nuser="u"\nname="db"\npassword="env:AV_DB"\n',
+            'kind="redis"\npassword="env:AV_DB"\n',
+        )
+        hosts = (
+            ("localhost", "ok"),
+            ("127.0.0.1", "ok"),
+            ("::1", "ok"),
+            ("[::1]", "ok"),
+            ("app.LOCALHOST", "ok"),
+            ("db.example.com", "invalid"),
+            ("192.168.1.10", "invalid"),
+            ("127.0.0.2", "invalid"),
+            ("0.0.0.0", "invalid"),
+            ("localhost.example.com", "invalid"),
+            ("2001:db8::1", "invalid"),
+        )
+        for store in stores:
+            for host, state in hosts:
+                with self.subTest(store=store, host=host):
+                    self.put(BASE + '[env.stores.main]\n' + store + f'host={json.dumps(host)}\n')
+                    report = self.config().report()
+                    self.assertEqual(report["state"], state, report["errors"])
+                    if state == "invalid":
+                        self.assertTrue(any(error["key"] == "env.stores.main.host" for error in report["errors"]), report["errors"])
+
+    def test_store_transport_cannot_be_overridden_by_local_config_or_trust(self) -> None:
+        self.put(BASE + '[env.stores.main]\nkind="sql"\nengine="postgres"\nhost="localhost"\nuser="u"\nname="db"\npassword="env:AV_DB"\n')
+        secure = self.config()
+        secure.accept(secure.trust_hash)
+        self.put('[env.stores.main]\nhost="db.example.com"\n', ".av/local.toml")
+        cfg = self.config()
+        self.assertEqual(cfg.state, "invalid")
+        self.assertTrue(any(error["file"] == ".av/local.toml" and error["key"] == "env.stores.main.host" for error in cfg.errors), cfg.errors)
+        with self.assertRaises(ConfigError):
+            cfg.accept(cfg.trust_hash)
+        result = self.cli("config")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["state"], "invalid")
 
     def test_sql_cleanup_pins_its_store_destination(self) -> None:
         for store, key, old, new in (
@@ -864,7 +905,7 @@ class ConfigTests(unittest.TestCase):
                 self.assertNotIn("sensitive", result.stdout + result.stderr)
 
     def test_sensitive_env_sources_and_qa_gates_are_pinned(self) -> None:
-        cases = ('[env.browser]\nsource="cmd:printf value"\n', '[env.browser]\nsources=["env:AV_BROWSER"]\n', '[env.targets]\nremote="https://example.com"\n', '[env.stores.main]\nkind="sql"\nengine="postgres"\nhost="db.example.com"\nuser="user"\nname="db"\npassword="env:AV_DB"\n', 'fix="off"\n', 'mutations="deny"\n', 'start_services="auto"\n')
+        cases = ('[env.browser]\nsource="cmd:printf value"\n', '[env.browser]\nsources=["env:AV_BROWSER"]\n', '[env.targets]\nremote="https://example.com"\n', '[env.stores.main]\nkind="sql"\nengine="postgres"\nhost="localhost"\nuser="user"\nname="db"\npassword="env:AV_DB"\n', 'fix="off"\n', 'mutations="deny"\n', 'start_services="auto"\n')
         for section in cases:
             with self.subTest(section=section):
                 self.put(('version=1\n[qa]\n' if section.startswith("[env.targets]") else BASE) + section)

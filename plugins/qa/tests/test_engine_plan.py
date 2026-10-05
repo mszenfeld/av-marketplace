@@ -294,9 +294,27 @@ password = "literal:postgres"
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["plan_errors"], [{"scenario": "BE-01", "reason": reason}])
 
-    def test_registered_name_clashing_with_a_configured_user_is_a_plan_error(self) -> None:
-        result = self.check("## Users\n- admin: registered — admin\n## BE Test Scenarios\n" + SCENARIO, USERS)
-        self.assertEqual(result["plan_errors"], [{"scenario": "BE-01", "reason": "user admin is configured; declare it existing"}])
+    def test_unreferenced_registered_user_clash_is_plan_level_even_without_scenarios(self) -> None:
+        for scenario_count in (0, 3):
+            with self.subTest(scenario_count=scenario_count):
+                scenarios = "".join(SCENARIO.replace("BE-01", f"BE-{index:02}") for index in range(1, scenario_count + 1))
+                body = "## Users\n- admin: registered — admin\n## BE Test Scenarios\n" + scenarios
+                result = self.check(body, USERS)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["registrations"], ["admin"])
+                self.assertEqual(len(result["plan_errors"]), 1)
+                self.assertEqual(result["plan_errors"][0]["scenario"], "plan")
+
+    def test_referenced_registered_user_clash_does_not_hide_scenario_errors(self) -> None:
+        body = (
+            "## Users\n- admin: registered — admin\n## BE Test Scenarios\n"
+            + SCENARIO + "- **Preconditions:** $QA_ADMIN_EMAIL $QA_ADMIN_PASSWORD\n"
+            + SCENARIO.replace("BE-01", "BE-02") + "- **Preconditions:** $QA_ADMIN_ID\n"
+            + SCENARIO.replace("BE-01", "BE-03") + "- **Preconditions:** $QA_GHOST_EMAIL\n"
+        )
+        result = self.check(body, USERS)
+        self.assertFalse(result["ok"])
+        self.assertEqual([error["scenario"] for error in result["plan_errors"]], ["plan", "BE-03"])
 
     def test_longest_user_prefix_wins(self) -> None:
         config = USERS.replace("admin", "user").replace("viewer", "user_ops")

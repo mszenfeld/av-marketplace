@@ -22,7 +22,6 @@ RESERVED_USER_PREFIX = "captured_"
 RESERVED_VALUE_NAMES = frozenset({"TAG", "NEW_PASSWORD"})
 RESERVED_VALUE_PREFIX = "CAPTURED_"
 CREDENTIAL_SUFFIX = re.compile(r".+_(TOKEN|COOKIE|COOKIE_[A-Z0-9_]+)\Z")
-USER_FIELDS = ("EMAIL", "PASSWORD", "ID")
 VALUE_SOURCE_KEYS = re.compile(
     r"(?:env\.(?:secrets|values)\.[A-Za-z_][A-Za-z0-9_]*|env\.stores\.[A-Za-z_][A-Za-z0-9_]*\.password|"
     r"qa\.users\.[a-z][a-z0-9_]*\.(?:email|password|id))"
@@ -131,10 +130,6 @@ class Config:
 
     def user_fields(self, user: str) -> set[str]:
         return {"EMAIL", "PASSWORD"} | ({"ID"} if "id" in mapping(self.users[user]) else set())
-
-    def store_kind(self, name: str) -> str:
-        store = mapping(self.stores[name])
-        return f"sql/{store['engine']}" if store["kind"] == "sql" else "redis"
 
     def _validate_names(self) -> None:
         exposed: set[str] = set()

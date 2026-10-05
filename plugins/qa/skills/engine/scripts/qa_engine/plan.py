@@ -315,11 +315,12 @@ def _token_requirements(plan: Plan, config: Config) -> tuple[set[str], set[str],
     values: set[str] = set()
     user_gaps: dict[str, dict[str, str]] = {}
     missing_values: set[str] = set()
-    errors: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = [
+        {"scenario": "plan", "reason": f"user {user} is configured; declare it existing"}
+        for user in sorted(registrations & config.users.keys())
+    ]
     for scenario in plan.scenarios:
         reasons: set[str] = set()
-        for user in registrations & config.users.keys():
-            reasons.add(f"user {user} is configured; declare it existing")
         for token in scenario.tokens:
             name = token.removeprefix("QA_")
             if name in ENGINE_TOKENS:

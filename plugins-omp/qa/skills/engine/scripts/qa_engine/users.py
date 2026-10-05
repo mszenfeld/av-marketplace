@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from collections.abc import Mapping
+from contextlib import ExitStack
 from contextlib import contextmanager
 import fcntl
+import logging
 from pathlib import Path
 import re
 import secrets
@@ -23,6 +25,7 @@ from qa_engine.config import mapping
 from qa_engine.plan import check_plan
 from qa_engine.plan import run_plan
 from qa_engine.plan import user_token
+from qa_engine.secrets import private_values
 from qa_engine.services import Runtime
 from qa_engine.services import require_trust
 from qa_engine.stores import store_values
@@ -33,6 +36,7 @@ if TYPE_CHECKING:
 JSON = dict[str, Any]
 EMAIL_SAFE = re.compile(r"[A-Za-z0-9._+-]{1,64}@[A-Za-z0-9.-]{1,253}\Z")
 ID_SAFE = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
+TAG_SAFE = re.compile(r"[0-9a-f]{8}\Z")
 CLEANUP_ATTEMPTS = 3
 
 
@@ -62,27 +66,30 @@ def ledger(run: Run, config: Config) -> Iterator[Ledger]:
         yield Ledger(run, config)
 
 
-def write_channel(directory: Path, values: Mapping[str, str], *, initial: bool = False) -> None:
-    """Atomically write only the credentials and values referenced by the plan."""
+def write_channel(run: Run, values: Mapping[str, str]) -> None:
+    """Atomically write the private channel and its loader and capture helpers."""
+    directory = run.directory
     lines: list[str] = []
     for name, value in sorted(values.items()):
         escaped = value.replace("'", "'\\''")
         lines.append(f"export {name}='{escaped}'\n")
     atomic_write(directory / "secrets.env", "".join(lines).encode(), 0o600)
     write_json(directory / "secrets.json", dict(values), 0o600)
-    if initial:
-        names = {name for name in values if not (name.startswith("STORE_") and name.endswith("_PGOPTIONS"))}
-        clients = {client for clients in STORE_NAMES.values() for client in clients if client != "PGOPTIONS"}
-        names.update(client for name in names.copy() if name.startswith("STORE_") for client in clients if name.endswith("_" + client))
-        atomic_write(directory / "redact-names", ("".join(f"{name}\n" for name in sorted(names))).encode(), 0o600)
-        atomic_write(directory / "load.sh", loader_script(directory).encode(), 0o600)
-        record = read_object(directory / "run.json")
-        atomic_write(directory / "capture.sh", capture_script(directory, str(record["run_id"]), Path(str(record["repo"]))).encode(), 0o600)
+    names = {name for name in values if not (name.startswith("STORE_") and name.endswith("_PGOPTIONS"))}
+    clients = {client for clients in STORE_NAMES.values() for client in clients if client != "PGOPTIONS"}
+    names.update(client for name in names.copy() if name.startswith("STORE_") for client in clients if name.endswith("_" + client))
+    atomic_write(directory / "redact-names", ("".join(f"{name}\n" for name in sorted(names))).encode(), 0o600)
+    atomic_write(directory / "load.sh", loader_script(directory).encode(), 0o600)
+    atomic_write(directory / "capture.sh", capture_script(directory, run.run_id, run.repo).encode(), 0o600)
 
 
 def loader_script(directory: Path) -> str:
     path = shlex.quote(str(directory / "secrets.env"))
-    return f'''# Private run channel. Source with the names this request needs.
+    clients = " ".join(sorted({client for names in STORE_NAMES.values() for client in names}))
+    return f'''# Private run channel. Set qa_load_store and qa_load_require before sourcing; no dot-script arguments.
+qa_channel_store=${{qa_load_store:-}}
+qa_channel_required=${{qa_load_require:-}}
+unset qa_load_store qa_load_require
 for qa_channel_name in $(set | cut -d= -f1); do
     case "$qa_channel_name" in
         *[!A-Za-z0-9_]*) continue ;;
@@ -100,28 +107,28 @@ set -a
 qa_channel_status=$?
 [ "$qa_channel_allexport" = yes ] || set +a
 [ "$qa_channel_status" = 0 ] || return 1
-if [ "${{1:-}}" = --store ]; then
-    [ "$#" -ge 2 ] || {{ printf '%s\\n' 'store name required' >&2; return 1; }}
-    case "$2" in ''|*[!A-Za-z0-9_]*) printf '%s\\n' 'invalid store name' >&2; return 1 ;; esac
-    qa_channel_store=$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')
-    shift 2
+if [ -n "$qa_channel_store" ]; then
+    case "$qa_channel_store" in *[!A-Za-z0-9_]*) printf '%s\\n' 'invalid store name' >&2; return 1 ;; esac
+    qa_channel_store=$(printf '%s' "$qa_channel_store" | tr '[:lower:]' '[:upper:]')
     qa_channel_found=no
-    for qa_channel_name in $(set | cut -d= -f1); do
-        case "$qa_channel_name" in
-            STORE_"$qa_channel_store"_*)
-                qa_channel_native=${{qa_channel_name#STORE_${{qa_channel_store}}_}}
-                eval 'qa_channel_value=${{'"$qa_channel_name"'-}}'
-                export "$qa_channel_native=$qa_channel_value"
-                qa_channel_found=yes
-                ;;
-        esac
+    for qa_channel_client in {clients}; do
+        eval 'qa_channel_set=${{STORE_'"$qa_channel_store"'_'"$qa_channel_client"'+x}}'
+        [ -n "$qa_channel_set" ] || continue
+        eval 'qa_channel_value=${{STORE_'"$qa_channel_store"'_'"$qa_channel_client"'-}}'
+        export "$qa_channel_client=$qa_channel_value"
+        qa_channel_found=yes
     done
     if [ "$qa_channel_found" = no ]; then
         printf '%s: unknown store\\n' "$qa_channel_store" >&2
         return 1
     fi
+    if [ -z "${{PGHOST:-}}${{MYSQL_HOST:-}}${{SQLITE_DB:-}}${{REDIS_HOST:-}}" ]; then
+        printf '%s: store not exported\\n' "$qa_channel_store" >&2
+        return 1
+    fi
 fi
-for qa_channel_name in "$@"; do
+case "$qa_channel_required" in *[!A-Z0-9_[:space:]]*) printf '%s\\n' 'invalid required channel name' >&2; return 1 ;; esac
+for qa_channel_name in $qa_channel_required; do
     case "$qa_channel_name" in
         ''|*[!A-Z0-9_]*) printf '%s\\n' 'invalid required channel name' >&2; return 1 ;;
     esac
@@ -132,7 +139,7 @@ for qa_channel_name in "$@"; do
         return 1
     fi
 done
-unset qa_channel_name qa_channel_file qa_channel_allexport qa_channel_status qa_channel_value qa_channel_store qa_channel_native qa_channel_found
+unset qa_channel_name qa_channel_file qa_channel_allexport qa_channel_status qa_channel_value qa_channel_store qa_channel_required qa_channel_client qa_channel_set qa_channel_found
 '''
 
 
@@ -200,8 +207,8 @@ def provision(run: Run, config: Config) -> JSON:
         values["QA_NEW_PASSWORD"] = str(previous["QA_NEW_PASSWORD"]) if "QA_NEW_PASSWORD" in previous else secrets.token_urlsafe(18) + "Aa1!"
         checks = cast(dict[str, list[str]], checked["state_checks"])
         values.update(store_values(runtime, config, {name for names in checks.values() for name in names}))
-        runtime.secrets.remember(values)
-        write_channel(run.directory, values, initial=True)
+        runtime.secrets.remember(private_values(values))
+        write_channel(run, values)
     return {"users": users, "exposed": sorted(values),
             "secrets_env": str(run.directory / "secrets.env"), "secrets_json": str(run.directory / "secrets.json"),
             "redact_names": str(run.directory / "redact-names"), "loader": str(run.directory / "load.sh")}
@@ -258,6 +265,29 @@ def record_account_cli(run: Run, config: Config, dispatch: str, email: str, acco
     return {"recorded": True}
 
 
+def _cleanup_record_reason(record: JSON) -> str | None:
+    """Refuse incomplete provenance or unsafe persisted identities before rendering."""
+    if "tag" not in record or "destination" not in record:
+        return "legacy record lacks tag or destination; manual cleanup required"
+    email = record.get("email")
+    if not isinstance(email, str) or not EMAIL_SAFE.fullmatch(email):
+        return "invalid email"
+    account_id = record.get("id")
+    if account_id is not None and (not isinstance(account_id, str) or not ID_SAFE.fullmatch(account_id)):
+        return "invalid id"
+    tag = record["tag"]
+    if not isinstance(tag, str) or not TAG_SAFE.fullmatch(tag):
+        return "invalid tag"
+    if tag not in email.partition("@")[0].lower():
+        return "email not tagged for this dispatch"
+    if record["destination"] is not None and not isinstance(record["destination"], str):
+        return "invalid destination"
+    attempts = record.get("attempts")
+    if type(attempts) is not int or attempts < 0:
+        return "invalid attempts"
+    return None
+
+
 def teardown(run: Run, config: Config) -> JSON:
     deleted: set[str] = set()
     left: set[str] = set()
@@ -265,11 +295,19 @@ def teardown(run: Run, config: Config) -> JSON:
     recipe = config.cleanup_recipe if not config.errors else None
     destination = recipe.destination(config) if recipe is not None else None
     usable = not config.errors and config.trust in {"trusted", "not-required"} and recipe is not None and destination in [*run.record["origins"], None]
-    with ledger(run, config) as records:
-        for record in records.records:
+    with ledger(run, config) as records, ExitStack() as stack:
+        runtime: Runtime | None = None
+        for index, record in enumerate(records.records, 1):
             if record.get("deleted") or record.get("status") == "manual-cleanup":
                 continue
-            email = str(record["email"])
+            email = record.get("email")
+            reason = _cleanup_record_reason(record)
+            if reason is not None:
+                if isinstance(email, str) and email:
+                    left.add(email)
+                logging.getLogger(__name__).warning("qa-accounts.json: record %d left: %s", index, reason)
+                continue
+            assert isinstance(email, str)
             if not usable or (record.get("destination") is not None and record["destination"] != destination):
                 left.add(email)
                 continue
@@ -279,20 +317,23 @@ def teardown(run: Run, config: Config) -> JSON:
             succeeded = False
             if not recipe.needs_id or record.get("id"):
                 try:
-                    with Runtime(run, config) as runtime:
-                        runtime.secrets.remember(identity)
-                        succeeded = recipe.succeeded(recipe.execute(runtime, identity, config.targets))
-                except ConfigError:
+                    if runtime is None:
+                        runtime = stack.enter_context(Runtime(run, config))
+                    runtime.secrets.remember(identity)
+                    succeeded = recipe.succeeded(recipe.execute(runtime, identity, config.targets))
+                except (ConfigError, OSError) as error:
+                    logging.getLogger(__name__).warning("qa-accounts.json: record %d cleanup failed (%s)",
+                                                        index, type(error).__name__)
                     succeeded = False
             if succeeded:
                 record.update(deleted=True, status="deleted")
                 deleted.add(email)
             else:
-                record["attempts"] = int(record.get("attempts", 0)) + 1
+                record["attempts"] += 1
                 if record["attempts"] >= CLEANUP_ATTEMPTS:
                     record["status"] = "manual-cleanup"
                     manual.add(email)
                 else:
                     left.add(email)
-        records.save()
+            records.save()
     return {"deleted": sorted(deleted), "left": sorted(left), "manual": sorted(manual)}

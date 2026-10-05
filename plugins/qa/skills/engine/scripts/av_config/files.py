@@ -271,10 +271,12 @@ class Configuration:
             else:
                 self.error(f"{prefix}.kind", "expected sql or redis")
                 continue
+            host = entry.get("host")
+            if isinstance(host, str) and host and not is_loopback(host):
+                self.error(f"{prefix}.host", "non-loopback stores require TLS")
             if "port" in entry and (type(entry["port"]) is not int or not 1 <= cast(int, entry["port"]) <= 65535):
                 self.error(f"{prefix}.port", "expected a port between 1 and 65535")
             if "password" in entry and not (kind == "sql" and entry.get("engine") == "sqlite"):
-                host = entry.get("host")
                 self.source(entry["password"], f"{prefix}.password", secret=True, literal_allowed=isinstance(host, str) and is_loopback(host))
 
     def state(self, plugin: str) -> str:
@@ -301,11 +303,6 @@ class Configuration:
                         continue
                     if not is_loopback(host):
                         subset[f"env.targets.{name}"] = origin
-        stores = env.get("stores", {})
-        if isinstance(stores, dict):
-            for name, store in stores.items():
-                if isinstance(store, dict) and isinstance(store.get("host"), str) and not is_loopback(store["host"]):
-                    subset[f"env.stores.{name}.host"] = store["host"]
         return subset
 
 

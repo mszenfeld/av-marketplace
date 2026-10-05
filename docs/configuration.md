@@ -61,6 +61,8 @@ Loopback means exactly `localhost`, `127.0.0.1`, `::1` or a host ending in `.loc
 
 Targets used by HTTP cleanup recipes or health probes require HTTPS off loopback, even with a local override or trust approval. A scenario using user fields, `$QA_TAG` or `$QA_NEW_PASSWORD` must use loopback or HTTPS for every origin it touches; `plan check` reports `credentials over cleartext origin <origin>` otherwise. At runtime testers refuse any credential-bearing request or form submission on non-loopback HTTP with `SKIP — cleartext origin refused: <origin>`.
 
+Postgres/MySQL and Redis stores require exact-loopback hosts. The store schema has no TLS settings, so non-loopback store hosts are rejected with `non-loopback stores require TLS`, even with a local override or trust approval.
+
 ## Services
 
 `[env.services]` is optional. Commands run through `/bin/sh -c` in the repository root with the engine's inherited environment.
@@ -103,11 +105,13 @@ In the committed `.av/config.toml`:
 
 `[env.stores.<name>]` declares a named SQL or Redis endpoint for State Checks. Names match `[A-Za-z_][A-Za-z0-9_]*` and must be unique case-insensitively. Configuration validation does not test connectivity.
 
+Network stores are loopback-only because the engine does not configure verified TLS for store clients. A remote/LAN endpoint is a configuration error, not a trust question. Ground a local endpoint in repository evidence; do not relabel a remote host as loopback. Inherited TLS settings such as `PGSSLMODE` or `PGSSLROOTCERT` are not a workaround: the loader and SQL cleanup discard inherited client settings.
+
 | Key | SQL | Redis |
 |---|---|---|
 | `kind` | Required: `"sql"` | Required: `"redis"` |
 | `engine` | Required: `"postgres"`, `"mysql"` or `"sqlite"` | Not supported |
-| `host` | Required non-empty string for Postgres/MySQL; not supported for SQLite | Required non-empty string |
+| `host` | Required exact-loopback host for Postgres/MySQL; not supported for SQLite | Required exact-loopback host |
 | `port` | Optional integer `1`–`65535`; defaults to `5432` / `3306`; not supported for SQLite | Optional integer `1`–`65535`; defaults to `6379` |
 | `user`, `name` | Required non-empty connection username/database strings for Postgres/MySQL; not supported for SQLite | Not supported |
 | `password` | Required source for Postgres/MySQL; not supported for SQLite | Optional source |
@@ -127,7 +131,7 @@ Only stores referenced by State Checks enter the private channel, under `STORE_<
 | SQLite | `SQLITE_DB` (absolute path) |
 | Redis | `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, plus `REDISCLI_AUTH` only with a password source |
 
-Source `. '<run-dir>/load.sh' --store <name> <required-native-names> || exit 1` before a check. `--store` must be the first two arguments; it exports that store's namespaced variables under their native names, then checks remaining required names. An unknown store fails with `<NAME_UPPER>: unknown store`. Without `--store`, native aliases are not exported. The loader clears inherited `QA_*`, `PG*`, `MYSQL_*`, `SQLITE_DB`, `REDIS*` and `STORE_*` first, so stale client settings cannot choose an endpoint.
+Source `qa_load_store='<name>' qa_load_require='<required-native-names>' . '<run-dir>/load.sh' || exit 1` before a check. These lower-case control assignments select the store and a space-separated list of required names without colliding with exposed `QA_*` values; use empty `qa_load_require` when none are needed. Do not pass arguments to the dot script: dash ignores them. The loader exports only exact `STORE_<NAME_UPPER>_<CLIENT>` variables for the fixed native client names listed above, requires a non-empty exported endpoint, then checks required names. Store names that share a prefix, such as `main` and `main_audit`, remain distinct. An unknown store fails with `<NAME_UPPER>: unknown store`; an empty endpoint fails with `<NAME_UPPER>: store not exported`. Without `qa_load_store`, native aliases are not exported. The loader consumes its controls, then clears inherited `QA_*`, `PG*`, `MYSQL_*`, `SQLITE_DB`, `REDIS*` and `STORE_*`, so stale client settings cannot choose an endpoint.
 
 State Checks are read-only: Postgres exports `PGOPTIONS="-c default_transaction_read_only=on"`; SQLite uses `sqlite3 -readonly`; MySQL uses `--init-command="SET SESSION TRANSACTION READ ONLY"`. Redis checks use `redis-cli --json` and only `GET MGET EXISTS TTL TYPE STRLEN HGET HLEN LLEN LRANGE SCARD SISMEMBER ZCARD ZSCORE XLEN SCAN`. A client without `--json` cannot run the Redis check. Recommend a read-only SQL role or restricted Redis ACL as an additional boundary; client flags and tester instructions are not permission isolation. Cleanup may need a separate writable role or another recipe kind.
 
@@ -174,17 +178,17 @@ The plan declares its users between `## Users` and the next level-two heading:
 - admin: existing — administrator (qa.users.admin)
 ```
 
-A plain user signup can create is `registered`; a role or state signup cannot produce is `existing`. Only existing users need configuration. A configured user must be declared `existing`, not `registered`; referencing an undeclared configured user is a plan error. Registered users' email/ID references are the tester's own captured values, not channel names; using them before registration is `NEED_INFO kind=fixture` naming the user.
+A plain user signup can create is `registered`; a role or state signup cannot produce is `existing`. Only existing users need configuration. A configured user must be declared `existing`, not `registered`; referencing an undeclared configured user is a plan error. Registered users' email/ID references are the tester's own values from its registration step, not channel names: the email is rebuilt from the dispatch `Tag:` and never passed through `capture.sh`, and BE testers capture the returned ID; using them before registration is `NEED_INFO kind=fixture` naming the user.
 
 ### Tester-visible names
 
 | Input | Tester-visible names |
 |---|---|
-| Plan-referenced existing user `u` | `QA_<U>_EMAIL`, `QA_<U>_PASSWORD`, and `QA_<U>_ID` when referenced and configured |
+| Plan-referenced existing user `u` | Only the referenced fields among `QA_<U>_EMAIL`, `QA_<U>_PASSWORD` and `QA_<U>_ID` (ID only when configured); a login needs both the email and the password token |
 | `[env.values]` entry `X` referenced by the plan | `QA_<X>` |
 | Registration password | `QA_NEW_PASSWORD`, always written even with zero users |
 | Dispatch tag | `Tag:` in the dispatch text, not a channel variable |
-| Referenced store | `STORE_<NAME_UPPER>_<CLIENT>`; native aliases through `load.sh --store` |
+| Referenced store | `STORE_<NAME_UPPER>_<CLIENT>`; native aliases through `qa_load_store='<name>' . load.sh` |
 | `[env.secrets]` | Never exposed to testers |
 
 `QA_NEW_PASSWORD` is generated once per run as 24 random URL-safe characters plus `Aa1!` and reused by later provisioning. Each tester dispatch gets a distinct eight-character hexadecimal tag. Testers register through the application's signup API/form in preconditions, using an address such as `qa+<Tag>-owner@test.local` and the run password, and log in themselves. The engine does neither.
@@ -207,7 +211,7 @@ Optional `[qa.cleanup]` defines exactly one recipe for **registered accounts**, 
 | `store` | Configured store of kind `"sql"` |
 | `query` | Non-empty SQL text containing `{email}` |
 
-Only `{email}`, `{id}` and `{tag}` are allowed. Each substitutes a single-quoted SQL literal with `'` doubled; an absent ID becomes `NULL`. Do not add your own quotes around placeholders. Cleanup runs the store's client in a sanitised environment without State Check read-only overrides; success is exit 0. Check the application's foreign-key cascades and deletion contract before approving the query.
+Only `{email}`, `{id}` and `{tag}` are allowed. Each substitutes a single-quoted SQL literal with `'` doubled; an absent ID becomes `NULL`. Do not add your own quotes around placeholders. Cleanup runs the store's client in a sanitised environment without State Check read-only overrides; success is exit 0. Postgres cleanup discards inherited `PSQLRC` and uses `psql -X` to skip system and user startup files. MySQL cleanup uses `--no-defaults --no-login-paths` to skip option files, including `.mylogin.cnf`. Check the application's foreign-key cascades and deletion contract before approving the query.
 
 ### HTTP recipe
 
@@ -231,7 +235,7 @@ Templates allow `{email}`, `{id}`, `{tag}`, `{secret.X}` and `{value.X}`; secret
 | `kind` | `"command"` |
 | `run` | Non-empty shell command run in the repository root with a 60-second timeout |
 
-Commands have no placeholders or credential outputs. They receive the inherited environment plus the ledger record's `QA_EMAIL`, `QA_ID` (empty when unknown) and `QA_TAG`; `QA_PASSWORD` and `QA_NEW_PASSWORD` are removed. Success is exit 0. Commands are trust-pinned, not sandboxed.
+Commands have no placeholders or credential outputs. They receive the inherited environment with every `QA_*` variable removed, plus the ledger record's `QA_EMAIL`, `QA_ID` (empty when unknown) and `QA_TAG`. Success is exit 0. Commands are trust-pinned, not sandboxed.
 
 For an admin key, use an inherited `AV_<NAME>` variable and also declare it under `[env.secrets]` as `env:AV_<NAME>`. For example, `SERVICE_KEY = "env:AV_SUPABASE_SERVICE_ROLE_KEY"` lets `engine.log` mask the value while the helper reads `$AV_SUPABASE_SERVICE_ROLE_KEY` from its inherited environment. The runtime collects every `env:`-referenced value for masking even when no recipe resolves the source; this declaration does not inject it into the helper. A helper fetching a key any other way, including its own settings or `.env`, must never print it, including on failure.
 
@@ -242,6 +246,8 @@ Registered users without a recipe set `missing.cleanup = true`, but this soft ga
 The ledger at `${XDG_STATE_HOME:-~/.local/state}/av-marketplace/qa-accounts.json` is keyed by repository realpath and survives private-run-directory deletion. Records hold email, optional ID, run ID, dispatch tag/ID, cleanup destination, `deleted`, `status` and `attempts`, never passwords or tokens. Status is `pending`, `deleted` or `manual-cleanup`.
 
 Teardown uses only the **current** valid, trusted (or `not-required`) cleanup config, and an HTTP origin or SQL store endpoint must be among this run's locked keys. An unavailable/untrusted recipe or unlocked destination leaves accounts without counting attempts. A record's non-null destination must match the current destination; mismatches stay `left` without attempts. A null destination adopts the current destination on its first attempt; command recipes have no destination.
+
+Before rendering a recipe, teardown revalidates persisted email/ID safety, dispatch tags, destinations and attempt counters. Legacy QA 3.1.0 records lacking `tag` or `destination`, and malformed current records, stay unchanged without an attempt; their non-empty email strings are listed in `left`, with indexed stderr diagnostics that do not echo unsafe values. A record without a usable email string gets only the diagnostic. A missing destination is not a null destination and never adopts the current recipe or derives authorization from legacy `origin`. Deliberately clean up legacy accounts in their original application; other eligible records continue processing.
 
 A usable recipe attempts eligible undeleted records from any run of this repository. Success marks them `deleted`; failure increments attempts. At 3 failed attempts the record becomes `manual-cleanup` and is reported once under `manual`, never retried automatically. Earlier failures are `left`; later teardowns omit already-deleted/manual records. Review the reported `deleted`, `left` and `manual` emails and deliberately remove manual leftovers in the correct application.
 
@@ -385,7 +391,7 @@ The `cvs` cascade in this example is an application requirement, not an assumed 
 
 ## Trust
 
-QA pins every value source (including configured users and store passwords), `env.services`, non-loopback target origins and store hosts, the whole `qa.cleanup` table, and configured `qa.fix`, `qa.mutations` and `qa.start_services`. A SQL cleanup also pins its store's **whole table**, so changing the engine, path, database name or port re-asks for trust. Pins live outside branch content at `~/.local/state/av-marketplace/trust.json` (or `${XDG_STATE_HOME}/av-marketplace/trust.json`), keyed by repository realpath and plugin name; each worktree trusts separately.
+QA pins every value source (including configured users and store passwords), `env.services`, non-loopback target origins, the whole `qa.cleanup` table, and configured `qa.fix`, `qa.mutations` and `qa.start_services`. Store hosts must be loopback; trust cannot authorize a remote store. A SQL cleanup also pins its store's **whole table**, so changing the engine, path, database name or port re-asks for trust. Pins live outside branch content at `~/.local/state/av-marketplace/trust.json` (or `${XDG_STATE_HOME}/av-marketplace/trust.json`), keyed by repository realpath and plugin name; each worktree trusts separately.
 
 | Reported `trust` | Meaning |
 |---|---|

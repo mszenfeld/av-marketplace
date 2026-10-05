@@ -297,6 +297,23 @@ up = {json.dumps(command)}
         self.assertEqual(stopped["detail"], detail)
         self.assertIn("- Stop detail: " + detail, self.summary())
 
+    def test_stop_detail_keeps_store_connection_metadata_readable(self) -> None:
+        self.start()
+        directory = Path(self.run["dir"])
+        (directory / "secrets.json").write_text(json.dumps({
+            "STORE_CACHE_REDIS_HOST": "localhost",
+            "STORE_CACHE_REDIS_PORT": "6379",
+            "STORE_CACHE_REDIS_DB": "0",
+            "STORE_MAIN_PGPORT": "8000",
+            "STORE_MAIN_PGDATABASE": "api",
+            "STORE_CACHE_REDISCLI_AUTH": "cache-secret",
+        }))
+        detail = "backend /api/v1/health 502, http://localhost:8000 down, db 0, cache-secret"
+        stopped = self.cli("run", "stop", "--run", self.run["run"], "--reason", "other", "--detail", detail)
+        expected = "backend /api/v1/health 502, http://localhost:8000 down, db 0, ***"
+        self.assertEqual(stopped["detail"], expected)
+        self.assertIn("- Stop detail: " + expected, self.summary())
+
     def test_stop_detail_masks_only_private_values_and_configured_sources_after_drift(self) -> None:
         self.env.update(AV_OLD_SECRET="recorded-secret", AV_NEW_SECRET="current-secret", UNRELATED_FLAG="1")
         self.put(CONFIG.replace("[qa]\n", '[env.secrets]\nold = "env:AV_OLD_SECRET"\n[qa]\n'),
@@ -812,15 +829,18 @@ up = {json.dumps(command)}
         self.render([issue("QA-001", "CRITICAL")])
         summary = self.summary()
         self.assertIn("need-info (0)", summary)
-        self.assertIn("qa.users.admin.email", summary)
+        self.assertIn("env.values.ADMIN_EMAIL", summary)
         self.assertIn("env.values.FOO", summary)
         self.assertIn("env.stores", summary)
         self.assertIn("Confidence: low", summary)
         self.assertIn("cannot-confirm 0", summary)
 
-    def test_credential_unlocks_name_user_and_value_keys(self) -> None:
+    def test_credential_unlocks_distinguish_users_values_and_store_names(self) -> None:
         config = CONFIG + '''[env.values]
 USER_AGENT = "literal:qa-agent"
+TENANT_ID = "literal:tenant-1"
+CONTACT_EMAIL = "literal:contact@test.local"
+SERVICE_PASSWORD = "env:AV_SERVICE_SECRET"
 [qa.users.admin]
 email = "literal:admin@test.local"
 password = "env:QA_ADMIN_SECRET"
@@ -828,12 +848,28 @@ description = "administrator"
 '''
         self.put(config, ".av/config.toml")
         self.start()
-        self.ingest(edge=outcome("NEED_INFO", None, kind="credentials", missing=["QA_ADMIN_EMAIL", "QA_USER_AGENT", "PGPASSWORD", "REDISCLI_AUTH"]))
+        missing = [
+            "QA_ADMIN_EMAIL", "QA_USER_AGENT", "QA_TENANT_ID", "QA_CONTACT_EMAIL", "QA_SERVICE_PASSWORD",
+            "PGPASSWORD", "REDISCLI_AUTH", "STORE_MAIN_PGPASSWORD", "STORE_WAREHOUSE_2_MYSQL_PWD",
+            "STORE_CACHE_REDISCLI_AUTH", "STORE_TEAM_ID", "STORE_MAIN_PGPASSWORD_EXTRA",
+        ]
+        self.ingest(edge=outcome("NEED_INFO", None, kind="credentials", missing=missing))
         summary = self.summary()
-        for key in ("qa.users.admin.email", "env.values.USER_AGENT", "env.stores"):
-            self.assertIn(f"`{key}`", summary)
-        self.render([])
-        self.assertIn("- Accounts: registered 0", self.text())
+        keys = (
+            "qa.users.admin.email", "env.values.USER_AGENT", "env.values.TENANT_ID",
+            "env.values.CONTACT_EMAIL", "env.values.SERVICE_PASSWORD", "env.stores",
+            "env.values.STORE_TEAM_ID", "env.values.STORE_MAIN_PGPASSWORD_EXTRA",
+        )
+        for key in keys:
+            with self.subTest(key=key):
+                self.assertIn(f"`{key}`", summary)
+        for key in (
+            "qa.users.tenant.id", "qa.users.contact.email", "qa.users.service.password",
+            "env.values.STORE_MAIN_PGPASSWORD", "env.values.STORE_WAREHOUSE_2_MYSQL_PWD",
+            "env.values.STORE_CACHE_REDISCLI_AUTH", "qa.users.store_team.id",
+        ):
+            with self.subTest(key=key):
+                self.assertNotIn(f"`{key}`", summary)
 
     def test_summary_coverage_unlocks_and_recovery_are_config_scoped(self) -> None:
         self.start()

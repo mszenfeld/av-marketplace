@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -198,23 +199,110 @@ mutations = "allow"
         self.assertEqual(self.dispatch(run)["stores"], ["cache", "main"])
         self.cli("run", "end", "--run", run)
 
-    def test_loader_store_option_exports_native_names_and_rejects_unknown_stores(self) -> None:
+    def test_loader_store_controls_export_native_names_and_reject_unknown_stores(self) -> None:
         self.configure_stores()
         _, directory = self.start()
         loader = shlex.quote(str(directory / "load.sh"))
         env = {**self.env, "PGHOST": "inherited", "STORE_X_Y": "inherited", "REDIS_HOST": "inherited"}
         commands = (
-            (f'. {loader} --store main PGPASSWORD && printf "%s|%s|%s" "$PGHOST" "$PGOPTIONS" "$PGPASSWORD"', 0, "127.0.0.1|-c default_transaction_read_only=on|main-secret", ""),
-            (f'. {loader} --store nope', 1, "", "NOPE: unknown store"),
-            (f'. {loader} PGPASSWORD', 1, "", "PGPASSWORD: required value missing"),
+            (f'qa_load_store=main qa_load_require=PGPASSWORD . {loader} && printf "%s|%s|%s" "$PGHOST" "$PGOPTIONS" "$PGPASSWORD"', 0, "127.0.0.1|-c default_transaction_read_only=on|main-secret", ""),
+            (f'qa_load_store=nope . {loader}', 1, "", "NOPE: unknown store"),
+            (f'qa_load_require=PGPASSWORD . {loader}', 1, "", "PGPASSWORD: required value missing"),
             (f'. {loader} && printf "%s|%s|%s" "${{PGHOST:-}}" "${{STORE_X_Y:-}}" "${{REDIS_HOST:-}}"', 0, "||", ""),
         )
-        for command, code, stdout, stderr in commands:
-            with self.subTest(command=command):
-                result = subprocess.run(["sh", "-c", command], env=env, capture_output=True, text=True)
-                self.assertEqual(result.returncode, code, result.stderr)
-                self.assertEqual(result.stdout, stdout)
-                self.assertIn(stderr, result.stderr)
+        shells = (["sh"], ["bash", "--posix"], *([["dash"]] if shutil.which("dash") else []))
+        for shell in shells:
+            for command, code, stdout, stderr in commands:
+                with self.subTest(shell=shell, command=command):
+                    result = subprocess.run([*shell, "-c", command], env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, code, result.stderr)
+                    self.assertEqual(result.stdout, stdout)
+                    self.assertIn(stderr, result.stderr)
+
+    def test_loader_refuses_selected_store_without_an_endpoint(self) -> None:
+        self.configure_stores()
+        _, directory = self.start()
+        loader = shlex.quote(str(directory / "load.sh"))
+        channel = directory / "secrets.env"
+        channel.write_text(channel.read_text().replace("export STORE_MAIN_PGHOST='127.0.0.1'", "export STORE_MAIN_PGHOST=''"))
+        command = f'qa_load_store=main qa_load_require=PGPASSWORD . {loader} && printf "client would run"'
+        for shell in (["sh"], ["bash", "--posix"], *([["dash"]] if shutil.which("dash") else [])):
+            with self.subTest(shell=shell):
+                result = subprocess.run([*shell, "-c", command], env={**self.env, "PGHOST": "inherited"}, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("MAIN: store not exported", result.stderr)
+
+    def test_loader_required_controls_fail_before_a_request_and_ignore_caller_arguments(self) -> None:
+        _, directory = self.start()
+        loader = shlex.quote(str(directory / "load.sh"))
+        for shell in (["sh"], ["bash", "--posix"], *([["dash"]] if shutil.which("dash") else [])):
+            with self.subTest(shell=shell):
+                command = f'set -- unrelated arguments; qa_load_require="QA_ADMIN_EMAIL QA_MISSING" . {loader} && printf "request would run"'
+                result = subprocess.run([*shell, "-c", command], env={**self.env, "QA_MISSING": "inherited"}, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("QA_MISSING: required value missing", result.stderr)
+                command = f'set -- unrelated arguments; qa_load_require=QA_ADMIN_EMAIL . {loader} && printf "%s|%s|%s" "$QA_ADMIN_EMAIL" "$1" "$2"'
+                result = subprocess.run([*shell, "-c", command], env=self.env, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "admin@test.local|unrelated|arguments")
+
+    def test_loader_store_selection_keeps_overlapping_names_distinct(self) -> None:
+        self.configure_stores(audit=True)
+        config = self.repo / ".av/config.toml"
+        config.write_text(config.read_text().replace("[env.stores.audit]", "[env.stores.main_audit]"))
+        self.plan.write_text(self.plan.read_text().replace("audit: SELECT", "main_audit: SELECT"))
+        self.trust()
+        _, directory = self.start()
+        loader = shlex.quote(str(directory / "load.sh"))
+        for store, expected in (("main", "app|main-secret||"), ("main_audit", "audit|audit-secret||")):
+            with self.subTest(store=store):
+                command = (
+                    f'unset AUDIT_PGDATABASE AUDIT_PGPASSWORD; qa_load_store={store} qa_load_require=PGPASSWORD . {loader} && '
+                    'printf "%s|%s|%s|%s" "$PGDATABASE" "$PGPASSWORD" '
+                    '"${AUDIT_PGDATABASE+set}" "${AUDIT_PGPASSWORD+set}"'
+                )
+                result = subprocess.run(["sh", "-c", command], env=self.env, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, expected)
+
+    def test_loader_rejects_a_store_name_that_is_only_a_prefix(self) -> None:
+        self.configure_stores()
+        config = self.repo / ".av/config.toml"
+        config.write_text(config.read_text().replace("[env.stores.main]", "[env.stores.a_b]"))
+        self.plan.write_text(self.plan.read_text().replace("main: SELECT", "a_b: SELECT"))
+        self.trust()
+        _, directory = self.start()
+        command = f'qa_load_store=a . {shlex.quote(str(directory / "load.sh"))}'
+        result = subprocess.run(["sh", "-c", command], env=self.env, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("A: unknown store", result.stderr)
+
+    @unittest.skipUnless(shutil.which("bash"), "bash unavailable")
+    def test_loader_keeps_response_text_and_store_values_out_of_eval_syntax(self) -> None:
+        self.configure_stores()
+        response_marker = self.root / "response-executed"
+        value_marker = self.root / "value-executed"
+        password = f"pa'ss\\word\n$(touch {value_marker}); `touch {value_marker}`"
+        self.env["AV_STORE_PASSWORD"] = password
+        config = self.repo / ".av/config.toml"
+        config.write_text(config.read_text().replace("literal:main-secret", "env:AV_STORE_PASSWORD"))
+        self.trust()
+        _, directory = self.start()
+        response = f"HTTP/1.1 200 OK\nSTORE_MAIN_A}};touch${{IFS}}{response_marker};#=x"
+        command = (
+            f'RESP={shlex.quote(response)}; qa_load_store=main qa_load_require=PGPASSWORD '
+            f'. {shlex.quote(str(directory / "load.sh"))} && printf "%s" "$PGPASSWORD"'
+        )
+        for shell in (["sh"], ["bash", "--posix"]):
+            with self.subTest(shell=shell):
+                result = subprocess.run([*shell, "-c", command], env=self.env, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, password)
+                self.assertFalse(response_marker.exists())
+                self.assertFalse(value_marker.exists())
 
     def test_dispatch_lists_the_section_stores(self) -> None:
         self.configure_stores()
@@ -227,9 +315,9 @@ mutations = "allow"
         self.configure_stores(audit=True)
         _, directory = self.start()
         redactor = SCRIPTS.parents[1] / "be-testing/scripts/qa-redact.pl"
-        for option, main in (("", "$STORE_MAIN_PGPASSWORD"), ("--store main PGPASSWORD", "$PGPASSWORD")):
-            with self.subTest(option=option):
-                command = f'. {shlex.quote(str(directory / "load.sh"))} {option} && printf \'{{"a":"%s","b":"%s"}}\' "{main}" "$STORE_AUDIT_PGPASSWORD" | perl {shlex.quote(str(redactor))} {shlex.quote(str(directory / "redact-names"))}'
+        for controls, main in (("", "$STORE_MAIN_PGPASSWORD"), ("qa_load_store=main qa_load_require=PGPASSWORD", "$PGPASSWORD")):
+            with self.subTest(controls=controls):
+                command = f'{controls} . {shlex.quote(str(directory / "load.sh"))} && printf \'{{"a":"%s","b":"%s"}}\' "{main}" "$STORE_AUDIT_PGPASSWORD" | perl {shlex.quote(str(redactor))} {shlex.quote(str(directory / "redact-names"))}'
                 result = subprocess.run(["sh", "-c", command], env=self.env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(result.stdout), {"a": "***", "b": "***"})
@@ -258,23 +346,37 @@ mutations = "allow"
         self.assertNotIn(email, (directory / "engine.log").read_text())
 
     def test_sql_cleanup_runs_the_client_in_a_sanitised_environment(self) -> None:
-        self.configure_stores()
-        self.put((self.repo / ".av/config.toml").read_text().replace(CLEANUP, '[qa.cleanup]\nkind="sql"\nstore="main"\nquery="DELETE FROM users WHERE email = {email}"\n'), ".av/config.toml")
-        self.trust()
-        capture = self.root / "client-environment"
-        fake = self.put('#!/bin/sh\nenv > "$CLIENT_ENV"\n', "bin/psql")
-        fake.chmod(0o700)
-        self.env.update({"PATH": str(fake.parent) + os.pathsep + self.env["PATH"], "CLIENT_ENV": str(capture),
-                         "PGHOSTADDR": "10.0.0.9", "PGSERVICE": "x", "PGOPTIONS": "-c default_transaction_read_only=on"})
-        run, _ = self.start()
-        email = self.register(run, self.dispatch(run))
-        self.assertEqual(self.cli("users", "teardown", "--run", run)["deleted"], [email])
-        recorded = dict(line.split("=", 1) for line in capture.read_text().splitlines())
-        for name in ("PGHOSTADDR", "PGSERVICE", "PGOPTIONS", "STORE_MAIN_PGPASSWORD", "QA_NEW_PASSWORD"):
-            self.assertNotIn(name, recorded)
-        self.assertEqual(recorded["PGHOST"], "127.0.0.1")
-        self.assertEqual(recorded["PGPASSWORD"], "main-secret")
-        self.assertEqual(recorded["QA_SQL"], f"DELETE FROM users WHERE email = '{email}'")
+        clients = (
+            ("postgres", "psql", ["-X"], "PGHOST", "PGPASSWORD"),
+            ("mysql", "mysql", ["--no-defaults", "--no-login-paths"], "MYSQL_HOST", "MYSQL_PWD"),
+        )
+        for engine, client, startup_flags, host_name, password_name in clients:
+            with self.subTest(engine=engine):
+                self.configure_stores()
+                config = (self.repo / ".av/config.toml").read_text().replace('engine="postgres"', f'engine="{engine}"')
+                self.put(config.replace(CLEANUP, '[qa.cleanup]\nkind="sql"\nstore="main"\nquery="DELETE FROM users WHERE email = {email}"\n'), ".av/config.toml")
+                self.trust()
+                capture = self.root / "client-environment"
+                arguments = self.root / "client-arguments"
+                fake = self.put('#!/bin/sh\nenv > "$CLIENT_ENV"\nprintf "%s\\n" "$@" > "$CLIENT_ARGS"\n', f"bin/{client}")
+                fake.chmod(0o700)
+                self.env.update({"PATH": str(fake.parent) + os.pathsep + self.env["PATH"],
+                                 "CLIENT_ENV": str(capture), "CLIENT_ARGS": str(arguments),
+                                 "PSQLRC": str(self.root / "untrusted.psqlrc"),
+                                 "PGHOSTADDR": "10.0.0.9", "PGSERVICE": "x", "PGOPTIONS": "-c default_transaction_read_only=on"})
+                run, _ = self.start()
+                try:
+                    email = self.register(run, self.dispatch(run))
+                    self.assertEqual(self.cli("users", "teardown", "--run", run)["deleted"], [email])
+                    self.assertEqual(arguments.read_text().splitlines()[:len(startup_flags)], startup_flags)
+                    recorded = dict(line.split("=", 1) for line in capture.read_text().splitlines())
+                    for name in ("PSQLRC", "PGHOSTADDR", "PGSERVICE", "PGOPTIONS", "STORE_MAIN_PGPASSWORD", "QA_NEW_PASSWORD"):
+                        self.assertNotIn(name, recorded)
+                    self.assertEqual(recorded[host_name], "127.0.0.1")
+                    self.assertEqual(recorded[password_name], "main-secret")
+                    self.assertEqual(recorded["QA_SQL"], f"DELETE FROM users WHERE email = '{email}'")
+                finally:
+                    self.cli("run", "end", "--run", run)
 
     def test_provision_writes_users_values_and_new_password_only_for_plan_tokens(self) -> None:
         run, directory = self.start()
@@ -283,7 +385,7 @@ mutations = "allow"
         self.assertEqual(set(values), {"QA_ADMIN_EMAIL", "QA_ADMIN_PASSWORD", "QA_NEW_PASSWORD"})
         self.assertRegex(values["QA_NEW_PASSWORD"], r"^[A-Za-z0-9_-]{24}Aa1!$")
         self.assertEqual((directory / "redact-names").read_text().splitlines(), sorted(values))
-        process = subprocess.run(["sh", "-c", f". {shlex.quote(str(directory / 'load.sh'))} QA_ADMIN_EMAIL && printf '%s' \"$QA_ADMIN_EMAIL\""], env=self.env, capture_output=True, text=True)
+        process = subprocess.run(["sh", "-c", f"qa_load_require=QA_ADMIN_EMAIL . {shlex.quote(str(directory / 'load.sh'))} && printf '%s' \"$QA_ADMIN_EMAIL\""], env=self.env, capture_output=True, text=True)
         self.assertEqual(process.stdout, "admin@test.local")
         self.assertEqual(result["users"], ["admin"])
 
@@ -407,6 +509,177 @@ mutations = "allow"
                 self.assertEqual(self.cli("users", "teardown", "--run", run), {"deleted": [], "left": [], "manual": []})
                 self.assertTrue(self.ledger()[-1]["deleted"])
                 self.cli("run", "end", "--run", run)
+
+    def test_teardown_reuses_command_secret_after_a_record_failure_across_runs(self) -> None:
+        self.put(self.config.replace('ADMIN = "env:AV_ADMIN"', 'ADMIN = "cmd:sh scripts/source-helper.sh"'),
+                 ".av/config.toml")
+        self.put('''printf '%s\\n' resolve >> source-calls.txt
+if [ ! -e source-ready ]; then
+    touch source-ready
+    exit 1
+fi
+if [ -e source-used ]; then
+    exit 1
+fi
+touch source-used
+printf '%s' "$AV_ADMIN"
+''', "scripts/source-helper.sh")
+        self.trust()
+        previous, _ = self.start()
+        failed = self.register(previous, self.dispatch(previous))
+        self.cli("run", "end", "--run", previous)
+        run, _ = self.start()
+        dispatch = self.dispatch(run)
+        emails = [f"qa+{dispatch['tag']}-{name}@test.local" for name in ("owner", "other")]
+        for email in emails:
+            self.cli("users", "record", "--run", run, "--dispatch", str(dispatch["dispatch"]), "--email", email)
+
+        self.assertEqual(self.cli("users", "teardown", "--run", run),
+                         {"deleted": sorted(emails), "left": [failed], "manual": []})
+        self.assertEqual((self.repo / "source-calls.txt").read_text().splitlines(), ["resolve", "resolve"])
+        self.assertEqual([(record["email"], record["attempts"], record["deleted"]) for record in self.ledger()],
+                         [(failed, 1, False), *[(email, 0, True) for email in emails]])
+
+    def test_teardown_leaves_legacy_records_untouched_and_cleans_current_records(self) -> None:
+        run, _ = self.start()
+        dispatch = self.dispatch(run)
+        email = self.register(run, dispatch)
+        legacy = [
+            {"persona": "owner", "email": "qa-old-owner@test.local", "id": "old-1",
+             "run_id": "old-run", "origin": "http://127.0.0.1:9999",
+             "recipe_hash": "old-hash", "deleted": False, "status": "created"},
+            {"email": f"qa+{dispatch['tag']}-missing-destination@test.local",
+             "id": None, "tag": dispatch["tag"], "attempts": 0,
+             "deleted": False, "status": "pending"},
+            {"email": "qa-old-missing-tag@test.local", "id": None,
+             "destination": self.origin, "attempts": 0, "deleted": False, "status": "pending"},
+        ]
+        path = self.root / "state/av-marketplace/qa-accounts.json"
+        path.write_text(json.dumps({str(self.repo.resolve()): [*legacy, *self.ledger()]}))
+        for attempt in range(2):
+            process = subprocess.run([sys.executable, str(SCRIPTS / "qa.py"), "users", "teardown",
+                                      "--run", run, "--repo", str(self.repo)],
+                                     env=self.env, capture_output=True, text=True, check=False)
+            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+            self.assertEqual(json.loads(process.stdout),
+                             {"deleted": [email] if attempt == 0 else [],
+                              "left": sorted(str(record["email"]) for record in legacy), "manual": []})
+            self.assertIn("legacy", process.stderr.lower())
+            self.assertEqual(self.ledger()[:len(legacy)], legacy)
+            self.assertTrue(self.ledger()[-1]["deleted"])
+        self.assertEqual([event[0] for event in self.server.events],
+                         [f"/users/qa%2B{dispatch['tag']}-owner%40test.local"])
+
+    def test_teardown_revalidates_ledger_records_before_cleanup(self) -> None:
+        run, _ = self.start()
+        dispatch = self.dispatch(run)
+        email = self.register(run, dispatch)
+        current = self.ledger()[0]
+        changes: list[dict[str, object]] = [
+            {"email": f"qa+{dispatch['tag']}-bad';delete@test.local"},
+            {"id": "u1;delete"},
+            {"id": 1},
+            {"id": ""},
+            {"email": 1},
+            {"email": ""},
+            {"tag": None},
+            {"tag": "bad';delete"},
+            {"tag": "00000000" if dispatch["tag"] != "00000000" else "11111111"},
+            {"destination": 1},
+            {"attempts": "bad"},
+            {"attempts": None},
+            {"attempts": -1},
+            {"attempts": True},
+        ]
+        invalid = [{**current, "email": f"qa+{dispatch['tag']}-bad{index}@test.local", **change}
+                   for index, change in enumerate(changes)]
+        missing_email = dict(current)
+        del missing_email["email"]
+        invalid.append(missing_email)
+        missing_attempts = {**current, "email": f"qa+{dispatch['tag']}-missing-attempts@test.local"}
+        del missing_attempts["attempts"]
+        invalid.append(missing_attempts)
+        path = self.root / "state/av-marketplace/qa-accounts.json"
+        path.write_text(json.dumps({str(self.repo.resolve()): [*invalid, current]}))
+        process = subprocess.run([sys.executable, str(SCRIPTS / "qa.py"), "users", "teardown",
+                                  "--run", run, "--repo", str(self.repo)],
+                                 env=self.env, capture_output=True, text=True, check=False)
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertEqual(json.loads(process.stdout),
+                         {"deleted": [email],
+                          "left": sorted(record["email"] for record in invalid
+                                         if isinstance(record.get("email"), str) and record["email"]),
+                          "manual": []})
+        for reason in ("email", "id", "tag", "destination", "attempts"):
+            self.assertIn(reason, process.stderr.lower())
+        self.assertNotIn("delete@test.local", process.stderr)
+        self.assertNotIn("u1;delete", process.stderr)
+        self.assertEqual(self.ledger()[:-1], invalid)
+        self.assertTrue(self.ledger()[-1]["deleted"])
+        self.assertEqual([event[0] for event in self.server.events],
+                         [f"/users/qa%2B{dispatch['tag']}-owner%40test.local"])
+
+    def test_teardown_isolates_a_failed_account_from_later_cleanup(self) -> None:
+        self.put(self.base + USER + '[qa.cleanup]\nkind="command"\nrun="sh scripts/cleanup.sh"\n',
+                 ".av/config.toml")
+        self.put('case "$QA_EMAIL" in *-fail@*) exit 1 ;; esac\nprintf "%s\\n" "$QA_EMAIL" >> deleted.txt\n',
+                 "scripts/cleanup.sh")
+        self.trust()
+        run, _ = self.start()
+        dispatch = self.dispatch(run)
+        failed = f"qa+{dispatch['tag']}-fail@test.local"
+        self.cli("users", "record", "--run", run, "--dispatch", str(dispatch["dispatch"]), "--email", failed)
+        email = self.register(run, dispatch)
+        self.assertEqual(self.cli("users", "teardown", "--run", run),
+                         {"deleted": [email], "left": [failed], "manual": []})
+        self.assertEqual((self.repo / "deleted.txt").read_text().splitlines(), [email])
+        self.assertEqual([(record["email"], record["attempts"], record["deleted"]) for record in self.ledger()],
+                         [(failed, 1, False), (email, 0, True)])
+
+    def test_teardown_persists_each_outcome_before_a_later_interruption(self) -> None:
+        self.put(self.base + USER + '[qa.cleanup]\nkind="command"\nrun="exec python3 scripts/cleanup.py"\n',
+                 ".av/config.toml")
+        self.put('''import os
+from pathlib import Path
+import signal
+import sys
+
+email = os.environ["QA_EMAIL"]
+if "-interrupt@" in email and not Path("resume").exists():
+    os.kill(os.getppid(), signal.SIGKILL)
+    sys.exit(0)
+if "-fail@" in email or "-manual@" in email:
+    sys.exit(1)
+with Path("deleted.txt").open("a") as handle:
+    handle.write(email + "\\n")
+''', "scripts/cleanup.py")
+        self.trust()
+        run, _ = self.start()
+        dispatch = self.dispatch(run)
+        emails = [f"qa+{dispatch['tag']}-{name}@test.local"
+                  for name in ("success", "fail", "manual", "interrupt")]
+        for email in emails:
+            self.cli("users", "record", "--run", run, "--dispatch", str(dispatch["dispatch"]), "--email", email)
+        records = self.ledger()
+        records[2]["attempts"] = 2
+        path = self.root / "state/av-marketplace/qa-accounts.json"
+        path.write_text(json.dumps({str(self.repo.resolve()): records}))
+
+        process = subprocess.run([sys.executable, str(SCRIPTS / "qa.py"), "users", "teardown",
+                                  "--run", run, "--repo", str(self.repo)],
+                                 env=self.env, capture_output=True, text=True, check=False, timeout=15)
+        self.assertEqual(process.returncode, -signal.SIGKILL, process.stdout + process.stderr)
+        self.assertEqual((self.repo / "deleted.txt").read_text().splitlines(), emails[:1])
+        self.assertEqual([(record["deleted"], record["attempts"], record["status"]) for record in self.ledger()],
+                         [(True, 0, "deleted"), (False, 1, "pending"),
+                          (False, 3, "manual-cleanup"), (False, 0, "pending")])
+
+        self.put("", "resume")
+        self.assertEqual(self.cli("users", "teardown", "--run", run),
+                         {"deleted": [emails[3]], "left": [emails[1]], "manual": []})
+        self.assertEqual((self.repo / "deleted.txt").read_text().splitlines(), [emails[0], emails[3]])
+        self.assertEqual([record["attempts"] for record in self.ledger()], [0, 2, 3, 0])
+        self.cli("run", "end", "--run", run)
 
     def test_record_rejects_invalid_and_configured_identities(self) -> None:
         run, _ = self.start()
@@ -600,7 +873,7 @@ mutations = "allow"
     def test_loader_fails_closed_and_shell_quotes_password(self) -> None:
         self.env["QA_ADMIN_SECRET"] = "pa'ss\\word"
         run, directory = self.start()
-        command = f". {shlex.quote(str(directory / 'load.sh'))} QA_ADMIN_PASSWORD && printf '%s' \"$QA_ADMIN_PASSWORD\""
+        command = f"qa_load_require=QA_ADMIN_PASSWORD . {shlex.quote(str(directory / 'load.sh'))} && printf '%s' \"$QA_ADMIN_PASSWORD\""
         process = subprocess.run(["sh", "-c", command], env=self.env, capture_output=True, text=True)
         self.assertEqual(process.stdout, "pa'ss\\word")
         (directory / "secrets.env").unlink()

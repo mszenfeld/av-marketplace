@@ -43,6 +43,8 @@ Read `## Users` and `$QA_NAME` / `${QA_NAME}` tokens anywhere in scenarios, incl
 
 A scenario's `- **Target:** <name>` wins over its section origin (`ui` for FE, `backend` for BE; a single target of any name serves both). With several targets, an absent section name is a gap, not permission to use the other section's origin; the same origin may be declared as both `ui` and `backend`. A BE `**State Check:**` gap requires a named `[env.stores.<name>]` entry: names match `[A-Za-z_][A-Za-z0-9_]*` and are unique case-insensitively. Preserve the plan's store prefix and ground `kind = "sql"` with `engine = "postgres"|"mysql"|"sqlite"`, or `kind = "redis"`, and the required connection fields/defaults from `env-config`. An unprefixed check resolves only when exactly one store is configured. With no selected plan, derive only the environment, existing users and values supported by repository auth/development evidence; do not invent accounts for an unauthenticated app. Later `plan check` can request missing names.
 
+Postgres/MySQL and Redis stores must use an exact-loopback host as defined by `env-config`; the store schema has no TLS settings and rejects every non-loopback store host. Trust approval, personal overrides and inherited client TLS variables cannot authorize a remote/LAN store. If a required store has no grounded local endpoint, return `proposal: null` with the affected `env.stores.<name>.host` prerequisite; do not relabel a remote host as loopback.
+
 ### 2. Propose the QA policy
 
 In `create`, propose these safe defaults, unless explicit caller answers already choose another allowed value:
@@ -89,7 +91,7 @@ If no grounded deletion path exists, return exactly `{"proposal": null, "questio
 
 **Command cleanup — management commands or multiple requests:**
 
-- `kind = "command"`, `run = "<repository-grounded shell command>"`; no placeholders or output declarations. The helper receives `QA_EMAIL`, `QA_ID` (empty when unknown), `QA_TAG` and the engine's inherited environment, never `QA_PASSWORD` or `QA_NEW_PASSWORD`. Exit 0 means successful deletion.
+- `kind = "command"`, `run = "<repository-grounded shell command>"`; no placeholders or output declarations. The helper receives the engine's inherited environment with every `QA_*` variable removed, plus `QA_EMAIL`, `QA_ID` (empty when unknown) and `QA_TAG`; never propose a helper that reads any other `QA_*` variable. Exit 0 means successful deletion.
 - For an admin key, use a repository-grounded inherited `AV_<NAME>` variable and also declare it under `[env.secrets]` as `env:AV_<NAME>` so `engine.log` masks its value even when no recipe resolves the source. For example, `SERVICE_KEY = "env:AV_SUPABASE_SERVICE_ROLE_KEY"` declares the key for masking while the helper reads `$AV_SUPABASE_SERVICE_ROLE_KEY`; the engine does not inject it from configuration. A helper fetching a key any other way, including its own settings or `.env`, must never print it, including on failure. Never interpolate credentials into process arguments.
 
 ### 5. Return the transaction, not the configuration files
