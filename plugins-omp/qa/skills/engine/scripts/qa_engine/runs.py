@@ -32,6 +32,7 @@ from qa_engine.iterations import iteration_close
 from qa_engine.locks import LOCK_GRACE_MINUTES
 from qa_engine.locks import OriginLocks
 from qa_engine.locks import default_lock_directory
+from qa_engine.models import LIMITS
 from qa_engine.models import Run
 from qa_engine.models import StateStop
 from qa_engine.plan import Plan
@@ -46,10 +47,11 @@ from qa_engine.secrets import SecretSet
 from qa_engine.sidecar import SidecarContext
 from qa_engine.sidecar import _prepare_sidecar
 from qa_engine.sidecar import _topic
+from qa_engine.stores import store_lock_key
 
 RUN_ID = re.compile(r"[0-9a-f]{8}\Z")
 RUN_DIRECTORY = re.compile(r"qa-run-[0-9a-f]{8}\Z")
-STOP_REASONS = frozenset({"user-abort", "config-drift", "login-failure", "plan-changed", "cleanup-error", "other"})
+STOP_REASONS = frozenset({"user-abort", "config-drift", "plan-changed", "cleanup-error", "other"})
 STALE_SECONDS = 24 * 3600
 
 
@@ -65,8 +67,8 @@ class RunStartOptions:
 
 def effective_config(config: Config) -> JSON:
     """Pin only QA's environment tables and QA config, with defaults applied."""
-    env = {name: config.env[name] for name in ("targets", "services", "secrets", "values", "database") if name in config.env}
-    return {"env": env, "qa": {**config.qa, "policy": config.policy, "budget": config.budget}}
+    env = {name: config.env[name] for name in ("targets", "services", "secrets", "values", "stores") if name in config.env}
+    return {"env": env, "qa": {**config.qa, **config.policy}}
 
 
 def check_drift(run: Run, config: Config) -> None:
@@ -108,7 +110,8 @@ def start_run(config: Config, plan_path: Path, options: RunStartOptions) -> JSON
         ):
             raise InvalidConfig("baseline file must contain a JSON array of repository-relative paths")
         pre_loop = {name: _fingerprint(repo / name) for name in names}
-    origins = sorted({format_origin(parse_origin(url, origin_only=True)) for url in config.targets.values()})
+    origins = sorted({format_origin(parse_origin(url, origin_only=True)) for url in config.targets.values()}
+                     | {store_lock_key(name, cast(dict[str, object], store), repo) for name, store in config.stores.items()})
     now = time.time()
     tmp = _tmp_root()
     _remove_stale(tmp, repo, now)
@@ -119,7 +122,7 @@ def start_run(config: Config, plan_path: Path, options: RunStartOptions) -> JSON
     try:
         holder = {
             "run_id": run_id, "started": now, "repo": str(repo), "dir": str(directory),
-            "limit_minutes": float(cast(float, config.budget["minutes"])) + LOCK_GRACE_MINUTES,
+            "limit_minutes": LIMITS["minutes"] + LOCK_GRACE_MINUTES,
         }
         for displaced in locks.acquire(origins, holder, now, options.takeover):
             _remove_run_directory(displaced)

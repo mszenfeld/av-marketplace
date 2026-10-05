@@ -43,13 +43,13 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/engine/scripts/qa.py config
 
 In OMP use the absolute path returned by `realpath skill://qa:engine/scripts/qa.py` instead of `CLAUDE_PLUGIN_ROOT`.
 
-Keep the JSON object, including `state`, for `qa:plan-authoring`. Print any validation errors and warnings, but a recognized `missing-file`, `missing-table` or `invalid` state does not prevent authoring: the skill passes `Config: none`, and the planner writes `$QA_…` names and target names grounded in the repository. Without a valid config, `/qa:run`'s `plan check` identifies the gaps for its config flow to fill. Never bootstrap config here, execute sources, ask for trust or read secret values.
+Keep the JSON object, including `state`, for `qa:plan-authoring`. Print any validation errors and warnings, but a recognized `missing-file`, `missing-table` or `invalid` state does not prevent authoring: the skill passes `Config: none`, and the planner writes `$QA_…` names and target names grounded in the repository. Without a valid config, `/qa:run`'s `plan check` identifies missing users, values, targets and stores for its config flow to fill; a missing cleanup recipe alone is a soft gap. Never bootstrap config here, execute sources, ask for trust or read secret values.
 
 An engine/version/I/O error without a recognized config state is not a missing config. Stop and display its error instead of dispatching the planner.
 
 ### Step 3: Author and Review Through the Shared Skill
 
-Load `qa:plan-authoring` with the user's argument verbatim (or `(empty)`), the `config` JSON and the three progress tasks. Follow its Steps 2-4: engine tool detection plus the browser probe, planner draft and at most three reviewer/revision rounds. It sends the same safe `Config:` block to both agents in every round.
+Load `qa:plan-authoring` with the user's argument verbatim (or `(empty)`), the `config` JSON and the three progress tasks. Follow its Steps 2-4: engine tool detection plus the browser probe, planner draft and at most three reviewer/revision rounds. It sends the same safe `Config:` projection of `targets`, `defaults`, `users`, `values` and `stores` to both agents in every round.
 
 Consume its return contract: `plan`, `review` outcome and `open_findings`, plus optional nits and declined findings. On `{"error": ...}`, stop with `Test plan generation failed: <reason>`; do not propose running a nonexistent plan. Never duplicate the skill's detection, drafting or review logic in this command.
 

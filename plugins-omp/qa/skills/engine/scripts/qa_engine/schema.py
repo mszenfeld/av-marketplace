@@ -45,7 +45,7 @@ class TesterDispatch(TypedDict):
     scenarios: list[str]
     edges: dict[str, int]
     guarded: list[str]
-    authenticated: list[str]
+    tag: str
     iteration: int | None
     ingested: bool
     time: float
@@ -122,7 +122,6 @@ class PersistentState(TypedDict):
     scenario_kind: dict[str, str]
     scenario_reason: dict[str, str]
     unverified_issues: list[str]
-    auth_gated_issues: list[str]
     need_info: dict[str, Gap]
     auto_generated: bool
 

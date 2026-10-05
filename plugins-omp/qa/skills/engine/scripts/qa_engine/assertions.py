@@ -6,8 +6,7 @@ import re
 from typing import Any
 
 from qa_engine.common import ASSERTION_KEY
-# A reclassified auth-unverified main flow (AUTH) still mints an issue.
-FAILING = frozenset({"FAIL", "AUTH"})
+FAILING = frozenset({"FAIL"})
 
 
 def _scenario_of(key: str) -> str:

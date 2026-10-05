@@ -1,4 +1,4 @@
-"""Machine-wide target-origin locks and holder lifetime checks."""
+"""Machine-wide target-origin and store-endpoint locks and holder lifetime checks."""
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -20,7 +20,7 @@ LOCK_GRACE_MINUTES = 15
 
 
 class OriginLocks:
-    """One lock file per target origin, shared by every checkout on this machine."""
+    """One lock file per target origin or store endpoint, shared by every checkout."""
 
     def __init__(self, directory: Path) -> None:
         self.directory = directory

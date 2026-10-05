@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from dataclasses import asdict
 import os
 from pathlib import Path
-import re
 import subprocess
 import tempfile
 import tomllib
@@ -166,7 +165,7 @@ class Configuration:
         env = self.table(self.data.get("env", {}), "env")
         for name, value in env.items():
             prefix = f"env.{name}"
-            if name not in {"targets", "services", "secrets", "values", "database", "source_env"}:
+            if name not in {"targets", "services", "secrets", "values", "stores"}:
                 self.warnings.append({"file": self.file_for(prefix), "key": prefix, "warning": "unknown environment sub-table"})
                 continue
             table = self.table(value, prefix)
@@ -176,10 +175,8 @@ class Configuration:
                 self._validate_sources(table, prefix, secret=name == "secrets")
             elif name == "services":
                 self._validate_services(table, env.get("targets", {}))
-            elif name == "source_env":
-                self._validate_source_env(table)
             else:
-                self._validate_database(table)
+                self._validate_stores(table)
 
     def _validate_targets(self, table: Mapping[str, object]) -> None:
         for target, origin in table.items():
@@ -196,38 +193,9 @@ class Configuration:
                 self.error(f"{prefix}.{key}", "invalid value name")
             self.source(source, f"{prefix}.{key}", secret=secret)
 
-    def command_env(self, value: object, key: str) -> None:
-        """Validate explicit references without resolving their source values."""
-        if not isinstance(value, list):
-            self.error(key, "expected a dependency list")
-            return
-        env = self.data.get("env", {})
-        for dependency in value:
-            if not isinstance(dependency, str) or not re.fullmatch(r"(?:value|secret)\.[A-Za-z_][A-Za-z0-9_]*", dependency):
-                self.error(key, "expected value.NAME or secret.NAME dependency")
-                continue
-            kind, name = dependency.split(".", 1)
-            table = env.get("values" if kind == "value" else "secrets", {}) if isinstance(env, dict) else {}
-            if not isinstance(table, dict) or name not in table:
-                self.error(key, f"undefined {kind} dependency")
-
-    def _validate_source_env(self, table: Mapping[str, object]) -> None:
-        sources = source_subset(self.data)
-        for source_key, dependencies in table.items():
-            key = f"env.source_env.{source_key}"
-            source = sources.get(source_key)
-            if not isinstance(source, str) or not source.startswith("cmd:"):
-                self.error(key, "dependency owner must be a configured command source")
-            self.command_env(dependencies, key)
-
     def _validate_services(self, table: Mapping[str, object], targets: object) -> None:
         prefix = "env.services"
-        self.keys(table, {"health", "up", "prepare", "down", "env"}, prefix)
-        if "env" in table:
-            dependencies = self.table(table["env"], f"{prefix}.env")
-            self.keys(dependencies, {"up", "prepare"}, f"{prefix}.env")
-            for operation, value in dependencies.items():
-                self.command_env(value, f"{prefix}.env.{operation}")
+        self.keys(table, {"health", "up", "prepare", "down"}, prefix)
         for key in ("up", "down"):
             if key in table:
                 self._validate_service_command(table[key], f"{prefix}.{key}")
@@ -243,6 +211,12 @@ class Configuration:
         else:
             for probe in health:
                 self._validate_probe(probe, targets)
+        if "up" in table and not table.get("health"):
+            self.error(f"{prefix}.up", "up requires at least one health probe")
+        if "prepare" in table and "up" not in table:
+            self.error(f"{prefix}.prepare", "prepare requires up")
+        if "down" in table and "up" not in table:
+            self.error(f"{prefix}.down", "down requires up")
 
     def _validate_service_command(self, command: object, key: str) -> None:
         if not isinstance(command, str) or not command:
@@ -264,28 +238,46 @@ class Configuration:
             except ConfigError as error:
                 self.error(f"env.targets.{target}", str(error))
 
-    def _validate_database(self, table: Mapping[str, object]) -> None:
-        prefix = "env.database"
-        self.keys(table, {"kind", "host", "port", "user", "name", "password", "path"}, prefix)
-        kind = table.get("kind")
-        if kind not in ("postgres", "mysql", "sqlite"):
-            self.error(f"{prefix}.kind", "expected postgres, mysql or sqlite")
-            return
-        required = ("path",) if kind == "sqlite" else ("host", "user", "name", "password")
-        for key in required:
-            if not isinstance(table.get(key), str) or not table.get(key):
-                self.error(f"{prefix}.{key}", "expected a non-empty string")
-        if "port" in table and (type(table["port"]) is not int or not 1 <= cast(int, table["port"]) <= 65535):
-            self.error(f"{prefix}.port", "expected a port between 1 and 65535")
-        if kind == "sqlite":
-            for key in {"host", "port", "user", "name", "password"} & table.keys():
-                self.error(f"{prefix}.{key}", "not supported for sqlite")
-        else:
-            if "path" in table:
-                self.error(f"{prefix}.path", "only supported for sqlite")
-            if "password" in table:
-                host = table.get("host")
-                self.source(table["password"], f"{prefix}.password", secret=True, literal_allowed=isinstance(host, str) and is_loopback(host))
+    def _validate_stores(self, table: Mapping[str, object]) -> None:
+        if len({name.lower() for name in table}) != len(table):
+            self.error("env.stores", "store names collide")
+        for name, value in table.items():
+            prefix = f"env.stores.{name}"
+            if not NAME.fullmatch(name):
+                self.error(prefix, "invalid store name")
+            entry = self.table(value, prefix)
+            kind = entry.get("kind")
+            if kind == "sql":
+                self.keys(entry, {"kind", "engine", "host", "port", "user", "name", "password", "path"}, prefix)
+                engine = entry.get("engine")
+                if engine not in ("postgres", "mysql", "sqlite"):
+                    self.error(f"{prefix}.engine", "expected postgres, mysql or sqlite")
+                    continue
+                required = ("path",) if engine == "sqlite" else ("host", "user", "name", "password")
+                for key in required:
+                    if not isinstance(entry.get(key), str) or not entry.get(key):
+                        self.error(f"{prefix}.{key}", "expected a non-empty string")
+                if engine == "sqlite":
+                    for key in {"host", "port", "user", "name", "password"} & entry.keys():
+                        self.error(f"{prefix}.{key}", "not supported for sqlite")
+                elif "path" in entry:
+                    self.error(f"{prefix}.path", "only supported for sqlite")
+            elif kind == "redis":
+                self.keys(entry, {"kind", "host", "port", "db", "password"}, prefix)
+                if not isinstance(entry.get("host"), str) or not entry.get("host"):
+                    self.error(f"{prefix}.host", "expected a non-empty string")
+                if "db" in entry and (type(entry["db"]) is not int or cast(int, entry["db"]) < 0):
+                    self.error(f"{prefix}.db", "expected a non-negative integer")
+            else:
+                self.error(f"{prefix}.kind", "expected sql or redis")
+                continue
+            host = entry.get("host")
+            if isinstance(host, str) and host and not is_loopback(host):
+                self.error(f"{prefix}.host", "non-loopback stores require TLS")
+            if "port" in entry and (type(entry["port"]) is not int or not 1 <= cast(int, entry["port"]) <= 65535):
+                self.error(f"{prefix}.port", "expected a port between 1 and 65535")
+            if "password" in entry and not (kind == "sql" and entry.get("engine") == "sqlite"):
+                self.source(entry["password"], f"{prefix}.password", secret=True, literal_allowed=isinstance(host, str) and is_loopback(host))
 
     def state(self, plugin: str) -> str:
         if not self.exists:
@@ -301,8 +293,6 @@ class Configuration:
         subset = source_subset(env, "env")
         if env.get("services"):
             subset["env.services"] = env["services"]
-        if env.get("source_env"):
-            subset["env.source_env"] = env["source_env"]
         targets = env.get("targets", {})
         if isinstance(targets, dict):
             for name, origin in targets.items():
@@ -313,9 +303,6 @@ class Configuration:
                         continue
                     if not is_loopback(host):
                         subset[f"env.targets.{name}"] = origin
-        database = env.get("database", {})
-        if isinstance(database, dict) and isinstance(database.get("host"), str) and not is_loopback(database["host"]):
-            subset["env.database.host"] = database["host"]
         return subset
 
 

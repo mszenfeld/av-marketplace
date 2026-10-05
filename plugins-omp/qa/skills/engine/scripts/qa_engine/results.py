@@ -21,7 +21,7 @@ from qa_engine.schema import SidecarState
 from qa_engine.schema import TesterDispatch
 from qa_engine.verdicts import Evaluation
 from qa_engine.verdicts import _evaluate
-from qa_engine.verdicts import _sends_credential
+from qa_engine.users import record_accounts
 
 RESULT_FENCE = re.compile(r"^(`{3,}|~{3,})[ \t]*json[ \t]+qa-results[ \t]*$", re.MULTILINE)
 STATUSES = frozenset({"PASS", "FAIL", "SKIP", "NEED_INFO"})
@@ -73,10 +73,7 @@ def ingest(run: Run, dispatch_id: str, text: str) -> JSON:
     plan = run_plan(run)
     scenarios = {scenario.id: scenario for scenario in plan.scenarios}
     planned: dict[str, int] = record["edges"]
-    rows, error = _parse_results(text, record["section"], planned)
-    accounts = run.record["config"]["qa"].get("accounts", {})
-    personas = [name for name in accounts.get("personas", []) if isinstance(name, str)] + list(accounts.get("static", {}))
-    authenticated = set(record["authenticated"])
+    rows, entries, error = _parse_results(text, record["section"], planned)
     previous = dict(state["current"])
     verdicts: dict[str, str] = {}
     gaps: dict[str, Gap] = {}
@@ -84,8 +81,7 @@ def ingest(run: Run, dispatch_id: str, text: str) -> JSON:
 
     for sid in record["scenarios"]:
         scenario = scenarios[sid]
-        credentialed = _sends_credential(scenario, authenticated, personas, "login" in accounts)
-        outcome = _evaluate(scenario, rows.get(sid) if rows is not None else None, planned[sid], credentialed, sid in record["guarded"])
+        outcome = _evaluate(scenario, rows.get(sid) if rows is not None else None, planned[sid], sid in record["guarded"])
         _apply_evaluation(state, sid, outcome, record["phase"])
         verdicts[sid] = outcome.verdict
         gaps.update(outcome.gaps)
@@ -95,6 +91,7 @@ def ingest(run: Run, dispatch_id: str, text: str) -> JSON:
     record["ingested"] = True
     _refresh_guards(state, plan)
     result: JSON = {"verdicts": verdicts, "need_info": gaps, "incomplete": incomplete,
+                    "accounts": record_accounts(run, dispatch_id, record["tag"], entries),
                     **_ingest_changes(state, record, scenarios, verdicts, previous)}
     if error is not None:
         result["error"] = error
@@ -120,6 +117,9 @@ def _results_payload(text: str, section: str) -> JSON:
         raise InvalidConfig("qa-results block lacks its scenarios")
     if data.get("section") != section:
         raise InvalidConfig("qa-results block is for another section")
+    entries = data.get("accounts", [])
+    if not isinstance(entries, list) or any(not isinstance(entry, dict) or not isinstance(entry.get("email"), str) for entry in entries):
+        raise InvalidConfig("qa-results block has invalid accounts")
     return data
 
 
@@ -154,12 +154,13 @@ def _result_rows(data: JSON, section: str, planned: Mapping[str, int]) -> dict[s
     return rows
 
 
-def _parse_results(text: str, section: str, planned: Mapping[str, int]) -> tuple[dict[str, JSON] | None, str | None]:
-    """Read the single ``json qa-results`` block; any structural problem rejects the whole block."""
+def _parse_results(text: str, section: str, planned: Mapping[str, int]) -> tuple[dict[str, JSON] | None, list[JSON], str | None]:
+    """Read the single results block; any structural problem rejects it entirely."""
     try:
-        return _result_rows(_results_payload(text, section), section, planned), None
+        payload = _results_payload(text, section)
+        return _result_rows(payload, section, planned), payload.get("accounts", []), None
     except InvalidConfig as error:
-        return None, str(error)
+        return None, [], str(error)
 
 
 def _outcome(item: object, section: str) -> JSON | None:

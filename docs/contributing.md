@@ -44,7 +44,7 @@ Plugins with an OMP edition either have an `omp/overlay/<name>.json`, from which
 
 Configurable plugins share `.av/config.toml` and `.av/local.toml`, own one
 top-level table named after the plugin, and reuse the generic loader and
-environment bootstrap. See [Making a plugin configurable](configuration.md#making-a-plugin-configurable)
+environment bootstrap. See [Making a plugin configurable](#making-a-plugin-configurable)
 for table ownership, validation, trust and documentation requirements.
 
 ### plugin.json
@@ -166,6 +166,50 @@ Shell scripts in `scripts/` are invoked by hooks. They receive the tool input as
    - Clear description of plugin functionality
    - Usage examples
    - Any dependencies or prerequisites
+
+## Configurable plugins
+
+### Making a plugin configurable
+
+1. **Own exactly one top-level table named after the plugin**, such as `[qa]`. Use the root `version` and shared `[env]` schema; read settings only from `.av/config.toml` and `.av/local.toml`, with private values obtained through sources. Do not introduce a plugin-specific config directory or parallel file convention.
+2. **Validate only your table plus the shared schema.** Ignore other plugins' top-level tables; preserve the warning-only treatment of unknown `[env]` sub-tables. Report `state`, `provenance`, file/key diagnostics and masked trust metadata through your engine.
+3. **Pin capabilities before use.** Combine the shared sensitive subset with your sources, executable recipes and keys that widen gates. Scope acceptance by repository and plugin; never resolve a source or run an untrusted command while inspecting config.
+4. **Use the bootstrap protocol below** from the plugin's entry command in `create`, `extend` and `repair` situations. Reuse the generic loader and environment detector, adding only your table's validation, recipes and policy questions.
+5. **Register and document the change together.** Add your table to the `## Tables by plugin` registry in `docs/configuration.md` with a link to its key reference, and document every plugin-owned key, type, default, allowed value and trust-pinned gate in that reference (QA keeps its reference in `docs/configuration.md`; its plugin guide links there). Validation errors are reported by the engine's `config` output, not listed in docs. Document any new shared `[env]` keys in `docs/configuration.md`. Update `docs/configuration.md` in the same change that makes the plugin configurable.
+
+### Bootstrap protocol
+
+The bootstrap belongs in a configurable plugin's entry command, not in a separate init command. Its modes are:
+
+| Mode | Trigger | Input |
+|---|---|---|
+| `create` | The shared file or the plugin's table is missing. | Required names from the work document, if one exists, and plugin creation-time policy choices. |
+| `extend` | The requested work needs configuration keys that are absent. | Exactly those missing keys. |
+| `repair` | A configured recipe or health probe fails. | The failing keys, probes and safe engine error. |
+
+An invalid config is reported and stopped, not overwritten as a missing config. A headless caller stops with a pointer to `docs/configuration.md`; it does not invent answers or write a proposal without approval.
+
+1. **Read-only proposal.** The author uses Read, Grep and Glob with the shared environment skill and the plugin-specific layer. It never runs candidate commands or reads secret values, and never reads or edits `.av/local.toml`. It uses provenance to stop on blocking local overrides. It preserves existing names, unrelated keys, other plugins' sections and comments byte-for-byte. Every proposed target, command and recipe cites its repository evidence in a TOML comment. Unknown facts become questions, not guessed ports, credentials or commands.
+2. **Transaction and questions.** Return `{proposal, questions[]}`. The proposal contains `config_text` (the full proposed `.av/config.toml`), `gitignore_add` (only the exact `.av/local.toml` and `.av/secrets.local.env` strings when needed; all other paths, negations and wildcards are rejected) and `allowed_keys` (the smallest authorized dotted-key scopes). In `create`, add only the shared keys the work needs plus the plugin's table, and collect unresolved prerequisites and creation-time policy choices together. The bootstrap never creates or fills `.av/secrets.local.env`; unresolved values become `file:.av/secrets.local.env#NAME` references.
+3. **Preview without writes.** `config preview <proposal>` validates the merged config and proposed ignore rules, checks that only `allowed_keys` change and protected sections/comments remain byte-identical, and returns a `diff` covering both the masked `.av/config.toml` changes and every `.gitignore` addition, the **complete resulting trust subset**, its hash and a snapshot of `.av/config.toml` and `.gitignore`. The ignore diff omits unrelated existing lines. Include sensitive settings already in `[env]`, even if another plugin added them; mask literals. On preview errors, allow one corrected read-only proposal round, then stop if errors remain.
+4. **One approval.** Show the diff, ignore additions and complete trust subset together and ask for one confirmation of the write and trust hash. Declining writes nothing. Creation-time policy questions precede this confirmation; they do not replace it.
+5. **Compare-and-swap apply.** `config apply <proposal> --snapshot S --approved-hash H` applies only the approved preview. If either file changed since preview, it writes nothing and reports a conflict. Otherwise it replaces the files atomically, revalidates and records trust **only for the approved hash**. Validation/hash failures restore the prior files only while they still contain the engine's own writes; concurrent edits are left intact and reported. Do not bypass preview or accept a different hash during apply.
+6. **Missing private inputs.** If the work needs dotenv keys that are not populated, name the keys for the user to fill and stop without printing or asking for their values. Then re-check the work against the resulting config. A plugin repairing an active run must follow its own cleanup/restart contract before using the changed configuration.
+
+### Shared code
+
+The plugin-neutral implementation currently lives in QA:
+
+- [`plugins/qa/skills/engine/scripts/av_config/`](../plugins/qa/skills/engine/scripts/av_config/): `files.py` owns loading/merge, provenance and shared `[env]` validation; `sources.py` owns value sources, restrictions and masking; `origins.py` owns origins/loopback; `trust.py` owns per-plugin pins; `transaction.py` owns section-preserving guarded writes. The package has no QA imports. Consumers import from the owning module; its `__init__.py` does not re-export the old monolithic API.
+- [`plugins/qa/skills/env-config/`](../plugins/qa/skills/env-config/SKILL.md): read-only repository detection and proposal rules for `[env]`, with no QA policy or recipe logic.
+
+Consumers pass their declared value-source key pattern to `av_config.sources.mask` and `av_config.transaction.ConfigTransaction`; the shared layer does not infer source positions from string contents. The same pattern applies to nested configuration tables, dotted trust-subset keys and persisted run metadata.
+
+Schema validators register each value source with `Configuration.source(value, key, secret=..., literal_allowed=...)`. It records a `SourceRule` with the key's effective-file provenance and restrictions. Consumers resolve through `Configuration.resolve(source, key, trusted=..., execute=...)`, which revalidates under that recorded rule and rejects any key the validator did not register; they must not infer restrictions from key names again.
+
+The optional executor receives `(command, key)` and returns decoded stdout, raising a safe `ConfigError` on execution failure. Without it, `av_config` uses its bounded subprocess executor. The shared resolver strips trailing newlines and rejects empty command output in both cases. QA supplies an executor that runs the command with the engine's inherited environment and logs only exit/line-count summaries on success, never source stdout/stderr; failed source output is discarded. Its runtime keeps only trust checks and caching around the shared resolution entry point.
+
+When the **second configurable plugin** is introduced, extract this generic layer into a small core plugin the consumers require, or ship byte-identical copies checked in CI. Choose that packaging then; do not create a second loader or `[env]` detector. Each plugin keeps only its call site and its own table's validation, recipes and policy choices.
 
 ## Pull Request Requirements
 

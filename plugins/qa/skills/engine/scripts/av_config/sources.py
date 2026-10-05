@@ -90,7 +90,7 @@ def _execute_source(command: str, key: str, *, repo: Path, environ: Mapping[str,
 
 
 class ValueSources:
-    """Validate sources without resolving them; require trust before resolution."""
+    """Validate sources first; require trust before resolution."""
 
     def __init__(self, repo: Path, *, plugin_prefix: str, environ: Mapping[str, str] | None = None, timeout: float = 30, gitignore_text: str | None = None) -> None:
         self.repo = repo.resolve()

@@ -14,41 +14,35 @@ import time
 import unittest
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/engine/scripts"
+sys.path.insert(0, str(SCRIPTS))
+
+from qa_engine.models import LIMITS
+
 RESULTS = Path(__file__).parent / "fixtures/results"
 BASE = '''version = 1
 [env.targets]
-api = "http://localhost:8000"
-web = "http://localhost:5174"
+backend = "http://localhost:8000"
+ui = "http://localhost:5173"
 supabase = "http://127.0.0.1:54321"
-[qa.defaults]
-be_target = "api"
-fe_target = "web"
-[qa.policy]
+[qa]
 fix = "approve"
-[qa.accounts]
-personas = ["user"]
-[qa.accounts.static.user]
-email = "literal:qa@test.local"
-password = "env:QA_TEST_PASSWORD"
-[qa.accounts.login]
-kind = "command"
-run = 'printf "{\\"token\\":\\"state-test-token\\"}"'
-outputs = ["token"]
 '''
 PLAN = '''# Test Plan
 ## FE Test Scenarios
 ### FE-01: Display items
+- **Writes:** no
 - **URL:** /items
 - **Expected:** Items are displayed. (src/app.py:1)
 ## BE Test Scenarios
 ### BE-01: Fetch items
+- **Writes:** no
 - **Method:** GET /items
-- **Headers:** Authorization: Bearer $QA_USER_TOKEN
 - **Request payload:** {"name": "sample-item"}
 - **Expected:** 200 items returned. (src/app.py:1)
 - **Edge cases:**
   - Missing item: 404. (src/app.py:2)
 ### BE-02: Health
+- **Writes:** no
 - **Method:** GET /health
 - **Expected:** 200 healthy. (src/app.py:1)
 '''
@@ -75,7 +69,6 @@ class StateTests(unittest.TestCase):
         self.git("add", "src")
         self.git("commit", "-qm", "initial")
         self.put(BASE, ".av/config.toml")
-        self.put('[qa.accounts.static.user]\npassword = "literal:password"\n', ".av/local.toml")
         self.plan = self.put(PLAN, "docs/testing/plans/2026-09-30-state-test-plan.md")
         self.trust()
 
@@ -101,11 +94,14 @@ class StateTests(unittest.TestCase):
     def start(self, **kwargs: object) -> dict[str, object]:
         result = self.cli("run", "start", str(self.plan), **kwargs)
         if kwargs.get("code", 0) == 0:
-            self.cli("accounts", "provision", "--run", result["run"])
+            self.cli("users", "provision", "--run", result["run"])
         return result
 
     def sidecar(self, run: dict[str, object]) -> dict[str, object]:
         return json.loads(Path(run["sidecar"]).read_text())
+
+    def change_state(self, run: dict[str, object], **extra: object) -> None:
+        Path(run["sidecar"]).write_text(json.dumps({**self.sidecar(run), **extra}))
 
     def dispatch(self, run: dict[str, object], section: str = "BE", phase: str = "baseline") -> dict[str, object]:
         return self.cli("dispatch", "--run", run["run"], "tester", "--section", section, "--phase", phase)
@@ -126,6 +122,46 @@ class StateTests(unittest.TestCase):
                                        f"**Scenario:** BE-01\n**Location:** {location}\n**Problem:** Wrong items\n"
                                        "- **Expected:** 200 items returned. (src/app.py:1)\n**Remediation:** Fix items\n")
 
+    def test_run_record_origins_include_store_keys(self) -> None:
+        for store, expected in (
+            ('kind="sql"\nengine="postgres"\nhost="127.0.0.1"\nport=54322\nuser="u"\nname="app"\npassword="literal:pw"\n', "sql:127.0.0.1:54322/app"),
+            ('kind="sql"\nengine="sqlite"\npath="qa.sqlite"\n', f"sql:{self.repo.resolve() / 'qa.sqlite'}"),
+            ('kind="redis"\nhost="127.0.0.1"\n', "redis:127.0.0.1:6379/0"),
+        ):
+            with self.subTest(store=store):
+                self.put(BASE + '[env.stores.main]\n' + store, ".av/config.toml")
+                self.trust()
+                run = self.start()
+                record = json.loads((Path(run["dir"]) / "run.json").read_text())
+                self.assertIn(expected, record["origins"])
+                self.cli("run", "end", "--run", run["run"])
+
+    def test_store_endpoints_are_locked_across_disjoint_targets(self) -> None:
+        store = '[env.stores.main]\nkind="sql"\nengine="postgres"\nhost="127.0.0.1"\nport=54322\nuser="u"\nname="app"\npassword="literal:pw"\n'
+        self.put('version=1\n[env.targets]\nbackend="http://localhost:8000"\n[qa]\n' + store, ".av/config.toml")
+        self.trust()
+        holder = self.start()
+        second = self.root / "second"
+        second.mkdir()
+        subprocess.run(["git", "init", "-q", str(second)], check=True)
+        subprocess.run(["git", "-C", str(second), "-c", "user.name=QA", "-c", "user.email=qa@test.local", "commit", "--allow-empty", "-qm", "fixture"], check=True)
+        config = second / ".av/config.toml"
+        config.parent.mkdir()
+        config.write_text('version=1\n[env.targets]\nbackend="http://localhost:9000"\n[qa]\n' + store)
+        plan = second / "plan.md"
+        plan.write_text(PLAN)
+        def cli(*args: str) -> dict[str, object]:
+            result = subprocess.run([sys.executable, str(SCRIPTS / "qa.py"), *args, "--repo", str(second)], env=self.env, capture_output=True, text=True)
+            return json.loads(result.stdout)
+        cli("trust", "accept", str(cli("config")["trust_hash"]))
+        blocked = cli("run", "start", str(plan))
+        self.assertEqual(blocked["holder"]["run"], holder["run"])
+        self.assertEqual(blocked["holder"]["origin"], "sql:127.0.0.1:54322/app")
+        config.write_text(config.read_text().replace('name="app"', 'name="other"'))
+        other = cli("run", "start", str(plan))
+        self.assertIn("run", other)
+        cli("run", "end", "--run", str(other["run"]))
+
     def failed(self, *, second_pass: bool = True) -> dict[str, object]:
         run = self.start()
         self.ingest(run, self.dispatch(run), outcome("FAIL", 500), second=outcome() if second_pass else outcome("FAIL", 500))
@@ -143,7 +179,7 @@ class StateTests(unittest.TestCase):
             "misspelled key": lambda state: state.update(dispatchCount=1),
             "boolean dispatch count": lambda state: state.update(dispatch_count=True),
             "invalid assertion status": lambda state: state["assertions"]["BE-01"].update(observed_status="200"),
-            "invalid authenticated persona": lambda state: state["dispatches"][dispatch["dispatch"]].update(authenticated=[1]),
+            "invalid dispatch tag": lambda state: state["dispatches"][dispatch["dispatch"]].update(tag=[1]),
         }
         for name, corrupt in corruptions.items():
             with self.subTest(name=name):
@@ -238,8 +274,8 @@ class StateTests(unittest.TestCase):
 
     def test_ipv6_origin_locks_use_bracketed_canonical_origins(self) -> None:
         config = BASE.replace("localhost:8000", "[::1]:8000")
-        config = config.replace('web = "http://localhost:5174"\n', "").replace('supabase = "http://127.0.0.1:54321"\n', "")
-        self.put(config.replace('fe_target = "web"', 'fe_target = "api"'), ".av/config.toml")
+        config = config.replace('ui = "http://localhost:5173"\n', "").replace('supabase = "http://127.0.0.1:54321"\n', "")
+        self.put(config, ".av/config.toml")
         self.trust()
         run = self.start()
         conflict = self.start(code=1)
@@ -250,9 +286,9 @@ class StateTests(unittest.TestCase):
 
     def test_shared_origins_exclude_and_disjoint_origins_succeed(self) -> None:
         run = self.start()
-        self.put(BASE.replace('web = "http://localhost:5174"\n', '').replace('fe_target = "web"\n', ''), ".av/config.toml")
+        self.put(BASE.replace('ui = "http://localhost:5173"\n', ''), ".av/config.toml")
         self.assertIn("live run", self.start(code=1)["error"])
-        self.put(BASE.replace(":8000", ":9000").replace(":5174", ":9174").replace(":54321", ":54322"), ".av/config.toml")
+        self.put(BASE.replace(":8000", ":9000").replace(":5173", ":9173").replace(":54321", ":54322"), ".av/config.toml")
         self.trust()
         other = self.start()
         self.assertNotEqual(run["run"], other["run"])
@@ -389,12 +425,11 @@ class StateTests(unittest.TestCase):
                 self.cli("run", "end", "--run", run["run"])
 
     def test_all_verdict_precedence_rules(self) -> None:
-        self.plan.write_text(PLAN.replace("- **Headers:** Authorization: Bearer $QA_USER_TOKEN\n", ""))
         cases = [(outcome("FAIL", 500), outcome("NEED_INFO", kind="tool", missing=["jq"]), "fail"),
                  (outcome("FAIL", 401), outcome("FAIL", 500), "fail"),
                  (outcome("PASS"), outcome("NEED_INFO", kind="fixture", missing=["upload"]), "need-info"),
-                 (outcome("FAIL", 401), outcome("NEED_INFO", kind="tool", missing=["jq"]), "need-info"),
-                 (outcome("FAIL", 401), outcome("SKIP"), "auth-unverified"),
+                 (outcome("FAIL", 401), outcome("NEED_INFO", kind="tool", missing=["jq"]), "fail"),
+                 (outcome("FAIL", 401), outcome("SKIP"), "fail"),
                  (outcome("PASS"), outcome("SKIP", skip_reason="harness error: failed"), "skip"),
                  (outcome("PASS"), outcome("PASS"), "pass")]
         for main, edge, verdict in cases:
@@ -416,42 +451,17 @@ class StateTests(unittest.TestCase):
         self.assertEqual(self.sidecar(run)["need_info"], {"FE-01": {"kind": "tool", "missing": ["browser"]}})
         self.assertEqual(self.sidecar(run)["scenario_kind"], {"FE-01": "feature", "BE-01": "feature", "BE-02": "sanity"})
 
-    def test_authentication_record_controls_main_flow_not_edge_failure(self) -> None:
-        self.plan.write_text(PLAN.replace("- **Headers:** Authorization: Bearer $QA_USER_TOKEN\n", ""))
-        run = self.start()
-        self.ingest(run, self.dispatch(run), outcome("FAIL", 401), outcome("FAIL", 500))
-        assigned = self.cli("issues", "--run", run["run"])["assign"]
-        self.assertEqual([(row["qa"], row["key"]) for row in assigned], [("QA-001", "BE-01"), ("QA-002", "BE-01 (edge 1)")])
-        self.report(run, "QA-002", severity="CRITICAL")
-        chosen = self.cli("candidates", "--run", run["run"])
-        self.assertEqual([row["qa"] for row in chosen["fix"]], ["QA-002"])
-        self.assertEqual(self.sidecar(run)["auth_gated_issues"], ["QA-001"])
-
-    def test_cookie_credential_uses_longest_valid_persona_prefix(self) -> None:
-        config = BASE.replace('personas = ["user"]', 'personas = ["user", "user_cookie"]')
-        config = config.replace(
-            'run = \'printf "{\\"token\\":\\"state-test-token\\"}"\'\noutputs = ["token"]',
-            'run = \'printf "{\\"cookies\\":{\\"session\\":\\"state-test-cookie\\"}}"\'\noutputs = {cookies = ["session"]}',
-        )
-        self.put(config, ".av/config.toml")
-        self.plan.write_text(PLAN.replace("$QA_USER_TOKEN", "${QA_USER_COOKIE_SESSION}"))
-        self.trust()
-        run = self.start()
-        dispatch = self.dispatch(run)
-        result = self.ingest(run, dispatch, outcome("FAIL", 401))
-        self.assertEqual(result["verdicts"]["BE-01"], "fail")
-        self.assertEqual(self.sidecar(run)["assertions"]["BE-01"]["auth"], True)
-
-    def test_authenticated_failure_is_auth_flagged_approve_or_auto(self) -> None:
+    def test_auth_failure_is_a_flagged_fail_never_auto_fixed(self) -> None:
         for mode in ("approve", "auto"):
             with self.subTest(mode=mode):
                 self.put(BASE.replace('fix = "approve"', f'fix = "{mode}"'), ".av/config.toml")
                 self.trust()
                 run = self.start()
                 dispatch = self.dispatch(run)
-                state = self.sidecar(run)
-                self.assertEqual(state["dispatches"][dispatch["dispatch"]]["authenticated"], ["user"])
+                self.assertRegex(dispatch["tag"], r"^[0-9a-f]{8}$")
+                self.assertNotIn("refreshed", dispatch)
                 self.assertEqual(self.ingest(run, dispatch, outcome("FAIL", 401))["verdicts"]["BE-01"], "fail")
+                self.assertTrue(self.sidecar(run)["assertions"]["BE-01"]["auth"])
                 self.cli("issues", "--run", run["run"])
                 self.report(run)
                 chosen = self.cli("candidates", "--run", run["run"])
@@ -478,16 +488,6 @@ class StateTests(unittest.TestCase):
         self.assertEqual(self.cli("candidates", "--run", run["run"])["fix"], [])
         self.report(run, location="`src/app.py:1` (was: unknown:0)", severity="CRITICAL")
         self.assertEqual(self.cli("candidates", "--run", run["run"])["fix"][0]["qa"], "QA-001")
-
-    def test_candidates_drop_medium_issue_below_high_minimum(self) -> None:
-        self.put(BASE.replace('fix = "approve"', 'fix = "approve"\nmin_severity = "HIGH"'), ".av/config.toml")
-        run = self.start()
-        self.ingest(run, self.dispatch(run), outcome("FAIL", 400))
-        assigned = self.cli("issues", "--run", run["run"])["assign"]
-        self.assertEqual([(row["qa"], row["key"]) for row in assigned], [("QA-001", "BE-01")])
-        self.report(run, severity="MEDIUM")
-        self.assertEqual(self.cli("candidates", "--run", run["run"]),
-                         {"fix": [], "dropped": [{"qa": "QA-001", "reason": "below min_severity"}]})
 
     def test_unverified_and_mechanical_severity(self) -> None:
         self.plan.write_text(PLAN.replace("200 items returned. (src/app.py:1)", "200 items returned. (unverified — confirm at run time)"))
@@ -544,11 +544,11 @@ class StateTests(unittest.TestCase):
         self.assertTrue(history["warnings"])
 
     def test_dispatch_budget_does_not_gate_final_run(self) -> None:
-        self.put(BASE + '[qa.budget]\ndispatches = 1\n', ".av/config.toml")
         run = self.failed()
+        self.change_state(run, dispatch_count=LIMITS["dispatches"])
         self.assertEqual(self.cli("iteration", "open", "--run", run["run"])["reason"], "dispatch budget exhausted")
         self.cli("dispatch", "--run", run["run"], "tester", "--section", "BE", "--phase", "iteration", code=1)
-        self.assertEqual(self.dispatch(run, phase="final")["dispatch_count"], 2)
+        self.assertEqual(self.dispatch(run, phase="final")["dispatch_count"], LIMITS["dispatches"] + 1)
 
     def test_recorded_tester_answers_ingest(self) -> None:
         run = self.start()

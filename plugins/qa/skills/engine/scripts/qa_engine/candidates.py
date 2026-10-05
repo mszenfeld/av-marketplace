@@ -1,4 +1,4 @@
-"""Fix eligibility and remaining failures at the configured severity floor."""
+"""Fix eligibility and remaining assertion failures."""
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from qa_engine.assertions import FAILING
 from qa_engine.common import assertion_keys
-from qa_engine.assertions import _scenario_of
 from qa_engine.common import SEVERITIES
 from qa_engine.issue_blocks import IssueBlock
 from qa_engine.issue_blocks import _issue_blocks
@@ -27,7 +26,6 @@ class CandidateContext:
     state: SidecarState
     claims: Mapping[str, list[str]]
     blocks: Mapping[str, IssueBlock]
-    floor: int
 
 
 def candidates(run: Run) -> JSON:
@@ -36,7 +34,6 @@ def candidates(run: Run) -> JSON:
     plan = run_plan(run)
     context = CandidateContext(
         state=state, claims=_claims(state), blocks=_issue_blocks(run.report_text()),
-        floor=SEVERITIES.index(run.policy["min_severity"]),
     )
     auto = run.policy["fix"] == "auto"
     fix: list[JSON] = []
@@ -82,36 +79,11 @@ def _drop_reason(
         return "needs manual assertion mapping"
     if record is None or record["result"] not in FAILING:
         return "assertion not failing"
-    if SEVERITIES.index(block.severity) < context.floor:
-        return "below min_severity"
-    if key == scenario.id and qa in context.state["auth_gated_issues"]:
-        return "auth-gated main flow"
     return None
 
 
-def failures_at_floor(run: Run) -> bool:
-    """Whether a failing scenario has an issue at or above ``min_severity``.
-
-    An issue whose severity is not rendered yet counts, so a missing report
-    never ends the loop as green.
-    """
-    state = run.state
-    blocks = _issue_blocks(run.report_text())
-    claims = _claims(state)
-    floor = SEVERITIES.index(run.policy["min_severity"])
-    for sid, verdict in state["current"].items():
-        if verdict != "fail":
-            continue
-        owners = [
-            qa for key, record in state["assertions"].items()
-            if _scenario_of(key) == sid and record["result"] in FAILING for qa in claims.get(key, [])
-        ]
-        if not owners:
-            return True
-        for qa in owners:
-            block = blocks.get(qa)
-            if block is None or block.severity not in SEVERITIES or SEVERITIES.index(block.severity) >= floor:
-                return True
-    return False
+def failures_remain(run: Run) -> bool:
+    """Whether any scenario still has a failing assertion."""
+    return any(verdict == "fail" for verdict in run.state["current"].values())
 
 

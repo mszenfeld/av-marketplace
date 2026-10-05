@@ -61,10 +61,9 @@ def assign_issues(run: Run) -> JSON:
 
 
 def _refresh_guards(state: SidecarState, plan: Plan) -> None:
-    """Recompute unverified and auth-gated membership for every mapped issue with data."""
+    """Recompute unverified membership for every mapped issue with data."""
     scenarios = {scenario.id: scenario for scenario in plan.scenarios}
     unverified = set(state["unverified_issues"])
-    gated = set(state["auth_gated_issues"])
     for qa, key in state["issue_assertion"].items():
         scenario = scenarios.get(_scenario_of(key))
         if scenario is None or key not in assertion_keys(scenario):
@@ -73,16 +72,7 @@ def _refresh_guards(state: SidecarState, plan: Plan) -> None:
             unverified.add(qa)
         else:
             unverified.discard(qa)
-        record = state["assertions"].get(key)
-        if record is None:
-            continue
-        # Only a bare-ID (main-flow) issue can be auth-gated; edge issues stay eligible.
-        if key == scenario.id and record["result"] == "AUTH":
-            gated.add(qa)
-        else:
-            gated.discard(qa)
     state["unverified_issues"] = _sorted_ids(unverified)
-    state["auth_gated_issues"] = _sorted_ids(gated)
 
 
 def _claims(state: SidecarState) -> dict[str, list[str]]:

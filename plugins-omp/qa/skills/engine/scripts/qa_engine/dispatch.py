@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import re
+import secrets
 import time
 from typing import cast
 
 from av_config.errors import InvalidConfig
-from qa_engine.accounts import refresh
+from qa_engine.users import prepare_capture
 from qa_engine.assertions import _scenario_of
 from qa_engine.candidates import candidates
 from qa_engine.config import Config
@@ -25,7 +26,7 @@ from qa_engine.schema import TesterDispatch
 
 
 def dispatch_tester(run: Run, config: Config, section: str, phase: str) -> JSON:
-    """Log in section personas before recording a tester assignment."""
+    """Record a tester assignment with its private capture directory and tag."""
     check_drift(run, config)
     state = run.state
     plan = run_plan(run)
@@ -39,17 +40,21 @@ def dispatch_tester(run: Run, config: Config, section: str, phase: str) -> JSON:
         raise StateStop("no iteration is open; run iteration open first")
 
     scenarios = {scenario.id: scenario for scenario in plan.scenarios}
-    guarded = [sid for sid in cast(list[str], check_plan(plan, config)["guarded"]) if sid in ids]
+    checked = check_plan(plan, config)
+    guarded = [sid for sid in cast(list[str], checked["guarded"]) if sid in ids]
+    checks = cast(dict[str, list[str]], checked["state_checks"])
+    stores = sorted({store for sid in ids for store in checks.get(sid, [])})
     edges = {sid: len(scenarios[sid].edges) for sid in ids}
-    authenticated = refresh(run, config, section)
+    tag = secrets.token_hex(4)
     dispatch = _record_dispatch(state, {
         "kind": "tester", "section": section, "phase": phase, "scenarios": ids, "edges": edges,
-        "guarded": guarded, "authenticated": sorted(set(authenticated)),
+        "guarded": guarded, "tag": tag,
         "iteration": opened["iteration"] if opened else None, "ingested": False, "time": time.time(),
     })
+    prepare_capture(run, dispatch)
 
     return {
-        "dispatch": dispatch, "scenarios": ids, "edges": edges, "guarded": guarded, "refreshed": authenticated,
+        "dispatch": dispatch, "scenarios": ids, "edges": edges, "guarded": guarded, "tag": tag, "stores": stores,
         "dispatch_count": state["dispatch_count"], "budget_left": _budget_left(run),
     }
 
@@ -73,7 +78,7 @@ def dispatch_fix(run: Run, config: Config, qa: str) -> JSON:
     })
 
     return {
-        "dispatch": dispatch, "qa": qa, "scenarios": [_scenario_of(entry["key"])], "edges": {}, "refreshed": [],
+        "dispatch": dispatch, "qa": qa, "scenarios": [_scenario_of(entry["key"])], "edges": {},
         "dispatch_count": state["dispatch_count"], "budget_left": _budget_left(run),
     }
 

@@ -33,7 +33,7 @@ class RedactTests(unittest.TestCase):
         environment = {
             name: value
             for name, value in os.environ.items()
-            if not name.startswith(("QA_", "PG", "MYSQL_")) and name != "SQLITE_DB"
+            if not name.startswith(("QA_", "PG", "MYSQL_", "REDIS", "STORE_")) and name != "SQLITE_DB"
         }
         environment.update(values or {})
 
@@ -51,17 +51,87 @@ class RedactTests(unittest.TestCase):
         body = {
             "postgresPort": "54322",
             "mysqlPort": "3307",
-            "message": "Postgres listens on 54322; MySQL listens on 3307.",
+            "redisPort": "6379", "redisDb": "0",
+            "message": "Postgres listens on 54322; MySQL listens on 3307; Redis listens on 6379.",
             "avatarUrl": "http://localhost:54322/storage/avatars/user.png",
         }
         result = self.redact(
             json.dumps(body),
-            names=("PGPORT", "MYSQL_TCP_PORT"),
-            values={"PGPORT": "54322", "MYSQL_TCP_PORT": "3307"},
+            names=("PGPORT", "MYSQL_TCP_PORT", "REDIS_PORT", "REDIS_DB"),
+            values={"PGPORT": "54322", "MYSQL_TCP_PORT": "3307", "REDIS_PORT": "6379", "REDIS_DB": "0"},
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), body)
+
+    def test_qa_values_with_client_port_suffixes_are_masked(self) -> None:
+        for suffix in ("PGPORT", "MYSQL_TCP_PORT", "REDIS_PORT", "REDIS_DB"):
+            with self.subTest(suffix=suffix):
+                values = {
+                    suffix: "5400",
+                    f"STORE_MAIN_{suffix}": "5401",
+                    f"QA_{suffix}": "private-direct",
+                    f"QA_LEGACY_{suffix}": "private-legacy",
+                }
+                result = self.redact(
+                    json.dumps({
+                        "native": "5400",
+                        "store": "5401",
+                        "message": ["private-direct", "private-legacy"],
+                    }),
+                    names=tuple(values),
+                    values=values,
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {
+                    "native": "5400",
+                    "store": "5401",
+                    "message": ["***", "***"],
+                })
+
+    def test_captured_credential_names_are_masked_under_any_key(self) -> None:
+        result = self.redact(
+            '{"message":"welcome private-token"}',
+            names=("QA_CAPTURED_OWNER_TOKEN",),
+            values={"QA_CAPTURED_OWNER_TOKEN": "private-token"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"message": "welcome ***"})
+
+    def test_store_names_and_redis_credentials_are_masked(self) -> None:
+        values = {"REDIS_HOST": "cache.internal", "REDISCLI_AUTH": "cache-secret",
+                  "STORE_MAIN_PGPASSWORD": "sql-secret", "STORE_CACHE_REDIS_PORT": "6379",
+                  "STORE_CACHE_REDIS_DB": "0"}
+        result = self.redact(json.dumps(values), names=tuple(values), values=values)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {**values, "REDIS_HOST": "***", "REDISCLI_AUTH": "***", "STORE_MAIN_PGPASSWORD": "***"})
+
+    def test_captured_cookie_masks_its_value_when_echoed_under_any_key(self) -> None:
+        for name, cookie in (("QA_CAPTURED_OWNER_COOKIE", "session=x'y"), ("QA_CAPTURED_OWNER_COOKIE_2", "session=x'y; Path=/")):
+            with self.subTest(name=name):
+                result = self.redact(
+                    json.dumps({"note": "x'y", "message": cookie, "public": "welcome"}),
+                    names=(name,),
+                    values={name: cookie},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"note": "***", "message": "***", "public": "welcome"})
+
+    def test_short_captured_cookie_preserves_status_and_numbers(self) -> None:
+        for value in ("1", "12"):
+            with self.subTest(value=value):
+                cookie = f"consent={value}"
+                body = {"id": 10, "count": 1, "code": 123, "note": value, "cookie": cookie}
+                result = self.redact(
+                    f"HTTP/1.1 201 Created\r\nSet-Cookie: {cookie}\r\n\r\n" + json.dumps(body),
+                    names=("QA_CAPTURED_OWNER_COOKIE",),
+                    values={"QA_CAPTURED_OWNER_COOKIE": cookie},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                headers, sanitized = result.stdout.split("\n\n", 1)
+                self.assertEqual(headers.splitlines(), ["HTTP/1.1 201 Created", "Set-Cookie: ***"])
+                self.assertEqual(json.loads(sanitized), {**body, "cookie": "***"})
 
     def test_unknown_or_malformed_names_abort_without_emitting_the_body(self) -> None:
         invalid_names = (

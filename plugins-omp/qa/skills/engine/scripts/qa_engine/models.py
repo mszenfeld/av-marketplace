@@ -4,7 +4,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
 from av_config.errors import ConfigError
 from qa_engine.files import _plan_hash
@@ -12,6 +11,9 @@ from qa_engine.files import display_path
 from qa_engine.schema import JSON
 from qa_engine.schema import RunRecord
 from qa_engine.schema import SidecarState
+
+LIMITS: dict[str, int] = {"iterations": 3, "dispatches": 50, "minutes": 30}
+"""Fixed loop limits; not configurable."""
 
 
 class StateStop(ConfigError):
@@ -34,11 +36,12 @@ class Run:
 
     @property
     def policy(self) -> JSON:
-        return cast(JSON, self.record["config"]["qa"]["policy"])
+        qa = self.record["config"]["qa"]
+        return {key: qa[key] for key in ("fix", "mutations", "start_services")}
 
     @property
-    def budget(self) -> JSON:
-        return cast(JSON, self.record["config"]["qa"]["budget"])
+    def budget(self) -> dict[str, int]:
+        return LIMITS
 
     @property
     def plan_path(self) -> Path:

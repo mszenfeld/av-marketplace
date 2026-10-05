@@ -47,11 +47,11 @@ loses an OMP edition updates its row.
 Configurable plugins read settings only from `.av/config.toml` and
 `.av/local.toml`, own one top-level table named after the plugin, and share
 `[env]`. Create, extend and repair their configuration through the
-[bootstrap protocol](docs/configuration.md#bootstrap-protocol), using the
+[bootstrap protocol](docs/contributing.md#bootstrap-protocol), using the
 shared generic layer — never a second loader or `[env]` detector.
 Update `docs/configuration.md` in the same change; it is the shared schema
 and plugin-table registry. See
-[Making a plugin configurable](docs/configuration.md#making-a-plugin-configurable).
+[Making a plugin configurable](docs/contributing.md#making-a-plugin-configurable).
 
 ## OMP edition
 

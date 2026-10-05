@@ -9,6 +9,13 @@ from pathlib import Path
 from av_config.errors import ConfigError
 from av_config.sources import source_subset
 
+STORE_SECRET_SUFFIXES = ("_PGPASSWORD", "_MYSQL_PWD", "_REDISCLI_AUTH")
+
+
+def private_values(values: Mapping[str, object]) -> dict[str, object]:
+    return {key: value for key, value in values.items()
+            if not key.startswith("STORE_") or key.endswith(STORE_SECRET_SUFFIXES)}
+
 
 class SecretSet:
     """Mask literal/env sources, resolved values and private run-state strings.
@@ -18,6 +25,7 @@ class SecretSet:
     and unrelated environment values remain readable. Raw and JSON-escaped
     strings are masked longest-first. Stop details include short secrets; engine
     logs collect only values at least four characters long.
+    Store connection metadata other than passwords is public and is not collected from secrets.json.
     """
 
     def __init__(self, directory: Path, *configs: Mapping[str, object], minimum_length: int = 1) -> None:
@@ -30,14 +38,13 @@ class SecretSet:
                         self.remember(source[8:])
                     elif source.startswith("env:"):
                         self.remember(os.environ.get(source[4:]))
-        for name in ("accounts.private.json", "secrets.json"):
-            try:
-                value = json.loads((directory / name).read_text())
-            except FileNotFoundError:
-                continue
-            except (OSError, UnicodeError, ValueError) as error:
-                raise ConfigError(f"{name}: private state unavailable") from error
-            self.remember(value)
+        try:
+            value = json.loads((directory / "secrets.json").read_text())
+        except FileNotFoundError:
+            return
+        except (OSError, UnicodeError, ValueError) as error:
+            raise ConfigError("secrets.json: private state unavailable") from error
+        self.remember(private_values(value) if isinstance(value, Mapping) else value)
 
     def remember(self, value: object) -> None:
         """Add resolved or private values, including strings in nested objects."""
