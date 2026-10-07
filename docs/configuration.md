@@ -37,7 +37,7 @@ All paths are relative to the project's repository root, not the installed plugi
 | `.av/local.toml` | No | Personal overrides using the same schema. Must be untracked and git-ignored. |
 | `.av/secrets.local.env` | No | Private dotenv values referenced through `file:` sources. Never loaded automatically. |
 
-Local settings replace shared settings key-by-key; arrays replace shared arrays rather than joining them. The shared file must exist and contain the consuming plugin's table; source permissions follow each key's supplying file.
+Local settings replace shared settings key by key, and a local array replaces the shared array whole instead of joining it. The shared file must exist and contain the consuming plugin's table. Source permissions follow the file that supplies each key.
 
 Add these entries to the project's `.gitignore`:
 
@@ -141,7 +141,7 @@ Postgres, MySQL and Redis hosts must be exact [loopback](#targets); SQLite uses 
 | `kind` | Required: `"sql"` | Required: `"redis"` |
 | `engine` | Required: `"postgres"`, `"mysql"` or `"sqlite"` | Not supported |
 | `host` | Required loopback host for Postgres/MySQL; not supported for SQLite | Required loopback host |
-| `port` | Optional integer `1`–`65535`; defaults `5432` / `3306`; not supported for SQLite | Optional integer `1`–`65535`; default `6379` |
+| `port` | Optional integer `1` to `65535`; defaults `5432` / `3306`; not supported for SQLite | Optional integer `1` to `65535`; default `6379` |
 | `user`, `name` | Required non-empty username/database strings for Postgres/MySQL; not supported for SQLite | Not supported |
 | `password` | Required source for Postgres/MySQL; not supported for SQLite | Optional source |
 | `path` | Required SQLite path; relative to repository root or absolute; not supported for Postgres/MySQL | Not supported |

@@ -205,11 +205,11 @@ The plugin-neutral implementation currently lives in QA:
 
 Consumers pass their declared value-source key pattern to `av_config.sources.mask` and `av_config.transaction.ConfigTransaction`; the shared layer does not infer source positions from string contents. The same pattern applies to nested configuration tables, dotted trust-subset keys and persisted run metadata.
 
-Schema validators register each value source with `Configuration.source(value, key, secret=..., literal_allowed=...)`. It records a `SourceRule` with the key's effective-file provenance and restrictions. Consumers resolve through `Configuration.resolve(source, key, trusted=..., execute=...)`, which revalidates under that recorded rule and rejects any key the validator did not register; they must not infer restrictions from key names again.
+Schema validators register each value source with `Configuration.source(value, key, secret=..., literal_allowed=...)`. It records a `SourceRule` with the key's effective-file provenance and restrictions. Consumers resolve through `Configuration.resolve(source, key, trusted=..., execute=...)`, which revalidates under that recorded rule and rejects any key the validator did not register. Consumers must not derive restrictions from key names a second time.
 
 The optional executor receives `(command, key)` and returns decoded stdout, raising a safe `ConfigError` on execution failure. Without it, `av_config` uses its bounded subprocess executor. The shared resolver strips trailing newlines and rejects empty command output in both cases. QA supplies an executor that runs the command with the engine's inherited environment and logs only exit/line-count summaries on success, never source stdout/stderr; failed source output is discarded. Its runtime keeps only trust checks and caching around the shared resolution entry point.
 
-When the **second configurable plugin** is introduced, extract this generic layer into a small core plugin the consumers require, or ship byte-identical copies checked in CI. Choose that packaging then; do not create a second loader or `[env]` detector. Each plugin keeps only its call site and its own table's validation, recipes and policy choices.
+When a second configurable plugin is introduced, extract this generic layer into a small core plugin the consumers require, or ship byte-identical copies checked in CI. Choose the packaging at that point, and do not create a second loader or `[env]` detector. Each plugin keeps only its call site and its own table's validation, recipes and policy choices.
 
 ## Pull Request Requirements
 

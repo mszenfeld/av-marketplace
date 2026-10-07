@@ -81,9 +81,9 @@ Bootstrap proposes configuration changes from repository evidence.
 | `extend` | Missing plan-required keys | Add only gaps and dependencies; keep policy choices. Cleanup alone is optional. |
 | `repair` | Failed service probe or command | Propose corrections supported by repository evidence and the error. |
 
-Review the complete configuration diff, ignore additions and masked trust settings in 1 confirmation. Approval permits that write and trust hash. Concurrent edits cancel the write and require a new preview.
+You review the complete configuration diff, the ignore additions and the masked trust settings in 1 confirmation. Approval permits that write and trust hash. Concurrent edits cancel the write and require a new preview.
 
-Bootstrap preserves unrelated settings and comments. Bootstrap never edits personal overrides or fills the private secret file. A blocking local override is named for you to resolve.
+Bootstrap preserves unrelated settings and comments. It never edits personal overrides or fills the private secret file. A blocking local override is named for you to resolve.
 
 Preview errors allow 1 corrected proposal before stopping. Cleanup-only extension instead continues with a warning when unavailable or declined. A successful active-run repair tears down the old run before restarting with the same plan and original baseline.
 
@@ -135,7 +135,7 @@ Plans live in `docs/testing/plans/YYYY-MM-DD-<topic>-test-plan.md`.
 | Expected results and edges | Source-grounded `(path:line)` or tagged `(unverified — confirm at run time)`. |
 | Backend State Checks | Assertions against [configured stores](qa/configuration.md#state-checks), never embedded connections. |
 
-Plans create needed application data through preconditions instead of assuming seeded records exist. Upload fixtures may use repository files. Missing data the app cannot create is a fixture gap, not an invented test result.
+Plans create needed application data through preconditions instead of assuming seeded records exist. Upload fixtures may use repository files. When the app cannot create the data a scenario needs, QA records a fixture gap and does not invent a test result.
 
 ## Configuration
 
@@ -176,7 +176,7 @@ Use disposable, non-privileged accounts and review artifacts before sharing them
 
 A backend feature expecting `2xx` but receiving `401/403` is `FAIL`, flagged `auth`. Automatic fixes exclude these issues; approval can permit reviewed root-cause fixes. Never weaken authentication or authorization to make tests pass.
 
-Rejected, location-less, incomplete or ambiguously mapped issues cannot dispatch fixes. Automatic fixes also exclude unverified assertions without excluding grounded sibling issues. Anti-hardcoding warnings are heuristic, not proof that a fix is valid.
+Rejected, location-less, incomplete or ambiguously mapped issues cannot dispatch fixes. Automatic fixes also exclude unverified assertions without excluding grounded sibling issues. Anti-hardcoding warnings are heuristic and do not prove that a fix is valid.
 
 ### Transcript and artifacts
 
@@ -235,7 +235,7 @@ Generated plans can exit gracefully with no exercised scenarios. QA distinguishe
 
 ## Reports and Code Review
 
-Reports live in `docs/testing/reports/YYYY-MM-DD-<topic>-report.md`. Reports include counts, account outcomes, setup gaps, detailed results and Loop History. Setup gaps do not become application defects; failed assertions receive `QA-NNN` IDs.
+Reports live in `docs/testing/reports/YYYY-MM-DD-<topic>-report.md` and include counts, account outcomes, setup gaps, detailed results and Loop History. Setup gaps do not become application defects; failed assertions receive `QA-NNN` IDs.
 
 The Accounts line reports registered, deleted, left and manual counts. Review reported emails and follow [cleanup actions](qa/configuration.md#missing-cleanup-and-outcomes); the ledger survives runs.
 
@@ -287,7 +287,7 @@ See [Code Review](code-review.md) for routing and decisions. [Delivery](delivery
 | State Checks | Configured store and matching `psql`, `mysql`, `sqlite3` or `redis-cli`. Redis checks need `redis-cli` with `--json`; configured password authentication also needs `4.0.11+`. |
 | Fixes | Code Review; test/report-only runs need no fixer. |
 
-Check Perl support with `perl -MJSON::PP -e 1`. Extra commands used by sources and recipes must already be installed. Missing required tools produce tool gaps, not fabricated PASS results; missing store clients skip only their checks.
+Check Perl support with `perl -MJSON::PP -e 1`. Extra commands used by sources and recipes must already be installed. A missing required tool produces a tool gap and never a fabricated PASS result; a missing store client skips only its own checks.
 
 Testers never install tools or modify project files to repair setup. Supply tools outside the run and retry. Remove write-capable store MCP servers before testing untrusted code; configuration is not permission isolation.
 
