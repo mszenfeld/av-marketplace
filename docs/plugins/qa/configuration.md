@@ -26,7 +26,7 @@ These policies are independent. `fix = "off"` does not prevent application write
 | `"auto"` | Proceed with the recorded baseline. |
 | `"off"` | Skip the dirty-tree gate. |
 
-The working-tree baseline records tracked changes present before the run. QA records the baseline before bootstrap writes. QA's own config and ignore edits do not become pre-existing changes.
+The working-tree baseline records tracked changes present before the run, and QA takes it before any bootstrap writes. QA's own config and ignore edits therefore do not become pre-existing changes.
 
 Recovery never restores the whole tree or pre-existing dirty files; reconcile reported overlap yourself.
 
@@ -38,7 +38,7 @@ A dispatch is 1 assignment to a tester or fixer.
 | Tester/fixer dispatches | `50` |
 | Elapsed time | `30 minutes` |
 
-The final full test pass counts toward usage but is not blocked by exhausted fix limits. Headless `approve` tests and reports without source fixes or that final pass. There is no per-fix `step` mode or token/cost ceiling.
+The final full test pass counts toward usage but is not blocked by exhausted fix limits. In headless mode, `approve` tests and reports, but applies no source fixes and skips that final pass. There is no per-fix `step` mode or token/cost ceiling.
 
 Service preparation runs only after QA's own `up`, not against an already-running stack. Use idempotent preparation commands; apply branch migrations yourself when services were already running.
 
@@ -88,7 +88,7 @@ Plans use `$QA_NAME` or `${QA_NAME}` throughout scenarios, including preconditio
 | Dispatch tag | Plans write `$QA_TAG`, for example `qa+$QA_TAG-owner@test.local`. Testers substitute the `Tag:` value from their dispatch input; it is not a private-channel variable. |
 | `[env.secrets]` | Never exposed to testers. |
 
-Registered users' email/ID references mean values from the tester's own registration step. Using these references before registration produces `NEED_INFO kind=fixture`, naming the user. Tokens and cookies come from runtime login; never declare token/cookie references in plans.
+For registered users, email and ID references hold values from the tester's own registration step. Using them before registration produces `NEED_INFO kind=fixture`, naming the user. Tokens and cookies come from runtime login; never declare token/cookie references in plans.
 
 Value names must not collide with exposed user fields or use `TAG`, `NEW_PASSWORD`, `CAPTURED_*` or token/cookie suffixes. Avoid value names that resemble undeclared user fields, such as `OWNER_EMAIL`.
 
@@ -129,7 +129,7 @@ Cleanup runs without State Check read-only settings; exit `0` means success. Pos
 | `headers` | String table / `{}` | Request headers. |
 | `json` | Table / omitted | Nested JSON-compatible tables, arrays, strings, numbers and booleans. |
 | `form` | String table / omitted | URL-encoded form; mutually exclusive with `json`. |
-| `expect` | Required non-empty integer array | Successful HTTP statuses, `100`–`599`. |
+| `expect` | Required non-empty integer array | Successful HTTP statuses, `100` to `599`. |
 
 Templates allow `{email}`, `{id}`, `{tag}`, `{secret.X}` and `{value.X}`. Secret/value names must exist in their `[env]` tables; use placeholders, not source strings, inside recipes.
 
@@ -160,7 +160,7 @@ That declaration does not inject the key into the helper. Helpers reading secret
 
 ### Missing cleanup and outcomes
 
-Missing cleanup alone does not stop a valid run. Interactive QA offers a cleanup-only configuration extension. No proposal, failed preview after 1 correction, declined approval or headless execution leaves accounts with this warning:
+Missing cleanup alone does not stop a valid run. Interactive QA offers a cleanup-only configuration extension. Accounts stay in the application, with the warning below, when there is no proposal, the preview still fails after 1 correction, you decline approval, or the run is headless:
 
 ```text
 No cleanup recipe: registered accounts will remain in the application.
@@ -297,7 +297,7 @@ Mark read scenarios `Writes: no`. Static detection still cannot guarantee read-o
 
 ### Supabase local stack
 
-This example uses signup on `:54321` and Postgres on `:54322`, requiring Supabase CLI and `jq`. Testers use `/auth/v1/signup` on `supabase`, the plan-referenced anon key and registered users `user` and `other`.
+This example uses signup on `:54321` and Postgres on `:54322`, and needs the Supabase CLI and `jq`. Testers use `/auth/v1/signup` on `supabase`, the plan-referenced anon key and registered users `user` and `other`.
 
 ```toml
 version = 1

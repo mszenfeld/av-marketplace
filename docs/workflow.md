@@ -113,11 +113,12 @@ review.
 /qa:run
 ```
 
-`/qa:run` proposes the project config on first use, reuses or generates a
-reviewed plan for the branch, then tests with configured existing users and
-accounts registered by testers, fixes eligible failures and re-tests within
-the engine's fixed limits. A configured cleanup recipe deletes registered
-accounts at teardown; without one, QA warns that they remain in the app.
+On first use, `/qa:run` proposes the project config. It then reuses or
+generates a reviewed plan for the branch and tests with configured existing
+users and with accounts that testers register. It fixes eligible failures and
+re-tests within the engine's fixed limits. A configured cleanup recipe
+deletes registered accounts at teardown; without one, QA warns that they
+remain in the app.
 Commit `.av/config.toml` so later runs reuse the team's setup. Source fixes
 need batch approval by default; `qa.fix = "off"` tests and reports
 without fixing. Use `/qa:create-plan` → `/qa:run <plan-path>` when you want
