@@ -17,7 +17,8 @@ jobs:
   check-qa-engine:
     name: Check QA engine
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The suite spawns the engine CLI hundreds of times and takes 4-5.5 minutes on hosted runners.
+    timeout-minutes: 10
     env:
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
