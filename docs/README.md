@@ -17,6 +17,7 @@
 - [Plan Review](plugins/plan-review.md) — Oh My Pi only; a second model reviews every plan-mode plan before approval
 - [QA](plugins/qa.md) — Automated QA testing: code-change analysis, FE/BE plans, configured users, tester registration and cleanup, Playwright + API/store execution, code-review-compatible reports
 - [QA configuration](plugins/qa/configuration.md) — Policy, users, registered accounts, cleanup, State Checks and examples
+- [QA changelog](plugins/qa/changelog.md): User-visible release changes and historical compatibility
 - [Security Pipeline](plugins/security-pipeline.md) — CI/CD security scanning setup (Semgrep SAST + TruffleHog)
 - [Simple Language](plugins/simple-language.md) — Scannable, plain-language replies and documents, active from session start
 - [Superutils](plugins/superutils.md) — Bounded spec triage: lens panel, challengers for criticals, approve-gated fix batches, verification of applied edits

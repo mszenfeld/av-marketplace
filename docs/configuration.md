@@ -1,23 +1,10 @@
 # Configuration
 
-`.av/config.toml` holds shared environment settings and each configurable plugin's settings. QA's first interactive run proposes this file from repository evidence. Use this page for shared files and `[env]`. See [QA configuration](plugins/qa/configuration.md) for `[qa]` policy, users and cleanup.
+Use `.av/config.toml` for shared environment settings and each plugin's settings. QA's first interactive run proposes the file from repository evidence. This page covers `[env]`; [QA configuration](plugins/qa/configuration.md) owns `[qa]` policy, users and cleanup.
 
 ## Minimal file
 
-```toml
-version = 1
-
-[env.targets]
-ui = "http://localhost:5173"
-backend = "http://localhost:8000"
-
-[qa]
-fix = "approve"
-mutations = "deny"
-start_services = "ask"
-```
-
-`version = 1` selects the shared schema. The `[qa]` keys are explained under [Policy](plugins/qa/configuration.md#policy).
+Use the [QA quick-start file](plugins/qa.md#configuration). `version = 1` selects the shared schema.
 
 | Add | When needed |
 |---|---|
@@ -37,7 +24,12 @@ All paths are relative to the project's repository root, not the installed plugi
 | `.av/local.toml` | No | Personal overrides using the same schema. Must be untracked and git-ignored. |
 | `.av/secrets.local.env` | No | Private dotenv values referenced through `file:` sources. Never loaded automatically. |
 
-Local settings replace shared settings key by key, and a local array replaces the shared array whole instead of joining it. The shared file must exist and contain the consuming plugin's table. Source permissions follow the file that supplies each key.
+<details>
+<summary>Override resolution</summary>
+
+Local settings replace shared keys; local arrays replace whole arrays. The shared file must exist and contain the consuming plugin's table. See [source restrictions](#secrets-and-values) for permissions by supplying file.
+
+</details>
 
 Add these entries to the project's `.gitignore`:
 
@@ -50,6 +42,9 @@ Add these entries to the project's `.gitignore`:
 
 `[env.targets]` names application origins. An origin is a URL's scheme, host and effective port.
 
+<details>
+<summary>Scenario target selection</summary>
+
 | Target | QA role |
 |---|---|
 | `ui` | Browser origin for frontend relative URLs. |
@@ -61,12 +56,19 @@ With multiple targets, frontend scenarios need `ui` and backend scenarios need `
 
 A scenario selects a target with `- **Target:** <name>`.
 
+</details>
+
+<details>
+<summary>Origin formats and comparison</summary>
+
 | Rule | Allowed form |
 |---|---|
 | Names | Start with a letter or `_`; continue with letters, digits or `_`. Use ASCII characters. |
 | Origins | `http://host[:port]` or `https://host[:port]`. |
 | Excluded URL parts | Userinfo, paths, trailing `/`, queries and fragments. |
 | Omitted ports | HTTP uses `80`; HTTPS uses `443` when comparing origins. |
+
+</details>
 
 Loopback means exactly `localhost`, `127.0.0.1`, `::1` or a hostname ending in `.localhost`. Names are lowercased and IPv6 brackets removed before comparison. Other `127.*` addresses, Compose service names and `0.0.0.0` are not loopback.
 
@@ -87,13 +89,20 @@ Testers refuse credential-bearing requests and forms on non-loopback HTTP. See [
 | `prepare` | Array of non-empty strings / `[]` | Preparation commands in order. QA runs these only after its own `up`. |
 | `down` | Non-empty string / omitted | Command to stop services. QA runs this only if QA ran `up`. |
 
+<details>
+<summary>Service dependencies and preparation</summary>
+
 A probe such as `backend:/health` needs a configured target and a path starting `/`, not `//`.
 
-- `up` requires at least 1 health probe.
-- `prepare` requires `up`.
-- `down` requires `up`.
+| Key | Dependency |
+|---|---|
+| `up` | At least 1 health probe. |
+| `prepare` | `up`. |
+| `down` | `up`. |
 
 Preparation commands must be idempotent: repeating a command must leave valid data unchanged. QA does not apply branch migrations to an already-running stack; apply those migrations yourself.
+
+</details>
 
 The consuming plugin decides when services start; QA uses [`qa.start_services`](plugins/qa/configuration.md#policy).
 
@@ -101,16 +110,21 @@ The consuming plugin decides when services start; QA uses [`qa.start_services`](
 
 A source tells the engine where to obtain a value. `[env.secrets]` holds engine-only inputs; QA never exposes these to testers. `[env.values]` holds tester-visible inputs that QA plans reference as `QA_<NAME>`.
 
-Names follow the target-name rules and become uppercase in QA references. QA rejects `[env.values]` names that collide after uppercasing. QA's additional reserved names are listed under [Users](plugins/qa/configuration.md#users).
-
 Both tables, store passwords and configured user fields accept these source strings:
 
 | Source | Resolution |
 |---|---|
-| `cmd:<shell>` | Runs `/bin/sh -c` in the repository root with inherited environment and a 30-second timeout. Reads UTF-8 stdout and strips trailing newlines. Non-zero exit, timeout, invalid or empty output stops resolution. |
+| `cmd:<shell>` | Runs `/bin/sh -c` in the repository root with inherited environment. See command output rules below. |
 | `env:<NAME>` | Reads the harness's startup environment, not exports made later in another shell. |
 | `file:<path>#<KEY>` | Reads 1 named dotenv key. Relative paths start at the repository root. |
 | `literal:<text>` | Uses the supplied text, subject to the file's restrictions. |
+
+<details>
+<summary>Source restrictions and command output</summary>
+
+Names follow the target-name rules and become uppercase in QA references. QA rejects `[env.values]` names that collide after uppercasing. QA's additional reserved names are listed under [Users](plugins/qa/configuration.md#users).
+
+Command sources have a `30-second` timeout. They read UTF-8 stdout and strip trailing newlines. Non-zero exit, timeout, invalid or empty output stops resolution.
 
 For committed `.av/config.toml`:
 
@@ -125,6 +139,8 @@ For `.av/local.toml`:
 - File sources may use absolute paths.
 - Relative file sources must still stay inside the repository and be git-ignored.
 - Secret literals are allowed.
+
+</details>
 
 Validation checks source definitions without reading values or running commands. Resolution happens only after trust and only when needed. Missing or empty values stop that operation.
 
@@ -149,11 +165,16 @@ Postgres, MySQL and Redis hosts must be exact [loopback](#targets); SQLite uses 
 
 Host, username, database and path are metadata, not source strings. Use published host ports, not container-internal ports.
 
-QA [State Checks](plugins/qa/configuration.md#state-checks) are read-only assertions against stores. Use a read-only SQL role or restricted Redis ACL as an additional boundary; client flags are not permission isolation. Cleanup may require a writable role or another recipe kind.
+Use a read-only SQL role or restricted Redis ACL for [QA State Checks](plugins/qa/configuration.md#state-checks). Client flags are not permission isolation. Cleanup may require a writable role or another recipe kind.
 
 ## Trust
 
-A trust pin records approval of settings that can execute commands or expose private inputs. Pins live outside the repository in `${XDG_STATE_HOME:-~/.local/state}/av-marketplace/trust.json`. Pins use the repository's real path and plugin name; each worktree needs separate approval.
+A trust pin records approval of settings that execute commands or expose private inputs. Each worktree needs separate approval.
+
+<details>
+<summary>Trust storage and pinned settings</summary>
+
+Pins live at `${XDG_STATE_HOME:-~/.local/state}/av-marketplace/trust.json`, outside the repository. Pins use the repository's real path and plugin name.
 
 QA pins these settings:
 
@@ -163,6 +184,8 @@ QA pins these settings:
 - The whole cleanup recipe and its SQL store table.
 - Explicitly configured `fix`, `mutations` and `start_services` values.
 
+</details>
+
 | Reported `trust` | Meaning |
 |---|---|
 | `not-required` | No sensitive settings need approval. |
@@ -170,19 +193,26 @@ QA pins these settings:
 | `trusted` | Current sensitive settings match the approved hash. |
 | `changed` | Sensitive settings differ from the recorded approval. |
 
-Review the complete masked settings subset for `new` or `changed`, not only the latest diff. Approval hashes the full unmasked settings. Acceptance succeeds only while the current hash matches the reviewed hash.
+Review the complete masked settings subset for `new` or `changed`, not only the latest diff.
+
+<details>
+<summary>Trust hash and scope</summary>
+
+Approval hashes the full unmasked settings. Acceptance succeeds only while the current hash matches the reviewed hash.
 
 Pins cover source definitions, not changing command outputs, dotenv contents or environment values. Trust never bypasses mutation or other approval gates. Changing only another plugin's table does not change QA's pin.
 
+</details>
+
 ### Headless runners and CI
 
-A headless runner cannot approve new trust or run interactive bootstrap. Prepare the shared file and private inputs before running QA. Required gaps and failed service setup stop; missing cleanup alone leaves registered accounts with a warning.
+Prepare shared configuration and private inputs before running QA. Approve trust in a controlled CI setup step:
 
-For QA, `start_services = "ask"` stops when services need starting. Pre-approved `"auto"` can start configured services; other gates still apply.
+1. Run `config`; confirm `state` is `ok` and `errors` is empty.
+2. Review the complete `trust_subset` before accepting its `trust_hash`.
+3. Prepare new approval for a changed sensitive subset or a new worktree.
 
-Review and approve trust in a controlled CI setup step. Run `config`, confirm `state` is `ok` with no `errors`, and review its complete `trust_subset` before accepting its `trust_hash`. `config` exits 0 even when the file or `[qa]` table is missing, so check `state`, not the exit code.
-
-Never auto-accept arbitrary branch content during the work step. A changed sensitive subset or a new worktree needs new approval.
+`config` exits `0` even when the file or `[qa]` table is missing. Check `state`. Never auto-accept arbitrary branch content during the work step.
 
 Use the installed QA engine path from the [engine skill](../plugins/qa/skills/engine/SKILL.md#resolve-the-installed-script):
 
