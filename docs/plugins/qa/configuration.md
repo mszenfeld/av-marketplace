@@ -1,6 +1,6 @@
 # QA configuration
 
-The `[qa]` table controls source fixes, application writes, service startup, existing users and registered-account cleanup. Use this page to choose policy and add accounts or recipes. See [shared configuration](../../configuration.md) for `.av/` files, `[env]` targets, services, sources, stores and trust.
+Use `[qa]` to choose source fixes, application writes and service startup, then configure users and cleanup. See [shared configuration](../../configuration.md) for `.av/` files and `[env]` settings.
 
 ## Policy
 
@@ -10,7 +10,7 @@ All 3 policy keys are strings. Omitted keys use the defaults below; explicitly c
 |---|---|---|
 | `fix` | `"approve"` | `"approve"`: ask before each fix batch. `"auto"`: apply eligible fixes after showing scope. `"off"`: test and report only. |
 | `mutations` | `"deny"` | `"deny"`: skip declared or detected writes. `"allow"`: guard nothing; use only when every target's data is disposable. |
-| `start_services` | `"ask"` | `"ask"`: ask before needed `up`/`prepare`; headless stops. `"auto"`: show scope, then run configured commands when needed. |
+| `start_services` | `"ask"` | `"ask"`: ask before needed `up`/`prepare`. `"auto"`: show scope, then run configured commands when needed. |
 
 Every frontend and backend scenario needs `- **Writes:** yes|no`. Under `deny`, `yes`, missing or invalid declarations guard the whole scenario. Detected writes also guard the scenario, including preconditions, edges and State Checks; `no` cannot override detection.
 
@@ -20,15 +20,18 @@ These policies are independent. `fix = "off"` does not prevent application write
 
 ### Working tree and limits
 
+<details>
+<summary>Working-tree approvals and fixed limits</summary>
+
 | `fix` | Pre-existing tracked changes |
 |---|---|
-| `"approve"` | Warn and ask Proceed/Abort; headless aborts. |
+| `"approve"` | Warn and ask Proceed/Abort. |
 | `"auto"` | Proceed with the recorded baseline. |
 | `"off"` | Skip the dirty-tree gate. |
 
-The working-tree baseline records tracked changes present before the run, and QA takes it before any bootstrap writes. QA's own config and ignore edits therefore do not become pre-existing changes.
+QA records pre-existing tracked changes before bootstrap writes. QA's config and ignore edits therefore do not become pre-existing changes.
 
-Recovery never restores the whole tree or pre-existing dirty files; reconcile reported overlap yourself.
+See [run recovery](../qa.md#qarun-plan-path--change-source) for overlap with pre-existing changes.
 
 A dispatch is 1 assignment to a tester or fixer.
 
@@ -38,9 +41,11 @@ A dispatch is 1 assignment to a tester or fixer.
 | Tester/fixer dispatches | `50` |
 | Elapsed time | `30 minutes` |
 
-The final full test pass counts toward usage but is not blocked by exhausted fix limits. In headless mode, `approve` tests and reports, but applies no source fixes and skips that final pass. There is no per-fix `step` mode or token/cost ceiling.
+The final full test pass counts toward usage but is not blocked by exhausted fix limits. There is no per-fix `step` mode or token/cost ceiling.
 
-Service preparation runs only after QA's own `up`, not against an already-running stack. Use idempotent preparation commands; apply branch migrations yourself when services were already running.
+See [interactive versus headless](../qa.md#interactive-versus-headless) for approval behavior. Service preparation and migrations follow the [shared service rules](../../configuration.md#services).
+
+</details>
 
 See [QA safety](../qa.md#safety) for fix eligibility and authentication guards.
 
@@ -48,7 +53,7 @@ See [QA safety](../qa.md#safety) for fix eligibility and authentication guards.
 
 `[qa.users.<name>]` configures existing accounts. QA never creates or deletes these accounts.
 
-Names start with a lowercase ASCII letter; remaining characters are lowercase letters, digits or `_`. The names `new`, `captured` and names starting `captured_` are reserved.
+Names start with a lowercase ASCII letter, followed by lowercase letters, digits or `_`. The names `new`, `captured` and names starting `captured_` are reserved.
 
 | Key | Type | Requirement |
 |---|---|---|
@@ -59,7 +64,8 @@ Names start with a lowercase ASCII letter; remaining characters are lowercase le
 
 Use the [source rules](../../configuration.md#secrets-and-values); never put a password in the plan or committed config.
 
-### Plan declarations
+<details>
+<summary>Plan users and tester inputs</summary>
 
 Declare every user under the plan's `## Users` heading:
 
@@ -76,8 +82,6 @@ Declare every user under the plan's `## Users` heading:
 
 A configured user must be declared `existing`, not `registered`. Undeclared user references are plan errors. Plans may declare at most `10` registered users.
 
-### Tester-visible references
-
 Plans use `$QA_NAME` or `${QA_NAME}` throughout scenarios, including preconditions and edges.
 
 | Input | Tester-visible reference |
@@ -92,13 +96,18 @@ For registered users, email and ID references hold values from the tester's own 
 
 Value names must not collide with exposed user fields or use `TAG`, `NEW_PASSWORD`, `CAPTURED_*` or token/cookie suffixes. Avoid value names that resemble undeclared user fields, such as `OWNER_EMAIL`.
 
+</details>
+
 ## Registered accounts
 
-Testers register through the application's signup API or form, then log in themselves. Each tester dispatch supplies a tag; addresses such as `qa+<Tag>-owner@test.local` include that tag. Use an application-supported domain and the generated run password.
+Testers register through the application's signup API or form, then log in themselves. Addresses such as `qa+<Tag>-owner@test.local` include the dispatch tag. Use an application-supported domain and the generated run password.
 
-Testers record each successful registration immediately in the durable account ledger. Teardown attempts deletion through the configured cleanup recipe. Configured existing accounts are never enrolled for deletion.
+Testers record every successful registration immediately in the durable [account ledger](#missing-cleanup-and-outcomes). Teardown attempts cleanup; existing accounts are never enrolled for deletion.
 
-Signup rate limits, CAPTCHA or email confirmation can block registration. Supply a local mail catcher when confirmation needs one. Use an existing account when signup cannot produce the required role or state.
+| Signup limitation | What to supply |
+|---|---|
+| Email confirmation | A local mail catcher when needed. |
+| CAPTCHA, rate limits or unavailable role/state | An existing account when signup cannot produce the required user. |
 
 ## Cleanup
 
@@ -114,16 +123,24 @@ SQL and HTTP recipes must contain `{email}`. Deletion by ID alone is not allowed
 | `store` | Required string | Configured store with `kind = "sql"`. |
 | `query` | Required non-empty string | SQL containing `{email}`. |
 
+<details>
+<summary>SQL substitutions and execution</summary>
+
 Only `{email}`, `{id}` and `{tag}` placeholders are allowed. QA quotes SQL literals and doubles embedded apostrophes; absent IDs become `NULL`. Do not quote placeholders yourself.
 
 Cleanup runs without State Check read-only settings; exit `0` means success. Postgres and MySQL cleanup ignore client startup/option files. Approve the query only after checking the application's deletion contract and foreign-key cascades.
 
+</details>
+
 ### HTTP recipe
+
+<details>
+<summary>HTTP recipe keys</summary>
 
 | Key | Type / default | Meaning |
 |---|---|---|
 | `kind` | Required string | `"http"` |
-| `target` | Required string | Configured target; HTTPS unless loopback. |
+| `target` | Required string | Configured target under the [HTTPS rules](../../configuration.md#targets). |
 | `method` | Required string | `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE` or `OPTIONS`. |
 | `path` | Required string | Starts `/`, not `//`; query allowed, backslashes and fragments forbidden. |
 | `headers` | String table / `{}` | Request headers. |
@@ -131,11 +148,18 @@ Cleanup runs without State Check read-only settings; exit `0` means success. Pos
 | `form` | String table / omitted | URL-encoded form; mutually exclusive with `json`. |
 | `expect` | Required non-empty integer array | Successful HTTP statuses, `100` to `599`. |
 
+</details>
+
+<details>
+<summary>HTTP placeholders and encoding</summary>
+
 Templates allow `{email}`, `{id}`, `{tag}`, `{secret.X}` and `{value.X}`. Secret/value names must exist in their `[env]` tables; use placeholders, not source strings, inside recipes.
 
 Identity substitutions in paths and queries are percent-encoded. Header and body substitutions retain raw values. Cleanup never follows redirects.
 
 If `{id}` is required but unavailable, cleanup counts a failed attempt without sending a request.
+
+</details>
 
 ### Command recipe
 
@@ -145,6 +169,9 @@ If `{id}` is required but unavailable, cleanup counts a failed attempt without s
 | `run` | Required non-empty string | Shell command in the repository root; timeout `60 seconds`. |
 
 Commands use no placeholders and must not print credentials. Exit `0` means success. Commands are trust-pinned, not sandboxed.
+
+<details>
+<summary>Command account inputs and secrets</summary>
 
 QA removes inherited `QA_*` variables and supplies these account values:
 
@@ -158,9 +185,11 @@ Other inherited environment variables remain available. For an administrative ke
 
 That declaration does not inject the key into the helper. Helpers reading secrets another way must never print them, including on failure. Unknown or short values may escape engine-log masking; never paste raw logs into chat.
 
+</details>
+
 ### Missing cleanup and outcomes
 
-Missing cleanup alone does not stop a valid run. Interactive QA offers a cleanup-only configuration extension. Accounts stay in the application, with the warning below, when there is no proposal, the preview still fails after 1 correction, you decline approval, or the run is headless:
+Missing cleanup alone does not stop a valid run. Interactive QA offers a cleanup-only extension. Accounts remain with this warning when no proposal is available, preview still fails after 1 correction, approval is declined, or the run is headless:
 
 ```text
 No cleanup recipe: registered accounts will remain in the application.
@@ -168,7 +197,7 @@ No cleanup recipe: registered accounts will remain in the application.
 
 Required configuration gaps and invalid configuration still stop.
 
-The ledger lives at `${XDG_STATE_HOME:-~/.local/state}/av-marketplace/qa-accounts.json`. The ledger uses the repository's real path and survives runs, repair restarts and private-directory deletion. It stores account identities and cleanup progress, never passwords or tokens.
+The ledger at `${XDG_STATE_HOME:-~/.local/state}/av-marketplace/qa-accounts.json` survives runs, repair restarts and private-directory deletion. It uses the repository's real path. It stores account identities and cleanup progress, never passwords or tokens.
 
 | Outcome | Meaning / action |
 |---|---|
@@ -176,17 +205,24 @@ The ledger lives at `${XDG_STATE_HOME:-~/.local/state}/av-marketplace/qa-account
 | `left` | No usable recipe, invalid/untrusted config, unmatched/unlocked destination, unsafe legacy record or failed attempt below the limit. Review the cause; a later compatible trusted run can retry eligible records. |
 | `manual` | The account reached `3` failed attempts during this teardown. Delete it deliberately in the correct application. |
 
+The report's Accounts line counts registered, deleted, left and manual accounts. Review account emails in reports and summaries. A retained ledger record does not mean cleanup succeeded.
+
+For a destination mismatch or the legacy-record warning, clean up in the original application. Do not edit ledger fields to authorize a different destination.
+
+<details>
+<summary>Cleanup destinations and legacy records</summary>
+
 Cleanup uses the current valid, trusted recipe. A SQL endpoint or HTTP origin must match the account's recorded destination and be locked by this run.
 
 Command recipes have no destination and process only accounts recorded without one. Skips for a missing, invalid or untrusted recipe, an unlocked destination or a destination mismatch do not count as failed attempts.
 
 An account recorded with no destination adopts the current recipe's destination on its first attempt. This happens when no recipe, or a command recipe, was configured at registration.
 
-Records from QA 3.1.0 lack the `tag` or `destination` field. They and malformed records stay unchanged, without an attempt, and their emails appear under `left`. For QA 3.1.0 records, delete the account deliberately in the application named by the record's `origin` field. Other eligible records still clean up. Do not edit ledger fields to authorize a different destination.
+Records from QA 3.1.0 lack `tag` or `destination`. They and malformed records stay unchanged, without an attempt; their emails appear under `left`. Delete QA 3.1.0 accounts in the application named by the record's `origin`. Other eligible records still clean up.
 
-Each teardown attempts eligible accounts from earlier runs too. QA saves each outcome before attempting the next account. After `3` failures, QA stops automatic retries; `manual` is listed once, not on every later run.
+Each teardown attempts eligible accounts from earlier runs too. QA saves each outcome before attempting the next account. After `3` failures, automatic retries stop; `manual` is listed once, not on every later run.
 
-Review account emails in the report and summary. A retained ledger record does not mean cleanup succeeded.
+</details>
 
 ## State Checks
 
@@ -194,13 +230,11 @@ A State Check verifies application state in a configured store. Only backend sce
 
 Use repeatable lines such as `- **State Check:** main: <query> → <expected>`. A store name is optional only when exactly 1 store is configured; with zero or several stores, an unprefixed check is a plan error. An unknown store name is a configuration gap.
 
-Checks use read-only SQL settings or the Redis read-command allowlist. Use a read-only SQL role or restricted Redis ACL for stronger isolation. Missing clients skip only the check, not runnable HTTP assertions.
-
-See [Stores](../../configuration.md#stores) for endpoint keys and [Prerequisites](../qa.md#prerequisites) for clients.
+Checks use read-only SQL settings or the Redis read-command allowlist; missing clients skip only the check, not runnable HTTP assertions. See [Stores](../../configuration.md#stores) for endpoint keys and role/ACL isolation, and [Prerequisites](../qa.md#prerequisites) for clients.
 
 ## Examples
 
-These are complete schema examples, not proof that your checkout exposes the illustrated routes. Match ports, commands, models and deletion contracts to repository evidence before approval. Add the [private ignore entries](../../configuration.md#files).
+These are complete schema examples. Verify routes, ports, commands, models and deletion contracts against repository evidence before approval. Add the [private ignore entries](../../configuration.md#files).
 
 ### JWT API: `/register` and `/login`
 
