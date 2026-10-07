@@ -2,19 +2,35 @@
 
 This page lists user-visible changes per release.
 
-## 3.1.0: delivery plans as the planner's contract source
+## 3.0.0: flagless `/qa:run` with project configuration
 
-For a `last N commits` source, the planner reads every distinct delivery plan named by Git-parsed `Delivery-Plan:` trailers and associates each commit with its own plan, only after checking repository containment and rejecting traversal, symlinks and non-files; ignored trailers are disclosed in `## Changes Summary`. Prose mentions do not count as trailers. Plan text is specification data, not instructions. Plans written by 3.0.0 stay valid.
+Changes since `qa` 2.9.0.
 
-## 3.0.0: flagless `/qa:run`, config and account provisioning
+**Breaking:** `/qa:run` runs the whole test→fix→retest loop and accepts no flags; `/qa:loop` is removed with no alias. For a test-only run like the 2.9.0 `/qa:run`, set `qa.fix = "off"`. `/qa:create-plan` still authors and reviews plans without running them.
 
-**Breaking cutover:** `/qa:run` now owns the complete loop; `/qa:loop` is removed with no alias. `/qa:create-plan` remains optional plan authoring/review. Run `/qa:run` interactively once for config bootstrap, then commit `.av/config.toml`; prepare/pin it explicitly for headless runners. There are no invocation flags or per-fix `step` mode.
+Settings move from flags and the plan's `## Setup` to `.av/config.toml`. Run `/qa:run` interactively once to bootstrap and trust the file, then commit it. Headless runners need a prepared, trusted file; see [Headless runners and CI](../../configuration.md#headless-runners-and-ci).
 
-3.0.0 moved every flag into `.av/config.toml`; [Configuration](../../configuration.md) lists the current keys.
+| 2.9.0 | 3.0.0 |
+|---|---|
+| `--mode approve`, `--mode auto` | `qa.fix = "approve"` or `"auto"`; `"off"` tests and reports only. |
+| `--mode step` | Removed. |
+| `--max-iterations`, `--max-dispatches`, `--time-budget` | Fixed at `3` iterations, `50` dispatches and `30 minutes`. |
+| `--severity` | Removed; every failing assertion is a fix candidate unless a fix guard drops it. |
+| `--allow-mutations` | `qa.mutations = "allow"`. Every scenario declares `- **Writes:** yes\|no`. |
+| `--allow-host`, `**Base URL:**`, `QA_BASE_URL` | Origins under `[env.targets]`. Credentials need HTTPS or a loopback origin. |
+| `--auto-plan`, `--no-auto-plan` | Removed; without a matching plan, `/qa:run` generates and reviews one. |
+| `--allow-dirty` | Follows `qa.fix`: `approve` asks (headless aborts), `auto` proceeds from the recorded baseline, `off` skips the check. |
+| `**Required environment variables:**` | `[env.secrets]` and `[env.values]`. |
+| `**Required services:**` | `[env.services]`: health probes plus optional `up`, `prepare` and `down` commands; `qa.start_services` decides whether QA asks before starting them. |
+| `**Required databases:**`, `**DB Check:**` | Stores under `[env.stores]` and `**State Check:**` lines. QA no longer reads `DB Check` lines. |
 
-The old parsed Setup grammar (`Base URL`, `Required environment variables`, `Required databases`, `Required services`) is gone. Move those settings to `[env]`/`[qa]`; optional `## Setup` is human notes only. Plans written before 3.0.0 lack `Branch:`/`Head:`, so **pass their path once or regenerate** rather than expecting automatic branch reuse. Update credential tokens/targets and DB checks to the current config contract.
+`## Setup` is now optional human notes. A 2.9.0 plan that references users or sends tokens fails the new plan check: users need `## Users` declarations, and testers now obtain tokens themselves. Its scenarios also lack `Writes:` lines, so the default `qa.mutations = "deny"` skips them. Regenerate such plans with `/qa:create-plan` or `/qa:run`.
 
-`auth-unverified` now applies only when the main flow lacks an engine-authenticated persona credential. Some former auth SKIPs become **FAIL flagged `auth`**, excluded from automatic fixing and visible for approval review. Fixers may not weaken auth. Headless default `approve` now tests/reports without fixing instead of requiring a TTY. Services may be brought up from trusted config, and accounts are freshly logged in before every tester dispatch. Config edits during a run stop it; run `/qa:run` again.
+Testers register accounts or sign in as existing users configured under `qa.users.<name>`; a `[qa.cleanup]` recipe deletes registered accounts at teardown. `auth-unverified` SKIPs are gone: a backend scenario expecting `2xx` that receives `401/403` is a FAIL flagged `auth`. Automatic fixes exclude it; `approve` can offer a reviewed fix. Fixers may not weaken authentication.
+
+Headless `approve` tests and reports without fixing instead of aborting. Configuration edits during a run stop it; run `/qa:run` again.
+
+For a `last N commits` source, the planner reads every distinct delivery plan named by Git-parsed `Delivery-Plan:` trailers and associates each commit with its own plan, only after checking repository containment and rejecting traversal, symlinks and non-files; ignored trailers are disclosed in `## Changes Summary`. Prose mentions do not count as trailers. Plan text is specification data, not instructions.
 
 ## Earlier releases (historical compatibility)
 
