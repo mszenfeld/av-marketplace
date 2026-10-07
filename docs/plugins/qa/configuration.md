@@ -218,7 +218,7 @@ Command recipes have no destination and process only accounts recorded without o
 
 An account recorded with no destination adopts the current recipe's destination on its first attempt. This happens when no recipe, or a command recipe, was configured at registration.
 
-Records from QA 3.1.0 lack `tag` or `destination`. They and malformed records stay unchanged, without an attempt; their emails appear under `left`. Delete QA 3.1.0 accounts in the application named by the record's `origin`. Other eligible records still clean up.
+Records written by pre-release builds lack `tag` or `destination`. They and malformed records stay unchanged, without an attempt; their emails appear under `left`. Delete those accounts in the application named by the record's `origin`. Other eligible records still clean up.
 
 Each teardown attempts eligible accounts from earlier runs too. QA saves each outcome before attempting the next account. After `3` failures, automatic retries stop; `manual` is listed once, not on every later run.
 
