@@ -148,7 +148,7 @@ Delivery is the worked example. It adds its own orchestration and keeps a task r
 
 How the work is split between plugins is agreed in review, and the split can follow a first working integration. The defaults:
 
-- **Extend the plugin that owns the stage.** A new capability for a stage that a plugin already covers goes into that plugin, or into a shared plugin that every path through the stage can use. New review rules go into Code Review; a new way to run and record checks goes where Delivery, `/develop` and `/qa:loop` can all use it.
+- **Extend the plugin that owns the stage.** A new capability for a stage that a plugin already covers goes into that plugin, or into a shared plugin that every path through the stage can use. New review rules go into Code Review; a new way to run and record checks goes where Delivery, `/develop` and `/qa:run` can all use it.
 - **Ship reusable parts on their own.** A checker, scanner or gate runner that other plugins could use is its own plugin, or part of the plugin that owns its stage. It is not buried in a workflow that only one path runs.
 
 A plugin that covers a stage another plugin already owns says so in its pull request, along with how the two are expected to converge.
