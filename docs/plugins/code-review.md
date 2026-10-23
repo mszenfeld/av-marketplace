@@ -2,7 +2,7 @@
 
 Security, architecture, and code quality analysis for your codebase.
 
-**Version:** 2.5.0
+**Version:** 2.6.0
 
 ## Commands
 
@@ -23,13 +23,17 @@ Run a comprehensive code review covering security, performance, architecture, an
 
 The review launches parallel analysis agents (security + code quality, and optionally documentation) and combines their findings into a unified report. Each issue gets a unique category-based ID (e.g., `SEC-001`, `PERF-002`, `ARCH-001`, `MAINT-003`, `DOC-001`) and includes severity level, file location, explanation, and remediation with code examples.
 
-**After the review.** The report is always saved to `docs/reviews/` (see [Save Review to File](#save-review-to-file)), then `after_review` picks what follows: by default, a question offering to fix everything with `/fix-all`, choose from `/fix-report`'s checklist, or stop (see [Configuration](#configuration)).
+**After the review.** The report of a non-empty scope is always saved to `docs/reviews/` (see [Save Review to File](#save-review-to-file)), then `after_review` picks what follows: by default, a question offering to fix everything with `/fix-all`, choose from `/fix-report`'s checklist, or stop (see [Configuration](#configuration)).
 
-**Scope.** `/review` reviews changes. A git range ending in `HEAD` in the description (`<rev>..HEAD` or `<rev>...HEAD`, as Delivery passes) sets the base; otherwise the base is the merge-base of `HEAD` and the default branch. Git resolves the literal `refs/remotes/origin/HEAD`, falling back to the fixed names `main` then `master` when that ref is unavailable; the symbolic ref's target name is never pasted into shell source. The changes are `git diff <base>` — commits since the base plus uncommitted edits — and untracked files. Every auditor, the cross-verifier and the challenger receive the base and the changed files; findings outside the changed files survive only when they name the changed line that causes them, and the rest are listed under "Out of scope (scope check)". With no base or no changes the review covers the whole repository, as before 2.2.0. The report starts with a `Review scope:` line.
+**Scope.** `/review` reviews changes. A git range ending in `HEAD` in the description (`<rev>..HEAD` or `<rev>...HEAD`, as Delivery passes) sets the base; otherwise the base is the merge-base of `HEAD` and the default branch. Git resolves the literal `refs/remotes/origin/HEAD`, falling back to the fixed names `main` then `master` when that ref is unavailable; the symbolic ref's target name is never pasted into shell source. The changes are `git diff <base>` — commits since the base plus uncommitted edits — and untracked files, minus review artifacts under `docs/plans/`, `docs/reviews/`, `docs/testing/` and `docs/superpowers/` (the secret scan still covers those). Every auditor, the cross-verifier and the challenger receive the base and the changed files; findings outside the changed files survive only when they name the changed line that causes them, and the rest are listed under "Out of scope (scope check)". The review covers the whole repository only with no base or when the description says `whole repository`. A base with no changes is an empty scope: nothing is reviewed, no report is written, and the review prints `Review not saved: nothing to review`. The report starts with a `Review scope:` line, then a `Findings:` count line.
 
 **Path safety.** Every dispatched agent receives the scope block's Shell safety rules. Changed-file names are untrusted data: scanners receive them directly from Git as NUL-delimited arguments, not as names pasted into shell commands. An individually interpolated shell path must pass the strict allow-list and be single-quoted with option protection; Git file operands also use literal pathspecs. Non-ASCII names, spaces and shell metacharacters do not remove a file from scope — those paths use NUL-delimited arguments, structured file-tool arguments or a repository-wide read-only diff.
 
 The scanner examples use the POSIX shell expansion `"${@}"` to forward each path as a separate argument. Keep the braces: OMP otherwise treats the unbraced form as a command-template placeholder and replaces it with the review request before any auditor sees it.
+
+**Checks.** The changed files decide which scanners run, and every auditor receives the plan as a `Checks:` line: the secret scan always runs; SAST runs when a source file changed; the dependency scan runs when a manifest or lockfile changed; linters run on the changed Python or TypeScript/JavaScript files, with the project's own configuration only. A whole-repository review runs every check. Scanners write their output to a fresh `mktemp -d` directory per run, so concurrent reviews on one machine do not read each other's results. The Verification Summary's `### Checks` lists each check, and the docs drift pre-pass, as ran, skipped, unavailable or failed; a check that did not run is never reported as clean.
+
+**What is not a finding.** A size or complexity metric (function length, parameter count, nesting, class size, cyclomatic complexity, duplicated lines, a "God Object" by size) and a style, formatting, naming or lint diagnostic never make a finding on their own; tool output stays in the auditors' evidence and in `### Checks`. A linter or type-checker diagnostic that shows a defect the change causes — a type error, an undefined name, a broken import, wrong logic — can back a finding that names the changed line. A convention finding needs an owner-written standard (`CLAUDE.md`, `AGENTS.md`, `REVIEW.md`, `CONTRIBUTING.md` and similar, or a developer skill); without one the observation is listed as a doctrine-gap candidate.
 
 <a id="category-prefix-mapping"></a>
 **Issue ID categories:**
@@ -341,11 +345,11 @@ Each component carries `**Part-of:** COMP-001` after its `**ID:**` line. `**Comp
 ## What It Analyzes
 
 - **Security** — OWASP Top 10:2025 compliance, injection attacks, XSS, authentication bypasses, insecure crypto, hardcoded secrets, dependency CVEs
-- **Architecture** — SOLID principles, Clean Architecture boundaries, DDD patterns, anti-patterns (God Objects, circular dependencies)
+- **Architecture** — SOLID principles, Clean Architecture boundaries, DDD patterns and anti-patterns such as circular dependencies, reported when they cause a demonstrable defect rather than by size
 - **Performance** — N+1 queries, missing indexes, memory leaks, unbounded collections, blocking calls
-- **Code Quality** — Complexity, naming, error handling, test coverage gaps
+- **Code Quality** — Error handling, test coverage gaps, type and lint errors the change causes
 - **Documentation** — Outdated docs, missing doc entries, stale API references (conditional — only when project has documentation)
-- **Standards** — Project-specific coding conventions discovered from documentation
+- **Standards** — Project conventions from owner-written standards (`CLAUDE.md`, `AGENTS.md`, `REVIEW.md`, contributing and docs files); without a written standard a convention observation is a doctrine-gap candidate, not a finding
 - **Dependencies** — Known CVEs in third-party packages
 
 ## Built-in Verification
@@ -356,8 +360,8 @@ Every review automatically includes cross-domain correlation and adversarial rev
 
 After the standard analysis (security + code quality + optional documentation auditors), two verification subagents analyze the findings in parallel:
 
-- **Cross-Verifier**: identifies correlations between security, quality, and documentation findings (e.g., a God Object with a vulnerability = higher blast radius, undocumented endpoint with a security bypass), coverage gaps, and composite findings
-- **Challenger**: challenges every Critical/High finding for false positives, validates severity levels, and calibrates severity across security, quality, and documentation domains
+- **Cross-Verifier**: identifies correlations between security, quality, and documentation findings (e.g., a missing validation layer behind an injection = higher blast radius, undocumented endpoint with a security bypass), coverage gaps, and composite findings
+- **Challenger**: challenges every finding, at every severity, for false positives, validates severity levels, calibrates severity across security, quality, and documentation domains, and drops findings that rest only on a size metric or a style or lint diagnostic
 
 ### Additional Report Sections
 
@@ -367,6 +371,7 @@ Every review includes a Verification Summary showing:
 - Challenged findings with reasoning
 - Rejected by auditors (self-falsification) — findings the auditors rejected in their own refutation pass, with reasons
 - Doctrine-gap candidates — real signals with no backing rule, candidates for new standards
+- Checks — the secret scan, SAST, dependency scan, linters and the docs drift pre-pass, each as ran, skipped, unavailable or failed
 
 ### Cost Considerations
 
@@ -374,7 +379,7 @@ Verification spawns 2 additional subagent instances (Cross-Verifier + Challenger
 
 ## Save Review to File
 
-Every review saves its report to `docs/reviews/YYYY-MM-DD-<branch-slug>.md` without a question. If the file cannot be written, the review prints `Review not saved: <error>` and only `/fix <paste issue block>` works for that review.
+Every review of a non-empty scope saves its report to `docs/reviews/YYYY-MM-DD-<branch-slug>.md` without a question. If the file cannot be written, the review prints `Review not saved: <error>` and only `/fix <paste issue block>` works for that review. An empty scope saves nothing and prints `Review not saved: nothing to review`.
 
 Credential literals are masked before the report is displayed or written: each secret value is replaced with its first four characters followed by `…[REDACTED]` (e.g., `API_TOKEN = "ghp_…[REDACTED]"`). This applies throughout the report, including findings, summaries and vulnerable `# Before` snippets; the save step writes only the masked markdown.
 
@@ -578,6 +583,8 @@ Each auto-accepted finding is listed under **Auto-accepted** in the run summary,
 
 <a id="upgrade-notes"></a>
 ## Upgrade Notes
+
+**`code-review` 2.6.0 reports fewer kinds of findings and runs only the checks the change needs.** Size and complexity metrics and style or lint diagnostics no longer produce findings, the challenger checks every finding instead of only CRITICAL and HIGH, and a convention finding needs a written standard. SAST, the dependency scan and linters run only when the changed files call for them; the secret scan always runs. A base with no changes now means nothing to review instead of a whole-repository review: ask for one with the words `whole repository`. Review artifacts under `docs/plans/`, `docs/reviews/`, `docs/testing/` and `docs/superpowers/` are no longer reviewed, except by the secret scan. Reports gain a `Findings:` count line and a `### Checks` section; the finding-block format the fix commands read is unchanged, so older readers work on 2.6.0 reports.
 
 **`code-review` 2.5.0 relays decision-stage questions and prints a per-finding run record.** In a session without its own ask tool, such as a subagent or a print-mode run, `/fix-all` no longer takes an orchestrator's message as your answer. It ends its turn with a `## Decision relay request RLY-…` for the dispatching session to ask you, and records the decisions answered that way as `[relayed, <date>]`. A reader on 2.4.0 replays a `relayed` decision like any recorded one. The Decision Stage summary now shows the auto-accept line under its counts, and one row per finding.
 

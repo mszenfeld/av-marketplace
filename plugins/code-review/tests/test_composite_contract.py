@@ -487,6 +487,43 @@ class CompositeContract(unittest.TestCase):
                         self.assertEqual(result.returncode, 0, result.stderr)
                         self.assertEqual(result.stdout, data)
 
+    # ---- Review contract with Delivery, the auditors and the scanners --------
+
+    def test_delivery_names_review_steps_that_exist(self) -> None:
+        # mutation: rename review.md's "## Step 6: Save Review" heading without updating both Delivery editions
+        review = read(REVIEW)
+        for heading in ("## Step 6: Save Review", "## Step 7: Post-review action"):
+            self.assertIn(f"\n{heading}\n", review)
+        for path in ("plugins/delivery/skills/orchestration/SKILL.md", "omp/native/delivery/skills/orchestration/SKILL.md"):
+            text = read(path)
+            with self.subTest(path=path):
+                self.assertIn("Step 6 (Save Review)", text)
+                self.assertIn("Step 7 (Post-review action)", text)
+                self.assertIn("Review not saved:", text)
+
+    def test_every_review_without_a_report_prints_review_not_saved(self) -> None:
+        # mutation: change "Step 6 prints `Review not saved: nothing to review`" in review.md's empty-scope rule
+        step6 = read(REVIEW).split("## Step 6: Save Review", 1)[1].split("## Step 7", 1)[0]
+        self.assertIn("Review not saved: nothing to review", step6)
+        self.assertIn("Review not saved: <error>", step6)
+
+    def test_both_scope_blocks_carry_the_check_plan_the_auditors_obey(self) -> None:
+        # mutation: delete the "Checks: secret scan run; SAST <status>; …" line from either scope block in review.md
+        blocks = re.findall(r"~~~text\nReview request:.*?\n~~~", read(REVIEW), re.S)
+        self.assertEqual(len(blocks), 2)
+        for block in blocks:
+            self.assertIn("Checks: secret scan run; SAST <status>; dependency scan <status>; linters <status>", block)
+        for agent in ("plugins/code-review/agents/security-auditor.md", "plugins/code-review/agents/code-quality-auditor.md"):
+            self.assertIn("`Checks:` line", read(agent))
+
+    def test_skills_write_scan_output_to_a_per_run_directory(self) -> None:
+        # mutation: restore "--json-output /tmp/semgrep-report.json" in sast-analysis/SKILL.md
+        # Two reviews on one machine must not read each other's results (or a stale one from an earlier run).
+        for path in sorted((ROOT / "plugins/code-review/skills").rglob("*.md")):
+            with self.subTest(path=str(path.relative_to(ROOT))):
+                self.assertNotRegex(path.read_text(encoding="utf-8"),
+                                    r"/tmp/[A-Za-z0-9._-]+\.(?:json|txt|sarif|xml|log)\b")
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]] + sys.argv[1:], verbosity=2)
