@@ -502,7 +502,7 @@ class CompositeContract(unittest.TestCase):
                 self.assertIn("Review not saved:", text)
 
     def test_every_review_without_a_report_prints_review_not_saved(self) -> None:
-        # mutation: change "Step 6 prints `Review not saved: nothing to review`" in review.md's empty-scope rule
+        # mutation: change "print `Review not saved: nothing to review`" in the Empty scope paragraph of review.md's Step 6
         step6 = read(REVIEW).split("## Step 6: Save Review", 1)[1].split("## Step 7", 1)[0]
         self.assertIn("Review not saved: nothing to review", step6)
         self.assertIn("Review not saved: <error>", step6)
