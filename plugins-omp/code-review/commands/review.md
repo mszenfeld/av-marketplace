@@ -410,7 +410,7 @@ challenger_results = TaskOutput(challenger_id, block: true)
    entries, not full finding blocks.)
    With a base, a reinstated finding that breaks the scope rule — located outside the changed files and naming no changed file and line that causes it — is not moved into findings; list it under `### Out of scope (scope check)`.
    A reinstated entry that **What is not a finding** excludes is not moved into findings either; list it under `### Challenged Findings` as in step 1.
-   A reinstated entry that a written style rule backs is LOW, whatever its `reinstate at` severity.
+   A reinstated entry that **What is not a finding** would exclude but a written style rule backs is LOW, whatever its `reinstate at` severity.
 
 **Task Update:** Mark task 6 as `completed`.
 
