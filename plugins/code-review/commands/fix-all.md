@@ -393,7 +393,9 @@ Markers are written **only now that the run has committed to dispatching** — a
 2. **`**Part-of:** COMP-NNN`** on each component, directly after its `**ID:**` line, or after the heading where there is none. A block carries at most one `**Part-of:**` line: where one already exists, replace it in place.
 3. **Dissolution status** on each persisted composite the user dissolved in Step 2.4.5: `**Status:** 🚫 Rejected (YYYY-MM-DD) — dissolved into components`, by the Step 4.1 recipe.
 
-Failures: a composite block write that fails or does not verify dissolves the group for this run — its components are dispatched individually and Step 4.2 lists it with `marker-write-failed`; a `Part-of` write that fails is recorded there and membership is unaffected; a dissolution write that fails is recorded, the composite is treated as dissolved for this run and is offered again next run.
+Failures: a composite block write that fails or does not verify dissolves the group for this run — its components pass through Step 2.2's severity floor and Step 2.2.5's Fix-policy partition, as dissolved components do (Step 2.4.5, **Effects of dissolving**): a `needs-decision` component joins `needs_decision`, the rest join the fix list, and the fix list is sorted again by Step 2.3's rule (stable) before the first dispatch; Step 4.2 lists the group with `marker-write-failed` and names every component the floor or the partition removed; a `Part-of` write that fails is recorded there and membership is unaffected; a dissolution write that fails is recorded, the composite is treated as dissolved for this run and is offered again next run.
+
+`preflight_snapshot` stays frozen as the intended batch; Step 3.1's progress lines and Step 4.2's Results and Composition blocks show what was actually dispatched.
 
 ### Step 3.1: Sequential fix execution
 
@@ -403,7 +405,7 @@ For each issue in the filtered + sorted list from Step 2.3, in order, **sequenti
 
    > Fixing issue N/<total>: [<SEVERITY>] <ID>: <Title>
 
-   `N` is the 1-based index in the filtered+sorted list, `<total>` is the total count from the pre-flight summary, and the rest comes from the extracted issue block. A 30-issue run can take 10–30 minutes (~20–60 s per issue, see the Performance section in `docs/plugins/code-review.md`), so this line is the only signal the user gets between subagent invocations.
+   `N` is the 1-based index in the filtered+sorted dispatch list after Step 3.0's marker-write failures have released and re-filtered any components, `<total>` is that list's actual length, and the rest comes from the extracted issue block. The intended batch remains in `preflight_snapshot`; this progress line and Step 4.2's Results and Composition blocks show what was actually dispatched. A 30-issue run can take 10–30 minutes (~20–60 s per issue, see the Performance section in `docs/plugins/code-review.md`), so this line is the only signal the user gets between subagent invocations.
 
 2. Use the Task tool with these parameters:
    - subagent_type: `"code-review:fix-auto"`
@@ -588,6 +590,8 @@ Status icons: Fixed = ✅, Partially Fixed = ⚠️, Failed = ❌.
 ```
 
 `Written to the report` counts only the proposals this run persisted; `Dropped proposals` the proposals dissolved before persistence; `Marked 🚫 Rejected (dissolved)` lists the persisted composites whose block received the dissolution status; `Rejected by the analyst` renders the analyst's `## Rejected groupings`, one line per grouping; `Verification coverage` names each component the fixer could not check. `Malformed composites` lists each composite Step 1.6.1 set aside as malformed, with the reason. Omit any line whose value is empty; omit the block when the run held no composite and the pass was not unavailable.
+
+A `Marker write failures` entry whose components the floor or the partition removed continues `; not dispatched: <ID> (<below the severity floor | requires a decision>)[, …]`.
 
 **Restart safety.** Markers are on disk before the first dispatch, so an interrupted run leaves its successor the same composites: an open composite is retried whole, and a component fixed through a composite is filtered by Step 1.3 like any fixed finding.
 

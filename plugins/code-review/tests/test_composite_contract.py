@@ -34,6 +34,18 @@ GATE = "plugins/code-review/skills/decision-gate/SKILL.md"
 DECISION_ANALYST = "plugins/code-review/agents/decision-analyst.md"
 DOCS = "docs/plugins/code-review.md"
 EXTRACT = "plugins/code-review/scripts/extract-issue-ids.sh"
+QUALITY = "plugins/code-review/agents/code-quality-auditor.md"
+STANDARDS = "plugins/code-review/skills/standards-discovery/SKILL.md"
+ARCHITECTURE = "plugins/code-review/skills/architecture-analysis/SKILL.md"
+CHALLENGER = "plugins/code-review/agents/challenger.md"
+FALSIFICATION = "plugins/code-review/skills/finding-falsification/SKILL.md"
+
+S1 = (
+    "A rule about style, formatting, naming or size that the repository's own "
+    "`CLAUDE.md`, `AGENTS.md` or `REVIEW.md` states backs a finding the change breaks: "
+    "that finding is LOW, and its Problem cites the rule's file and section."
+)
+S2 = "A developer skill, a generic style guide or a linter's rule set backs no such finding."
 
 
 def read(rel: str) -> str:
@@ -44,6 +56,22 @@ def read(rel: str) -> str:
 
 
 class CompositeContract(unittest.TestCase):
+    def test_written_style_rules_back_only_low_findings_in_every_gate(self) -> None:
+        # mutation: delete "A developer skill, a generic style guide or a linter's rule set backs no such finding." from review.md or any other gate below
+        for rel in (REVIEW, QUALITY, STANDARDS, ARCHITECTURE, CHALLENGER, FALSIFICATION):
+            with self.subTest(file=rel):
+                text = read(rel)
+                self.assertIn(S1, text)
+                self.assertIn(S2, text)
+
+    def test_marker_write_failure_releases_components_through_the_fix_policy_partition(self) -> None:
+        # mutation: delete "Step 2.2.5's Fix-policy partition" from fix-all.md's Step 3.0 Failures paragraph
+        with self.subTest(file=FIX_ALL):
+            persistence = read(FIX_ALL).split("### Step 3.0: Persist the composites", 1)[1].split("### Step 3.1:", 1)[0]
+            failures = persistence.split("Failures:", 1)[1].split("\n\n", 1)[0]
+            self.assertIn("Step 2.2.5's Fix-policy partition", failures)
+            self.assertIn("`needs_decision`", failures)
+
     # ---- Task 1: prefix and category ------------------------------------
 
     def test_docs_prefix_table_has_composite_row(self):

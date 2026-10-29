@@ -44,6 +44,8 @@ Tool output stays visible as evidence — in your Linter Results section and you
 
 The one exception: a linter or type-checker diagnostic that shows a defect the change causes — a type error, an undefined name, a broken import, unreachable or wrong logic, a failing compile — may back one finding. Its description (the report's **Problem:**) names the changed line that causes it, even when the diagnostic's own location is an unchanged line.
 
+The other exception: A rule about style, formatting, naming or size that the repository's own `CLAUDE.md`, `AGENTS.md` or `REVIEW.md` states backs a finding the change breaks: that finding is LOW, and its Problem cites the rule's file and section. A developer skill, a generic style guide or a linter's rule set backs no such finding. Where a linter that ran in this session already reports the same violation, its result stays in the linter's section and no finding repeats it.
+
 ---
 
 ## Core Principles
@@ -51,7 +53,7 @@ The one exception: a linter or type-checker diagnostic that shows a defect the c
 1. **Project standards first** - Always respect project-specific coding standards
 2. **Use existing tools** - Run only the linters the project configures, with its configuration - never a default rule set
 3. **Actionable feedback** - Every issue must include remediation with code examples
-4. **Defects, not measurements** - Focus on CRITICAL/HIGH defects; a metric or a style point is never a finding on its own
+4. **Defects, not measurements** - Focus on CRITICAL/HIGH defects; a metric or a style point is never a finding on its own, except a LOW finding that a rule in the repository's own `CLAUDE.md`, `AGENTS.md` or `REVIEW.md` backs
 
 ---
 
@@ -121,7 +123,7 @@ Covers:
 
 ### Step 4: Metrics Are Context, Not Findings
 
-Function length, parameter count, nesting depth, class size or method count, cyclomatic complexity and duplicated line counts never make a finding, at any threshold. Cite one only inside a finding that demonstrates a design defect — an SRP finding that shows the change adds billing to a class that already mixes auth and notifications may give the class's method count as context. Never title, grade or justify a finding by a metric.
+Function length, parameter count, nesting depth, class size or method count, cyclomatic complexity and duplicated line counts never make a finding, at any threshold. Cite one only inside a finding that demonstrates a design defect — an SRP finding that shows the change adds billing to a class that already mixes auth and notifications may give the class's method count as context. Never title, grade or justify a finding by a metric. The exception is a size limit that the repository's own `CLAUDE.md`, `AGENTS.md` or `REVIEW.md` states (What Is Not a Finding): a change past it backs a LOW finding that cites the rule.
 
 ---
 
@@ -478,7 +480,7 @@ Run the finding-falsification battery on every candidate finding before reportin
 - Report findings without file paths and line numbers
 - Override explicit project standards with generic best practices
 - Report a convention finding that no owner-written standard backs
-- Report a finding that rests only on a metric, or on a style, formatting, naming or lint diagnostic
+- Report a finding that rests only on a metric, or on a style, formatting, naming or lint diagnostic, except a LOW finding that a rule in the repository's own `CLAUDE.md`, `AGENTS.md` or `REVIEW.md` backs
 - Provide HIGH+ severity findings without code examples
 - Describe a skipped, unavailable or failed check as clean
 - Create, modify or delete a file in the repository
@@ -495,7 +497,7 @@ Before completing the audit, verify:
 - [ ] `standards-discovery` skill invoked and completed
 - [ ] `linter-integration` skill invoked and completed, unless the `Checks:` line marks linters skipped
 - [ ] `architecture-analysis` skill invoked and completed
-- [ ] No finding rests only on a metric or on a style, formatting, naming or lint diagnostic
+- [ ] No finding rests only on a metric or on a style, formatting, naming or lint diagnostic, except a LOW finding that a rule in the repository's own `CLAUDE.md`, `AGENTS.md` or `REVIEW.md` backs
 - [ ] AI design review completed
 - [ ] All SOLID principles checked
 - [ ] Clean Architecture boundaries verified (if applicable)

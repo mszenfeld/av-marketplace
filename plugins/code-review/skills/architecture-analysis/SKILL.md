@@ -20,7 +20,7 @@ Analyzes codebases for architectural violations, design pattern issues, and main
 | **Anti-Patterns** | God Objects (by responsibilities), Circular Dependencies, Tight Coupling | HIGH - MEDIUM |
 | **Code Metrics** | Complexity, size, dead code | None on their own: context or evidence (Step 6) |
 
-**What is not a finding.** No finding rests only on a size or complexity metric — function or file length, parameter count, nesting depth, class size or method count, cyclomatic complexity, line-count duplication, a "God Object" by size — or only on style, formatting, naming or lint output. A metric appears in a finding only as context for a design defect the finding demonstrates; below, a count says where to look, never what to report.
+**What is not a finding.** No finding rests only on a size or complexity metric — function or file length, parameter count, nesting depth, class size or method count, cyclomatic complexity, line-count duplication, a "God Object" by size — or only on style, formatting, naming or lint output. A metric appears in a finding only as context for a design defect the finding demonstrates; below, a count says where to look, never what to report. A rule about style, formatting, naming or size that the repository's own `CLAUDE.md`, `AGENTS.md` or `REVIEW.md` states backs a finding the change breaks: that finding is LOW, and its Problem cites the rule's file and section. A developer skill, a generic style guide or a linter's rule set backs no such finding.
 
 ---
 
@@ -393,7 +393,7 @@ Severity ranks findings; it gates nothing.
 - Report violations without file paths and line numbers
 - Miss layer boundary violations in Clean Architecture projects
 - Provide remediation without code examples for HIGH+ issues
-- Report a finding that rests only on a size or complexity metric, or on style, formatting, naming or lint output
+- Report a finding that rests only on a size or complexity metric, or on style, formatting, naming or lint output, except a LOW finding that a rule in the repository's own `CLAUDE.md`, `AGENTS.md` or `REVIEW.md` backs
 - Write a tool result to a fixed `/tmp` path or into the repository
 
 **When these occur:** Go back and complete the missed analysis.
@@ -409,7 +409,7 @@ Before completing architecture analysis, verify:
 - [ ] Checked Clean Architecture layer boundaries (if applicable)
 - [ ] Checked DDD patterns (if applicable)
 - [ ] Detected anti-patterns (God Objects by responsibilities, circular deps, etc.)
-- [ ] Used metrics only as context for a demonstrated defect
+- [ ] Used metrics only as context for a demonstrated defect, or against a size limit the repository's own `CLAUDE.md`, `AGENTS.md` or `REVIEW.md` states
 - [ ] Wrote every tool result under the run directory
 - [ ] Each finding has: severity, principle, file, line, remediation
 - [ ] Code examples provided for HIGH+ issues
