@@ -17,10 +17,13 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from check_execution_boundary import (
+    ANY,
     CONSUMER_TOKEN,
+    ENGINE,
     MIN_BOUNDARY_SUBCOMMANDS,
     MIN_BOUNDARY_TOOLS,
     PLUGINS_DIR,
+    ROOT,
     SKILL_RELPATH,
     SourceError,
     bash_grants,
@@ -31,6 +34,9 @@ from check_execution_boundary import (
     main,
     parse_boundary,
     parse_registry,
+    patterns_intersect,
+    pre_approves_trust_accept,
+    rule_pattern,
     section_lines,
     table_rows,
 )
@@ -38,6 +44,7 @@ from check_execution_boundary import (
 SKILL_PATH = str(SKILL_RELPATH)
 FIX_ALL = "plugins/code-review/commands/fix-all.md"
 FIX_REPORT = "plugins/code-review/commands/fix-report.md"
+REVIEW = "plugins/code-review/commands/review.md"
 
 DEFAULT_BOUNDARY = (
     "- **Read-only inspection** is the `Read`, `Grep` and `Glob` tools plus the "
@@ -287,6 +294,123 @@ class TestGrantPrefix(unittest.TestCase):
         self.assertEqual(grant_prefix("Bash(npm  test:*)"), "npm test")
 
 
+class TestRulePattern(unittest.TestCase):
+    def test_a_bare_bash_rule_is_any_text(self):
+        self.assertEqual(rule_pattern("Bash"), ANY)
+
+    def test_a_trailing_colon_star_is_a_trailing_space_star(self):
+        self.assertEqual(rule_pattern("Bash(git log:*)"), f"git log {ANY}")
+
+    def test_the_plugin_root_becomes_the_root_symbol(self):
+        self.assertEqual(
+            rule_pattern("Bash(python3 ${CLAUDE_PLUGIN_ROOT}/x.py *)"),
+            f"python3 {ROOT}/x.py {ANY}",
+        )
+
+    def test_a_non_bash_entry_has_no_pattern(self):
+        self.assertIsNone(rule_pattern("Read"))
+
+
+class TestPatternsIntersect(unittest.TestCase):
+    def test_wildcards_on_both_sides_meet(self):
+        self.assertTrue(patterns_intersect(f"a{ANY}c", f"{ANY}b{ANY}"))
+
+    def test_different_literal_prefixes_never_meet(self):
+        self.assertFalse(patterns_intersect(f"a{ANY}", f"b{ANY}"))
+
+    def test_a_wildcard_meets_a_literal_command(self):
+        self.assertTrue(patterns_intersect(f"ls {ANY}", "ls -la"))
+
+    def test_a_literal_tail_must_be_present(self):
+        self.assertFalse(patterns_intersect(f"git {ANY} main", "git log"))
+
+    def test_a_pattern_longer_than_the_literal_does_not_meet_it(self):
+        self.assertFalse(patterns_intersect(f"a{ANY}b", "a"))
+
+    def test_the_root_symbol_matches_text_without_a_space(self):
+        self.assertTrue(patterns_intersect(f"{ROOT}x", "abx"))
+
+    def test_the_root_symbol_never_matches_a_space(self):
+        # A substituted plugin root is a path without a space.
+        self.assertFalse(patterns_intersect(f"{ROOT}x", "a bx"))
+
+
+class TestPreApprovesTrustAccept(unittest.TestCase):
+    def test_the_old_engine_wildcard_is_an_error(self):
+        # The regression this rule exists for: the commands' former engine
+        # grant ran trust accept without a prompt.
+        self.assertTrue(pre_approves_trust_accept(f"Bash({ENGINE} *)"))
+
+    def test_an_engine_grant_with_a_narrowed_hash_is_an_error(self):
+        self.assertTrue(pre_approves_trust_accept(f"Bash({ENGINE} trust accept a*)"))
+
+    def test_an_engine_grant_with_repo_is_an_error(self):
+        self.assertTrue(
+            pre_approves_trust_accept(f"Bash({ENGINE} --repo * trust accept *)")
+        )
+
+    def test_the_exact_trust_accept_command_is_an_error(self):
+        self.assertTrue(
+            pre_approves_trust_accept(f"Bash({ENGINE} trust accept 0123abcd)")
+        )
+
+    def test_a_bare_bash_is_an_error(self):
+        self.assertTrue(pre_approves_trust_accept("Bash"))
+
+    def test_a_bash_star_is_an_error(self):
+        self.assertTrue(pre_approves_trust_accept("Bash(*)"))
+
+    def test_a_python3_wildcard_is_an_error(self):
+        self.assertTrue(pre_approves_trust_accept("Bash(python3:*)"))
+
+    def test_an_absolute_path_wildcard_is_an_error(self):
+        # Claude Code substitutes the plugin root with an absolute path, so
+        # `/*` covers the engine's path too.
+        self.assertTrue(pre_approves_trust_accept("Bash(python3 /*)"))
+
+    def test_an_absolute_skills_path_wildcard_is_an_error(self):
+        self.assertTrue(pre_approves_trust_accept("Bash(python3 /*/skills/*)"))
+
+    def test_a_plugin_skills_wildcard_is_an_error(self):
+        self.assertTrue(
+            pre_approves_trust_accept("Bash(python3 ${CLAUDE_PLUGIN_ROOT}/skills/*)")
+        )
+
+    def test_a_leading_wildcard_before_trust_accept_is_an_error(self):
+        self.assertTrue(pre_approves_trust_accept("Bash(* trust accept a*)"))
+
+    def test_the_engine_config_grant_passes(self):
+        self.assertFalse(pre_approves_trust_accept(f"Bash({ENGINE} config *)"))
+
+    def test_the_engine_doc_paths_grant_passes(self):
+        self.assertFalse(pre_approves_trust_accept(f"Bash({ENGINE} doc-paths *)"))
+
+    def test_a_python_wildcard_passes(self):
+        # `python`, not `python3`: the commands invoke the engine with python3.
+        self.assertFalse(pre_approves_trust_accept("Bash(python:*)"))
+
+    def test_an_xargs_wildcard_passes(self):
+        # Running the engine through another program is outside this check.
+        self.assertFalse(pre_approves_trust_accept("Bash(xargs:*)"))
+
+    def test_a_git_wildcard_passes(self):
+        self.assertFalse(pre_approves_trust_accept("Bash(git:*)"))
+
+    def test_another_plugin_script_passes(self):
+        self.assertFalse(
+            pre_approves_trust_accept(
+                "Bash(python3 ${CLAUDE_PLUGIN_ROOT}/skills/engine/scripts/qa.py *)"
+            )
+        )
+
+    def test_a_bash_script_grant_passes(self):
+        self.assertFalse(
+            pre_approves_trust_accept(
+                "Bash(bash ${CLAUDE_PLUGIN_ROOT}/skills/docs-drift/scripts/docs_drift.sh *)"
+            )
+        )
+
+
 class TestClassifyPrefix(unittest.TestCase):
     FAMILIES = {"git": frozenset({"log", "show", "diff", "blame", "status"})}
 
@@ -324,6 +448,13 @@ class TestBashGrants(unittest.TestCase):
     def test_a_file_without_frontmatter_reports_a_parse_error(self):
         _, errors = bash_grants("# Just a document\n")
         self.assertTrue(errors)
+
+    def test_a_bare_bash_entry_is_a_grant(self):
+        # A bare `Bash` pre-approves every command, so it is a grant too.
+        self.assertEqual(
+            bash_grants(_command("Read, Bash, Bash(git log:*)")),
+            (["Bash", "Bash(git log:*)"], []),
+        )
 
 
 class TestCheck(unittest.TestCase):
@@ -480,6 +611,53 @@ class TestCheck(unittest.TestCase):
         skill = _skill(scope=scope, grants=grants)
         errors, _ = check(skill, {SKILL_PATH: skill})
         self.assertTrue(any("carries no such grant" in e for e in errors))
+
+    def test_a_grant_pre_approving_trust_accept_is_an_error_for_every_kind(self):
+        # hands-over grants are recorded, not diffed, but they stay active in
+        # the stage-running command's turn, so the rule covers every kind.
+        engine_wildcard = f"Bash({ENGINE} *)"
+        cases = {
+            "runs-the-stage": (
+                FIX_ALL,
+                {
+                    "grants": _clean_grants()
+                    + ((engine_wildcard, "pipeline", ["fix-all"], "engine"),),
+                    "consumers": {
+                        FIX_ALL: _command(f"Read, Bash(git log:*), {engine_wildcard}")
+                    },
+                },
+            ),
+            "hands-over": (
+                REVIEW,
+                {
+                    "scope": _clean_scope() + ((REVIEW, "hands-over", "hands over"),),
+                    "consumers": {REVIEW: _command(f"Read, {engine_wildcard}")},
+                },
+            ),
+        }
+        for kind, (path, arguments) in cases.items():
+            with self.subTest(kind=kind):
+                errors, _ = self._check(**arguments)
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(path, errors[0])
+                self.assertIn("trust accept", errors[0])
+
+    def test_engine_config_and_doc_paths_grants_pass(self):
+        config = f"Bash({ENGINE} config *)"
+        doc_paths = f"Bash({ENGINE} doc-paths *)"
+        errors, _ = self._check(
+            scope=_clean_scope() + ((REVIEW, "hands-over", "hands over"),),
+            grants=_clean_grants()
+            + (
+                (config, "pipeline", ["fix-all"], "policy"),
+                (doc_paths, "pipeline", ["fix-all"], "documentation paths"),
+            ),
+            consumers={
+                FIX_ALL: _command(f"Read, Bash(git log:*), {config}, {doc_paths}"),
+                REVIEW: _command(f"Read, {config}"),
+            },
+        )
+        self.assertEqual(errors, [])
 
 
 class _NoArgv:
