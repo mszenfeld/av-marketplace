@@ -218,7 +218,9 @@ An owner-written standard is a rule the project's owners wrote down for its code
 
 2. **A demonstrable defect needs no standard.** An exploit scenario, a crash or incorrect output is a finding on its own evidence.
 
-3. **When no standards documentation exists, report as INFO:**
+3. **A written style rule backs only a LOW finding.** A rule about style, formatting, naming or size that the repository's own `CLAUDE.md`, `AGENTS.md` or `REVIEW.md` states backs a finding the change breaks: that finding is LOW, and its Problem cites the rule's file and section. A developer skill, a generic style guide or a linter's rule set backs no such finding.
+
+4. **When no standards documentation exists, report as INFO:**
 
    ```json
    {
@@ -228,7 +230,7 @@ An owner-written standard is a rule the project's owners wrote down for its code
    }
    ```
 
-4. **Note in report:**
+5. **Note in report:**
    > "No owner-written coding standards found: convention observations are listed as doctrine-gap candidates, not findings. Consider writing the conventions down in CLAUDE.md, AGENTS.md, REVIEW.md or CONTRIBUTING.md."
 
 ---

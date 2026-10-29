@@ -2,7 +2,7 @@
 
 Security, architecture, and code quality analysis for your codebase.
 
-**Version:** 2.6.0
+**Version:** 2.7.0
 
 ## Commands
 
@@ -33,7 +33,7 @@ The scanner examples use the POSIX shell expansion `"${@}"` to forward each path
 
 **Checks.** The changed files decide which scanners run, and every auditor receives the plan as a `Checks:` line: the secret scan always runs; SAST runs when a source file changed; the dependency scan runs when a manifest or lockfile changed; linters run on the changed Python or TypeScript/JavaScript files, with the project's own configuration only. A whole-repository review runs every check. Scanners write their output to a fresh `mktemp -d` directory per run, so concurrent reviews on one machine do not read each other's results. The Verification Summary's `### Checks` lists each check, and the docs drift pre-pass, as ran, skipped, unavailable or failed; a check that did not run is never reported as clean.
 
-**What is not a finding.** A size or complexity metric (function length, parameter count, nesting, class size, cyclomatic complexity, duplicated lines, a "God Object" by size) and a style, formatting, naming or lint diagnostic never make a finding on their own; tool output stays in the auditors' evidence and in `### Checks`. A linter or type-checker diagnostic that shows a defect the change causes — a type error, an undefined name, a broken import, wrong logic — can back a finding that names the changed line. A convention finding needs an owner-written standard (`CLAUDE.md`, `AGENTS.md`, `REVIEW.md`, `CONTRIBUTING.md` and similar, or a developer skill); without one the observation is listed as a doctrine-gap candidate.
+**What is not a finding.** A size or complexity metric (function length, parameter count, nesting, class size, cyclomatic complexity, duplicated lines, a "God Object" by size) and a style, formatting, naming or lint diagnostic never make a finding on their own; tool output stays in the auditors' evidence and in `### Checks`. A linter or type-checker diagnostic that shows a defect the change causes — a type error, an undefined name, a broken import, wrong logic — can back a finding that names the changed line. A convention finding needs an owner-written standard (`CLAUDE.md`, `AGENTS.md`, `REVIEW.md`, `CONTRIBUTING.md` and similar, or a developer skill); without one the observation is listed as a doctrine-gap candidate. A rule about style, formatting, naming or size written in the repository's own `CLAUDE.md`, `AGENTS.md` or `REVIEW.md` is the exception: it backs a LOW finding that cites the rule. A developer skill, a generic style guide or a linter's rule set backs none.
 
 <a id="category-prefix-mapping"></a>
 **Issue ID categories:**
@@ -361,7 +361,7 @@ Every review automatically includes cross-domain correlation and adversarial rev
 After the standard analysis (security + code quality + optional documentation auditors), two verification subagents analyze the findings in parallel:
 
 - **Cross-Verifier**: identifies correlations between security, quality, and documentation findings (e.g., a missing validation layer behind an injection = higher blast radius, undocumented endpoint with a security bypass), coverage gaps, and composite findings
-- **Challenger**: challenges every finding, at every severity, for false positives, validates severity levels, calibrates severity across security, quality, and documentation domains, and drops findings that rest only on a size metric or a style or lint diagnostic
+- **Challenger**: challenges every finding, at every severity, for false positives, validates severity levels, calibrates severity across security, quality, and documentation domains, and drops findings that rest only on a size metric or a style or lint diagnostic, except a LOW finding backed by a rule in the repository's own `CLAUDE.md`, `AGENTS.md` or `REVIEW.md`
 
 ### Additional Report Sections
 
@@ -583,6 +583,8 @@ Each auto-accepted finding is listed under **Auto-accepted** in the run summary,
 
 <a id="upgrade-notes"></a>
 ## Upgrade Notes
+
+**`code-review` 2.7.0 lets a written style rule back a finding.** A rule about style, formatting, naming or size written in the repository's own `CLAUDE.md`, `AGENTS.md` or `REVIEW.md` now backs a LOW finding that cites the rule; developer skills, generic style guides and linter rule sets still back none, and a violation that a linter which ran already reports stays in the linter's results. In `/fix-all`, a composite whose marker write fails now releases its components through the severity floor and the Fix-policy partition, as a dissolved composite does, so a `needs-decision` component is offered for a decision instead of being fixed automatically.
 
 **`code-review` 2.6.0 reports fewer kinds of findings and runs only the checks the change needs.** Size and complexity metrics and style or lint diagnostics no longer produce findings, the challenger checks every finding instead of only CRITICAL and HIGH, and a convention finding needs a written standard. SAST, the dependency scan and linters run only when the changed files call for them; the secret scan always runs. A base with no changes now means nothing to review instead of a whole-repository review: ask for one with the words `whole repository`. Review artifacts under `docs/plans/`, `docs/reviews/`, `docs/testing/` and `docs/superpowers/` are no longer reviewed, except by the secret scan. Reports gain a `Findings:` count line and a `### Checks` section; the finding-block format the fix commands read is unchanged, so older readers work on 2.6.0 reports.
 

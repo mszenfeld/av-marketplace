@@ -34,7 +34,7 @@ For every security finding, at every severity:
 
 For every quality finding, at every severity, the review's own performance and architecture findings included:
 
-- **Not a finding**: a finding in any domain that rests only on a size or complexity metric (function or file length, parameter count, nesting depth, class size or method count, cyclomatic complexity, line-count duplication, "God Object" by size), or only on style, formatting, naming or lint diagnostics, is `false-positive`. The one exception is a linter or type-checker diagnostic that shows a defect the change causes (type error, undefined name, broken import, unreachable or wrong logic, failing compile): it may back one finding, whose Problem names the changed line that causes it.
+- **Not a finding**: a finding in any domain that rests only on a size or complexity metric (function or file length, parameter count, nesting depth, class size or method count, cyclomatic complexity, line-count duplication, "God Object" by size), or only on style, formatting, naming or lint diagnostics, is `false-positive`. The one exception is a linter or type-checker diagnostic that shows a defect the change causes (type error, undefined name, broken import, unreachable or wrong logic, failing compile): it may back one finding, whose Problem names the changed line that causes it. A finding that rests only on style, formatting, naming or one of the size metrics above, and that a written style rule backs, is not a false positive either: A rule about style, formatting, naming or size that the repository's own `CLAUDE.md`, `AGENTS.md` or `REVIEW.md` states backs a finding the change breaks: that finding is LOW, and its Problem cites the rule's file and section. A developer skill, a generic style guide or a linter's rule set backs no such finding. Confirm it, as `downgraded:{old}->LOW` where its severity is higher. A finding with its own defect evidence — an exploit scenario, a crash, incorrect output — keeps its severity; citing a written rule never caps it.
 - **Architecture "violations"**: Is a "God Object" actually an aggregate root in DDD? Is a "circular dependency" actually a valid bidirectional relationship?
 - **Convention mismatches**: Is the "violation" against discovered project standards, or against generic standards that don't apply here?
 
@@ -53,7 +53,7 @@ For every documentation finding, at every severity:
 Ensure severity is consistent across security, quality, and documentation findings:
 - A Critical security issue outweighs a High quality issue in the same module
 - A quality issue that enables a security vulnerability should be escalated
-- Pure style issues are not findings at any severity (Task 2)
+- Pure style issues are not findings at any severity (Task 2), except a finding a written style rule backs, which is LOW
 - Documentation findings should never outrank security findings at the same severity level
 - A HIGH documentation finding should be downgraded to MEDIUM if it describes a cosmetic or non-functional gap (e.g., typo in docs, missing changelog entry)
 - A documentation finding that directly impacts secure usage (e.g., outdated auth docs) may remain HIGH but should never exceed the related security finding's severity
