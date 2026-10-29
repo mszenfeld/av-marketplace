@@ -72,6 +72,41 @@ class CompositeContract(unittest.TestCase):
             self.assertIn("Step 2.2.5's Fix-policy partition", failures)
             self.assertIn("`needs_decision`", failures)
 
+    def test_written_style_rule_caps_only_findings_that_rest_on_style_alone(self) -> None:
+        # mutation: delete "keeps its severity; citing a written rule never caps it." from challenger.md
+        challenger = read(CHALLENGER)
+        self.assertIn(
+            "A finding that rests only on style, formatting, naming or one of the size metrics above, "
+            "and that a written style rule backs, is not a false positive either",
+            challenger,
+        )
+        self.assertIn(
+            "A finding with its own defect evidence — an exploit scenario, a crash, incorrect output — "
+            "keeps its severity; citing a written rule never caps it.",
+            challenger,
+        )
+        review = read(REVIEW)
+        self.assertIn("A finding that paragraph keeps because a written style rule backs it is LOW", review)
+        self.assertIn(
+            "A reinstated entry that **What is not a finding** would exclude but a written style rule backs is LOW",
+            review,
+        )
+
+    def test_marker_write_failure_on_the_zero_auto_path_is_reported_by_step_5_6(self) -> None:
+        # mutation: delete the "On the zero-auto path, print any `Marker write failures` entries" paragraph from fix-all.md's Step 5.6
+        text = read(FIX_ALL)
+        persistence = text.split("### Step 3.0: Persist the composites", 1)[1].split("### Step 3.1:", 1)[0]
+        self.assertIn("On the zero-auto path (Step 5.2, item 3)", persistence)
+        self.assertIn("an `auto` component is left for the next bulk run", persistence)
+        decision_summary = text.split("### Step 5.6: Decision-stage summary", 1)[1]
+        self.assertIn(
+            "On the zero-auto path, print any `Marker write failures` entries from Step 3.0 above the Decision Stage block",
+            decision_summary,
+        )
+        self.assertIn("including `left for the next bulk run` for an `auto` component", decision_summary)
+        summary = text.split("### Step 4.2: Display fix summary", 1)[1].split("## Step 5:", 1)[0]
+        self.assertIn("requires a decision | left for the next bulk run>", summary)
+
     # ---- Task 1: prefix and category ------------------------------------
 
     def test_docs_prefix_table_has_composite_row(self):
