@@ -42,7 +42,8 @@ consumers:
      with an absolute path in commands and grants alike. Running the engine
      through another program (`xargs`, `env`, `bash -c`), a plugin root
      containing a space, the session's permission mode and the user's settings
-     are outside this check.
+     are outside this check. The engine path is anchored to an existing file;
+     a missing or moved engine is a source error, never a successful scan.
 
 Errors exit non-zero; warnings print and do not fail the build. Exit 2 is a
 usage error or an unparseable source, which is not a failed check.
@@ -98,15 +99,14 @@ BASH_GRANT_RE = re.compile(r"^Bash\((?P<spec>.*)\)$", re.DOTALL)
 # The auto-accept engine as the commands invoke it. `trust accept` records a
 # lasting trust approval, so no consumer may pre-approve it.
 PLUGIN_ROOT = "${CLAUDE_PLUGIN_ROOT}"
-ENGINE = f"python3 {PLUGIN_ROOT}/skills/decision-gate/scripts/auto_accept.py"
+ENGINE_RELPATH = PurePath("skills/decision-gate/scripts/auto_accept.py")
+ENGINE = f"python3 {PLUGIN_ROOT}/{ENGINE_RELPATH}"
 ENGINE_GRANTS = frozenset({f"Bash({ENGINE} config *)", f"Bash({ENGINE} doc-paths *)"})
 # Pattern symbols: ANY is a rule's `*`, any text; ROOT is a substituted
 # plugin root, any text without a space.
 ANY = "\x00"
 ROOT = "\x01"
-TRUST_ACCEPT_FAMILY = (
-    f"python3 {ROOT}/skills/decision-gate/scripts/auto_accept.py {ANY}trust {ANY}accept {ANY}"
-)
+TRUST_ACCEPT_FAMILY = f"{ENGINE.replace(PLUGIN_ROOT, ROOT)} {ANY}trust {ANY}accept {ANY}"
 
 CLASSES = frozenset({"inside-boundary", "pipeline", "outside-escalates"})
 STAGE_RUNNING_KIND = "runs-the-stage"
@@ -403,18 +403,15 @@ def pre_approves_trust_accept(grant: str) -> bool:
     A grant naming the engine passes only as one of ENGINE_GRANTS: the
     engine's parser rejects `trust` after `config`, and `doc-paths` takes
     every later word as a path. Any other grant fails when its pattern can
-    match TRUST_ACCEPT_FAMILY; a trailing ` *` that is the rule's only
-    wildcard also matches the bare command, so that form is tried too.
+    match TRUST_ACCEPT_FAMILY. TRUST_ACCEPT_FAMILY ends with ANY, so a
+    rule's bare-command match adds nothing.
     """
-    if "auto_accept.py" in grant:
+    if ENGINE_RELPATH.name in grant:
         return grant not in ENGINE_GRANTS
     pattern = rule_pattern(grant)
     if pattern is None:
         return False
-    forms = [pattern]
-    if pattern.endswith(" " + ANY) and pattern.count(ANY) == 1:
-        forms.append(pattern[:-2])
-    return any(patterns_intersect(form, TRUST_ACCEPT_FAMILY) for form in forms)
+    return patterns_intersect(pattern, TRUST_ACCEPT_FAMILY)
 
 
 def classify_prefix(
@@ -485,12 +482,17 @@ def check(skill_text: str, consumers: dict[str, str]) -> tuple[list[str], list[s
         for message in parse_errors:
             errors.append(f"{path}: {message}")
         for grant in grants:
-            if pre_approves_trust_accept(grant):
-                errors.append(
-                    f"{path}: allowed-tools: {grant!r} pre-approves the auto-accept "
-                    "engine's `trust accept`, which records a lasting trust approval; "
-                    "grant only the engine's `config *` and `doc-paths *` calls"
-                )
+            if not pre_approves_trust_accept(grant):
+                continue
+            reason = (
+                "names the auto-accept engine but is not exactly one of its allowed grants"
+                if ENGINE_RELPATH.name in grant
+                else "pre-approves the auto-accept engine's `trust accept`"
+            )
+            errors.append(
+                f"{path}: allowed-tools: {grant!r} {reason}; grant only "
+                f"{' and '.join(sorted(ENGINE_GRANTS))}"
+            )
         if kind != STAGE_RUNNING_KIND:
             continue
         for grant in grants:
@@ -586,6 +588,9 @@ def main(argv: list[str] | None = None, plugins_dir: Path = PLUGINS_DIR) -> int:
         skill_path = str(SKILL_RELPATH)
         if skill_path not in consumers:
             raise SourceError(f"{skill_path}: not found — the boundary lives here")
+        engine = plugins_dir / "code-review" / ENGINE_RELPATH
+        if not engine.is_file():
+            raise SourceError(f"{engine}: not found — rule 5 would measure nothing")
         errors, warnings = check(consumers[skill_path], consumers)
     except SourceError as exc:
         print(f"error: {exc}", file=sys.stderr)

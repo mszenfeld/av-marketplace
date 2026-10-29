@@ -20,6 +20,8 @@ from check_execution_boundary import (
     ANY,
     CONSUMER_TOKEN,
     ENGINE,
+    ENGINE_GRANTS,
+    ENGINE_RELPATH,
     MIN_BOUNDARY_SUBCOMMANDS,
     MIN_BOUNDARY_TOOLS,
     PLUGINS_DIR,
@@ -42,6 +44,7 @@ from check_execution_boundary import (
 )
 
 SKILL_PATH = str(SKILL_RELPATH)
+ENGINE_PATH = str(Path("plugins/code-review") / ENGINE_RELPATH)
 FIX_ALL = "plugins/code-review/commands/fix-all.md"
 FIX_REPORT = "plugins/code-review/commands/fix-report.md"
 REVIEW = "plugins/code-review/commands/review.md"
@@ -124,8 +127,8 @@ def _command(allowed_tools: str | None = None, *, mentions: bool = True) -> str:
     return "\n".join(lines) + "\n"
 
 
-# The smallest tree that passes: the skill classifies itself and one command,
-# and the command's single grant is a git subcommand the boundary admits.
+# The smallest tree that passes: the engine anchor exists, the skill classifies
+# itself and one command, and the command's single grant is an admitted git subcommand.
 def _clean_scope():
     return (
         (SKILL_PATH, "runs-the-stage", "This file."),
@@ -385,6 +388,17 @@ class TestPreApprovesTrustAccept(unittest.TestCase):
     def test_the_engine_doc_paths_grant_passes(self):
         self.assertFalse(pre_approves_trust_accept(f"Bash({ENGINE} doc-paths *)"))
 
+    def test_a_filename_wildcard_tracks_the_engine_path(self) -> None:
+        grant = (
+            f"Bash(python3 ${{CLAUDE_PLUGIN_ROOT}}/"
+            f"{ENGINE_RELPATH.with_suffix('')}* trust accept *)"
+        )
+        self.assertTrue(pre_approves_trust_accept(grant))
+
+    def test_the_engine_basename_cannot_whitelist_a_different_path(self) -> None:
+        grant = f"Bash(python3 /other/scripts/{ENGINE_RELPATH.name} config *)"
+        self.assertTrue(pre_approves_trust_accept(grant))
+
     def test_a_python_wildcard_passes(self):
         # `python`, not `python3`: the commands invoke the engine with python3.
         self.assertFalse(pre_approves_trust_accept("Bash(python:*)"))
@@ -640,7 +654,49 @@ class TestCheck(unittest.TestCase):
                 errors, _ = self._check(**arguments)
                 self.assertEqual(len(errors), 1, errors)
                 self.assertIn(path, errors[0])
-                self.assertIn("trust accept", errors[0])
+                self.assertIn("not exactly one of its allowed grants", errors[0])
+                for grant in ENGINE_GRANTS:
+                    self.assertIn(grant, errors[0])
+
+    def test_noncanonical_engine_grants_report_an_allowlist_mismatch(self) -> None:
+        grants = (
+            f"Bash({ENGINE} config:*)",
+            f"Bash({ENGINE} doc-paths:*)",
+            f"Bash({ENGINE}  config *)",
+            f"Bash({ENGINE}  doc-paths *)",
+        )
+        for grant in grants:
+            with self.subTest(grant=grant):
+                errors, _ = self._check(
+                    scope=_clean_scope() + ((REVIEW, "hands-over", "hands over"),),
+                    consumers={REVIEW: _command(f"Read, {grant}")},
+                )
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(REVIEW, errors[0])
+                self.assertIn(repr(grant), errors[0])
+                self.assertIn(
+                    "names the auto-accept engine but is not exactly one of its allowed grants",
+                    errors[0],
+                )
+                self.assertNotIn("pre-approves", errors[0])
+                for allowed in ENGINE_GRANTS:
+                    self.assertIn(allowed, errors[0])
+
+    def test_broad_grants_report_trust_accept_preapproval(self) -> None:
+        for grant in ("Bash", "Bash(python3:*)"):
+            with self.subTest(grant=grant):
+                errors, _ = self._check(
+                    scope=_clean_scope() + ((REVIEW, "hands-over", "hands over"),),
+                    consumers={REVIEW: _command(f"Read, {grant}")},
+                )
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(
+                    "pre-approves the auto-accept engine's `trust accept`",
+                    errors[0],
+                )
+                self.assertNotIn("not exactly one of its allowed grants", errors[0])
+                for allowed in ENGINE_GRANTS:
+                    self.assertIn(allowed, errors[0])
 
     def test_engine_config_and_doc_paths_grants_pass(self):
         config = f"Bash({ENGINE} config *)"
@@ -693,6 +749,7 @@ class TestMain(unittest.TestCase):
 
     def _clean_files(self):
         return {
+            ENGINE_PATH: "# Auto-accept engine; only its existence is inspected.\n",
             SKILL_PATH: _skill(scope=_clean_scope(), grants=_clean_grants()),
             FIX_ALL: _command("Read, Bash(git log:*)"),
         }
@@ -737,6 +794,47 @@ class TestMain(unittest.TestCase):
         code, output = self._run({FIX_ALL: _command("Read")})
         self.assertEqual(code, 2)
         self.assertIn("the boundary lives here", output)
+
+    def test_missing_engine_is_a_source_error(self) -> None:
+        files = self._clean_files()
+        del files[ENGINE_PATH]
+        code, output = self._run(files)
+        self.assertEqual(code, 2)
+        self.assertIn(ENGINE_PATH, output)
+        self.assertIn("rule 5 would measure nothing", output)
+        self.assertNotIn("Execution boundary OK", output)
+
+    def test_a_directory_at_the_engine_path_is_a_source_error(self) -> None:
+        files = self._clean_files()
+        del files[ENGINE_PATH]
+        files[f"{ENGINE_PATH}/child.txt"] = "Not an engine file.\n"
+        code, output = self._run(files)
+        self.assertEqual(code, 2)
+        self.assertIn("rule 5 would measure nothing", output)
+        self.assertNotIn("Execution boundary OK", output)
+
+    def test_moved_engine_with_updated_grants_cannot_false_pass(self) -> None:
+        destinations = (
+            ENGINE_RELPATH.with_name("engine.py"),
+            ENGINE_RELPATH.parent / "moved" / ENGINE_RELPATH.name,
+        )
+        for destination in destinations:
+            with self.subTest(destination=destination):
+                files = self._clean_files()
+                moved_path = str(Path("plugins/code-review") / destination)
+                files[moved_path] = files.pop(ENGINE_PATH)
+                grant = f"Bash(python3 ${{CLAUDE_PLUGIN_ROOT}}/{destination} *)"
+                files[FIX_ALL] = _command(f"Read, Bash(git log:*), {grant}")
+                files[SKILL_PATH] = _skill(
+                    scope=_clean_scope(),
+                    grants=_clean_grants()
+                    + ((grant, "pipeline", ["fix-all"], "Engine moved."),),
+                )
+                code, output = self._run(files)
+                self.assertEqual(code, 2)
+                self.assertIn(ENGINE_PATH, output)
+                self.assertIn("rule 5 would measure nothing", output)
+                self.assertNotIn("Execution boundary OK", output)
 
     def test_unparseable_source_is_exit_2_not_1(self):
         # A failed check and an unreadable source are different answers, and
