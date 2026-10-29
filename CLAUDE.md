@@ -145,3 +145,28 @@ six places: the four above plus the native `.omp-plugin/plugin.json` and
 `package.json`. A file under `scripts/` that both editions ship must be
 byte-identical; the build fails otherwise. Their agents, skills, commands and
 hooks are written for each harness separately.
+
+## code-review eval
+
+A pull request that changes what `/code-review:review` runs passes the
+maintainer's code-review eval before it merges. That covers any file under
+`plugins/code-review/` except `tests/`, an agent's `tools:` and `model:`
+included, and `omp/overlay/code-review.json`. The eval replays recorded
+reviews against a pinned copy of the plugin. It lives only on the
+maintainer's machine and is never pushed, so a contributor without it leaves
+this check to the maintainer.
+
+The pull request's head runs every eval case twice in one budgeted series,
+the replay findings are matched blind, and the head is compared with the
+baseline arm the eval's README names, read against the latest A/A compares.
+The change passes when that compare reports PASS: its blocking rule passes,
+every case has its runs and current judgments, and no metric that has an
+A/A threshold moves in its adverse direction by more than that threshold.
+Metrics without a threshold are reported, not gated. A FAIL whose only
+reasons are metrics that regressed past their A/A threshold, with the
+blocking rule passing, merges only when the maintainer adds a line
+`Eval waiver: <metric>: <reason>` to the pull request body for each such
+metric; a FAIL of the blocking rule and an INCOMPLETE compare never merge.
+The pull request body names the compare file and its verdict. The eval
+exercises the Claude Code edition only, so a change confined to
+`omp/overlay/code-review.json` says that it was not evaluated.
