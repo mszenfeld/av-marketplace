@@ -148,10 +148,15 @@ hooks are written for each harness separately.
 
 ## code-review eval
 
-A pull request that changes what `/code-review:review` runs passes the
-maintainer's code-review eval before it merges. That covers any file under
-`plugins/code-review/` except `tests/`, an agent's `tools:` and `model:`
-included, and `omp/overlay/code-review.json`. The eval replays recorded
+A pull request that changes a file the eval loads passes the maintainer's
+code-review eval before it merges: any file under `plugins/code-review/`
+except `tests/`, an agent's `tools:` and `model:` included. The eval loads
+only this plugin's Claude Code edition, so nothing else is covered: not
+another plugin's skills that `/code-review:review` loads when installed, and
+not the OMP edition's sources `omp/overlay/code-review.json`,
+`omp/preamble.md` and `scripts/build_omp_edition.py`. A pull request that
+changes only those OMP sources says in its body that it was not evaluated.
+The eval replays recorded
 reviews against a pinned copy of the plugin. It lives only on the
 maintainer's machine and is never pushed, so a contributor without it leaves
 this check to the maintainer.
@@ -167,6 +172,4 @@ reasons are metrics that regressed past their A/A threshold, with the
 blocking rule passing, merges only when the maintainer adds a line
 `Eval waiver: <metric>: <reason>` to the pull request body for each such
 metric; a FAIL of the blocking rule and an INCOMPLETE compare never merge.
-The pull request body names the compare file and its verdict. The eval
-exercises the Claude Code edition only, so a change confined to
-`omp/overlay/code-review.json` says that it was not evaluated.
+The pull request body names the compare file and its verdict.
