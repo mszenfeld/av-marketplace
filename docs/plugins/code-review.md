@@ -2,7 +2,7 @@
 
 Security, architecture, and code quality analysis for your codebase.
 
-**Version:** 2.7.0
+**Version:** 2.7.1
 
 ## Commands
 
@@ -516,7 +516,7 @@ Settings come from three files, later ones winning:
 | `auto_accept_gate` | `"analyst"` | Where the second opinion comes from. `"analyst"` — a second analyst in confirm mode. `"decision-model"` — in OMP, the decision model on the `judge` role first, then a second analyst wherever it does not agree; Claude Code has no decision model, so it prints `Decision model unavailable here: second opinions come from a second analyst.` and uses the analyst. `"decision-model"` set in `.av/config.toml` or `.av/local.toml` is trust-pinned per worktree; `"analyst"` is not. |
 | `after_review` | `"ask"` | What `/code-review:review` does after saving its report, and Delivery after committing its final review. `"ask"` asks: `Fix all` (`/fix-all`), `Choose from a checklist` (`/fix-report`) or `Nothing now`. `"fix-all"` runs `/fix-all --yes <report>`: the auto-fixable findings are fixed without the confirmation question, and the final summary opens with "Set out to fix" — the full pre-flight issue table, counts and applicable Composites block — before the results; the dissolve question and the needs-decision offer are still asked when they apply. `"fix-report"` opens `/fix-report`'s checklist on the report. `"none"` prints the fix commands. Nothing runs when the review found no issues. `"fix-all"` set in `.av/config.toml` or `.av/local.toml` is trust-pinned per worktree: the first review after setting it asks you to trust the settings, and any answer but `Trust and use it` falls back to the question. The other values are not pinned. An invalid value falls back to `"ask"` with a message. |
 
-One trust approval covers every pinned `[code-review]` setting, so both trust questions — the review's and the decision stage's — name auto-accept and `after_review = "fix-all"` whenever both are on. In Claude Code, a command's pre-approved tools last the whole turn, so while `/fix-all` or `/fix-report` runs after `/review` hands its report over, `/review`'s own pre-approvals stay active too; the decision stage still asks before any check outside its read-only boundary.
+One trust approval covers every pinned `[code-review]` setting, so both trust questions — the review's and the decision stage's — name auto-accept and `after_review = "fix-all"` whenever both are on. In Claude Code, a command's pre-approved tools last the whole turn, so while `/fix-all` or `/fix-report` runs after `/review` hands its report over, `/review`'s own pre-approvals stay active too; the decision stage still asks before any check outside its read-only boundary. No command pre-approves the engine call that records the approval, so in Claude Code's default permission mode, unless another permission rule allows it, `Trust and use it` is followed by Claude Code's own permission prompt for that call; denying it leaves the settings untrusted for the run.
 
 All seven eligibility rules must pass; no confidence score overrides a failed rule:
 
@@ -583,6 +583,8 @@ Each auto-accepted finding is listed under **Auto-accepted** in the run summary,
 
 <a id="upgrade-notes"></a>
 ## Upgrade Notes
+
+**`code-review` 2.7.1 no longer pre-approves recording trust.** `/code-review:review`, `/code-review:fix-all` and `/code-review:fix-report` pre-approved every call of the auto-accept engine, `trust accept` included, so the call that records a lasting trust approval for the worktree ran without Claude Code's permission prompt. They now pre-approve only its `config` and `doc-paths` calls: after `Trust and use it`, Claude Code's default permission mode asks once more unless another permission rule allows the call, and denying it leaves the settings untrusted for that run. The OMP edition is unchanged, since OMP has no command pre-approvals.
 
 **`code-review` 2.7.0 lets a written style rule back a finding.** A rule about style, formatting, naming or size written in the repository's own `CLAUDE.md`, `AGENTS.md` or `REVIEW.md` now backs a LOW finding that cites the rule; developer skills, generic style guides and linter rule sets still back none, and a violation that a linter which ran already reports stays in the linter's results. In `/fix-all`, a composite whose marker write fails now releases its components through the severity floor and the Fix-policy partition, as a dissolved composite does, so a `needs-decision` component is offered for a decision instead of being fixed automatically.
 
