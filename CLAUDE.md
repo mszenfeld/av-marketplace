@@ -183,13 +183,17 @@ cards through the extension file of the pull request's head and through the
 baseline's, without a model, and checks the gate's decisions, the result text
 that the cost measurement classifies and the open findings section. The
 change passes when the replay reports PASS. The pull request body names the
-replay file, its verdict and the recorded blockers the head no longer
-reaches; the maintainer decides whether losing them is acceptable.
+replay file, its verdict and how many recorded blockers the head no longer
+reaches, describing only those of cards from a public source of the eval; the
+maintainer decides from the local replay file whether losing them is
+acceptable.
 
-A pull request that changes `REVIEWER_PROMPT` or `REVIEWER_ARGS` in
-`omp/native/plan-review/extensions/plan-review.ts`, or the `advisor` model
-that `docs/oh-my-pi.md` or `docs/plugins/plan-review.md` recommends, also
-passes the eval's reviewer compare. The head reviews every reviewer case
+A pull request that changes what the reviewer receives or how long it may
+run in `omp/native/plan-review/extensions/plan-review.ts` (`REVIEWER_PROMPT`,
+`REVIEWER_ARGS`, `REVIEW_TIMEOUT_MS` or the prompt its `pi.exec` call builds
+around them), or the `advisor` model that `docs/oh-my-pi.md` or
+`docs/plugins/plan-review.md` recommends, also passes the eval's reviewer
+compare. The head reviews every reviewer case
 twice in one budgeted series, its findings are matched blind, and the head is
 compared with the plan baseline arm the eval's README names, read against the
 latest A/A compares. PASS merges. A FAIL whose only reasons are metrics that
