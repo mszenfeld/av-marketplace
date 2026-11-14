@@ -9,6 +9,10 @@ Usage:
 
 Roots supplement the default OMP session directories. Costs are transcript-accounted
 API prices, not billing receipts; an interrupted request may not have been persisted.
+
+The CLI skips transcripts on I/O, Unicode, TypeError or AttributeError failures,
+warning on stderr without discarding the other runs.
+
 A recovered result dictionary is not evidence of successful completion. In particular,
 error results and earlier JSON fragments are preserved, and absent JSON does not imply
 a time/cost stop. Completion classification also needs the agent's output contract,
@@ -648,7 +652,7 @@ def main(argv: list[str] | None = None) -> int:
     for paths in sessions.values():
         try:
             run, turns = parse_run(paths[0], args.long_turn_tokens, dict(args.repo_suffix))
-        except (OSError, UnicodeError) as error:
+        except (OSError, UnicodeError, TypeError, AttributeError) as error:
             sys.stderr.write(f"Warning: {paths[0]}: {error}\n")
             continue
 

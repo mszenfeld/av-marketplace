@@ -166,6 +166,29 @@ class AgentRunsTest(unittest.TestCase):
         self.assertEqual(output.returncode, 0, output.stderr)
         self.assertEqual(json.loads(output.stdout)["path"], str(first))
 
+    def test_cli_skips_transcripts_with_invalid_result_or_read_details(self) -> None:
+        cases = (
+            ("bad-findings", [turn(1, '{"findings": null}')]),
+            ("bad-details", [
+                turn(1, [call("read", "read", path="src/$$FILE$$.py")]),
+                result("read", details=None),
+            ]),
+            ("good", [turn(1, '{"findings": []}')]),
+        )
+        paths = {}
+        for name, body in cases:
+            entries = headers() + body
+            entries[0]["id"] = name
+            paths[name] = transcript(self.root / "sessions", entries, f"{name}.jsonl")
+
+        output = self.cli("--root", str(self.root / "sessions"))
+        self.assertEqual(output.returncode, 0, output.stderr)
+        rows = [json.loads(line) for line in output.stdout.splitlines()]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["path"], str(paths["good"]))
+        for name in ("bad-findings", "bad-details"):
+            self.assertIn(f"Warning: {paths[name]}:", output.stderr)
+
     def test_draft_metrics_end_and_exact_record_keys(self) -> None:
         final = {"plan": PLAN, "changed_files": ["src/a.py", "tests/test_a.py"],
                  "fe_scenarios": 2, "be_scenarios": 3, "desktop_scenarios": 4}
