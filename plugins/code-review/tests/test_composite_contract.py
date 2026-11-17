@@ -239,13 +239,39 @@ class CompositeContract(unittest.TestCase):
             "Step 1.6.3 does not validate member locations",
         )
 
-    def test_fix_all_dissolve_question_copy(self):
-        # mutation: delete the question string "Dissolve which composites into their components?" from fix-all.md
-        self.assertIn("Dissolve which composites into their components?", read(FIX_ALL))
+    def test_fix_all_dissolve_question_keeps_all_in_one_answer(self) -> None:
+        # mutation: rename the step 1 option `Keep all <Y>` in fix-all.md Step 2.4.5, or put "(select none to keep all)" back on its question
+        step = read(FIX_ALL).split("### Step 2.4.5: The dissolve question", 1)[1].split("### Step 2.5:", 1)[0]
+        keep = step.split("**Step 1 — keep or dissolve.**", 1)[1].split("**Step 2 — which composites.**", 1)[0]
+        self.assertIn("`multiSelect: false`", keep)
+        for option in ("`Keep all <Y>`", "`Dissolve some`", "`Keep COMP-001`", "`Dissolve COMP-001`"):
+            with self.subTest(option=option):
+                self.assertIn(option, keep)
+        self.assertNotIn("select none", step)
 
-    def test_fix_all_fail_closed_gate(self):
-        # mutation: delete "Dissolve question: unavailable" from fix-all.md
-        self.assertIn("Dissolve question: unavailable", read(FIX_ALL))
+    def test_fix_all_dissolve_pages_end_with_none_of_these(self) -> None:
+        # mutation: delete the `None of these` option from step 2 of fix-all.md Step 2.4.5, or let a page list four composites again
+        step = read(FIX_ALL).split("### Step 2.4.5: The dissolve question", 1)[1].split("### Step 2.5:", 1)[0]
+        pages = step.split("**Step 2 — which composites.**", 1)[1].split("**Effects of dissolving.**", 1)[0]
+        self.assertIn("Dissolve which composites into their components?", pages)
+        self.assertIn("`multiSelect: true`", pages)
+        self.assertIn("up to **three** composites", pages)
+        self.assertIn("label `None of these`", pages)
+
+    def test_fix_all_fail_closed_gate(self) -> None:
+        # mutation: delete "Dissolve question: unavailable", or the clause that fails closed when "a step comes back without one of its listed options selected", from fix-all.md Step 2.4.5
+        step = read(FIX_ALL).split("### Step 2.4.5: The dissolve question", 1)[1].split("### Step 2.5:", 1)[0]
+        self.assertIn("Dissolve question: unavailable", step)
+        self.assertIn("a step comes back without one of its listed options selected", step)
+
+    def test_fix_all_yes_keeps_composites_without_asking(self) -> None:
+        # mutation: delete "and **never with `skip_confirmation`**" from fix-all.md Step 2.4.5, or "not at all with `skip_confirmation`" from Step 5.2's zero-auto item
+        text = read(FIX_ALL)
+        step = text.split("### Step 2.4.5: The dissolve question", 1)[1].split("### Step 2.5:", 1)[0]
+        self.assertIn("**never with `skip_confirmation`**", step)
+        self.assertIn("`Dissolve question: skipped (--yes); all composites kept for this run`", step)
+        offer = text.split("### Step 5.2: The offer", 1)[1].split("### Step 5.3:", 1)[0]
+        self.assertIn("not at all with `skip_confirmation`", offer)
 
     def test_fix_all_zero_auto_hook(self):
         # mutation: delete the Step 5.2 zero-auto paragraph that runs the dissolve question and persistence "before `code-review:decision-gate` is loaded" from fix-all.md
@@ -298,6 +324,12 @@ class CompositeContract(unittest.TestCase):
         self.assertIn('final summary opens with "Set out to fix"', row)
         self.assertNotIn("the pre-flight is printed", row)
 
+    def test_docs_after_review_fix_all_keeps_composites(self) -> None:
+        # mutation: restore "the dissolve question and the needs-decision offer are still asked when they apply" in the after_review configuration row
+        row = next(line for line in read(DOCS).splitlines() if line.startswith("| `after_review` |"))
+        self.assertIn("composites are kept without the dissolve question", row)
+        self.assertNotIn("the dissolve question and the needs-decision offer are still asked", row)
+
     # ---- Task 6: /fix-report ---------------------------------------------
 
     def test_fix_report_has_composition_steps(self):
@@ -313,6 +345,15 @@ class CompositeContract(unittest.TestCase):
     def test_fix_report_persists_before_gate(self):
         # mutation: delete "before Step 2.4 loads the decision gate" from fix-report.md Step 2.3.5
         self.assertIn("before Step 2.4 loads the decision gate", read(FIX_REPORT))
+
+    def test_fix_report_dissolve_question_follows_fix_all(self) -> None:
+        # mutation: replace "the same two steps" with "four composites per AskUserQuestion call, nothing appended", or delete the clause that renders the Composites block first, in fix-report.md Step 2.1.5
+        step = read(FIX_REPORT).split("### Step 2.1.5: The dissolve question", 1)[1].split("### Step 2.2:", 1)[0]
+        self.assertIn("**Composites block**", step)
+        self.assertIn("the same two steps", step)
+        self.assertIn("`None of these`", step)
+        self.assertIn("a step comes back without one of its listed options selected", step)
+        self.assertNotIn("nothing appended", step)
 
     # ---- Task 7: decision gate ------------------------------------------
 
