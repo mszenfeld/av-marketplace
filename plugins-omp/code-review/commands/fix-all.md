@@ -86,7 +86,7 @@ Rules:
 5. Empty `$ARGUMENTS` → both `severity_floor` and `path` unset; auto-merge mode.
 6. **Whitespace in paths is not supported.** `$ARGUMENTS` is tokenized by whitespace. A path like `docs/my reports/foo.md` splits into two tokens and triggers Rule 2. Workaround: rename the directory or symlink it.
 7. **Files literally named `CRITICAL`/`HIGH`/`MEDIUM`/`LOW`** match the severity regex first. To target them, prefix with `./` (e.g., `./HIGH`). A file literally named `--yes` likewise needs `./--yes`.
-8. **`--yes` is the only flag.** It answers Step 2.5's confirmation gate in advance; `/code-review:review` passes it when its post-review action hands a saved report to `/fix-all`. A repeated `--yes` changes nothing. Any other flag-like token (`--help`, `-h`, `--verbose`, `--severity=…`) classifies as a `path` and will fail in Step 1.1 with `Could not read file '--help'. Make sure the path is correct and the file exists.` For general slash-command help use Claude Code's `/help`; for `/fix-all` usage details see [`docs/plugins/code-review.md`](../../../docs/plugins/code-review.md) (`/fix-all` section).
+8. **`--yes` is the only flag.** It answers Step 2.4.5's dissolve question (every composite is kept) and Step 2.5's confirmation gate in advance; `/code-review:review` passes it when its post-review action hands a saved report to `/fix-all`. A repeated `--yes` changes nothing. Any other flag-like token (`--help`, `-h`, `--verbose`, `--severity=…`) classifies as a `path` and will fail in Step 1.1 with `Could not read file '--help'. Make sure the path is correct and the file exists.` For general slash-command help use Claude Code's `/help`; for `/fix-all` usage details see [`docs/plugins/code-review.md`](../../../docs/plugins/code-review.md) (`/fix-all` section).
 
 **Severity floor semantics:** the floor includes itself and everything *above* it. `HIGH` matches HIGH+CRITICAL. `MEDIUM` matches MEDIUM+HIGH+CRITICAL. `LOW` matches all four levels.
 
@@ -110,7 +110,7 @@ For each token:
 
 Empty `$ARGUMENTS` leaves all three at their initial values (auto-merge mode, no filter).
 
-These resolved values are consumed by Step 1.1 (mode detection: `path` set → single-file; unset → auto-merge), Step 2.2 (severity-floor filter application) and Step 2.5 (`skip_confirmation`).
+These resolved values are consumed by Step 1.1 (mode detection: `path` set → single-file; unset → auto-merge), Step 2.2 (severity-floor filter application) and Steps 2.4.5, 2.5 and 5.2 (`skip_confirmation`).
 
 ---
 
@@ -276,7 +276,7 @@ Three things Step 5 normally relies on did not happen on this path, and Step 5's
 
 1. **Step 4.2 never printed the "Requires user decision" list.** Step 5 prints it itself before asking, so the offer is not a question about findings you were never shown. Its summary block follows nothing rather than following a fix summary.
 2. **Steps 3–4 never ran, so their progress rows are still open.** Until this change the [Abort helper](#abort-helper) was the only thing closing them here; Step 5 closes rows 3 and 4 as well as its own.
-3. **Steps 2.4.5 and 3.0 never ran**, so no composite was offered for dissolution or persisted. Step 5.2 prints the Composites block, asks the dissolve question and — after the `yes` — runs the persistence writes itself.
+3. **Steps 2.4.5 and 3.0 never ran**, so no composite was offered for dissolution or persisted. Step 5.2 prints the Composites block, asks the dissolve question unless `skip_confirmation` keeps every composite, and — after the `yes` — runs the persistence writes itself.
 
 **Task Update:** Mark task 2 as `completed` and task 5 as `in_progress` using TaskUpdate. Leave tasks 3 and 4 `pending` — Step 5 closes them.
 
@@ -298,7 +298,7 @@ Compute:
 - `show_report_column` = true if `files` from Step 1.1 has >1 distinct path
 - `show_source_column` = true if at least one issue in the list has `source_handle` set, counting the bound components of every dispatchable composite, which the list itself holds as one issue
 
-Without `skip_confirmation`, render it as visible reply text (Markdown) before the confirmation question. With `skip_confirmation`, the full record instead opens Step 4.2's final summary as **Set out to fix**; still render the Composites block here before any dissolve question, so that question shows the proposed changes:
+Without `skip_confirmation`, render it as visible reply text (Markdown) before the confirmation question. With `skip_confirmation`, render nothing here: Step 2.4.5 asks nothing then, and the full record, its Composites block included, opens Step 4.2's final summary as **Set out to fix**:
 
 ~~~markdown
 ## Pre-flight: Fix All Issues
@@ -340,7 +340,7 @@ Without `skip_confirmation`, render it as visible reply text (Markdown) before t
 **Composition pass:** 1 proposed this run, 1 already in the report
 ```
 
-`proposed this run` counts the pass's accepted proposals — none of which is persisted at this point — and `already in the report` counts the open composite blocks the file carries, whatever their `Origin`. The line reads `unavailable — <reason>` where Step 1.6.5 applied. Where Step 2.4.5's fail-closed path applied, a second line follows: `Dissolve question: unavailable — <reason>; all composites dissolved for this run`. The `Problem` and `Remediation` lines go one step beyond the minimum ID list, deliberately: the dissolve question is the one human gate on a grouping, and with them on screen the user vetoes the change itself, not a list of IDs. Each bound component is listed under its composite as `- ID — path:line — @handle`, its `Location` read by the same two-clause rule the table uses and `—` where that rule reads it as location-less or the block carries no `**Source:**` line. Those components have no row of their own, so this is the only place the user sees the path a fixer will open and the handle it came from before answering the dissolve question.
+`proposed this run` counts the pass's accepted proposals — none of which is persisted at this point — and `already in the report` counts the open composite blocks the file carries, whatever their `Origin`. The line reads `unavailable — <reason>` where Step 1.6.5 applied. Where Step 2.4.5's fail-closed path applied, a second line follows: `Dissolve question: unavailable — <reason>; all composites dissolved for this run`. Where `skip_confirmation` skipped Step 2.4.5 for a run holding a dispatchable composite, the second line is `Dissolve question: skipped (--yes); all composites kept for this run`. The `Problem` and `Remediation` lines go one step beyond the minimum ID list, deliberately: the dissolve question is the one human gate on a grouping, and with them on screen the user vetoes the change itself, not a list of IDs. Each bound component is listed under its composite as `- ID — path:line — @handle`, its `Location` read by the same two-clause rule the table uses and `—` where that rule reads it as location-less or the block carries no `**Source:**` line. Those components have no row of their own, so this is the only place the user sees the path a fixer will open and the handle it came from before answering the dissolve question.
 
 Rendering rules:
 
@@ -354,23 +354,40 @@ Rendering rules:
 
 ### Step 2.4.5: The dissolve question
 
-Asked **only when the run holds at least one dispatchable composite**, proposed or persisted. Use AskUserQuestion with `multiSelect: true`, four options per call, all of them composites — nothing is appended, unlike `/fix-report`'s checklist pages — so a run with Y composites costs ⌈Y/4⌉ answers; every page is answered in sequence, selections accumulate across pages, and every dispatchable composite appears on some page.
+Asked **only when the run holds at least one dispatchable composite**, proposed or persisted, and **never with `skip_confirmation`**: `--yes` answers this question in advance, as it answers Step 2.5's. With it every composite is kept, nothing is asked, and the Composites block carries `Dissolve question: skipped (--yes); all composites kept for this run` (Step 2.4). `/fix-report` takes no `--yes`, so it asks whenever this step applies.
 
-- question, on the last or only page: `Dissolve which composites into their components? (select none to keep all)`; on a page another page follows: `Dissolve which composites into their components? (page X of Y — select none on this page to keep these)`;
-- option label: `[HIGH] COMP-001: Missing input validation layer` — severity, ID and title, under Step 2.4's 60-character title rule;
-- option description, persisted composite: `review · 3 components: SEC-002 <title>, SEC-003 <title>, ARCH-001 <title> — <first sentence of Problem> — marks COMP-001 🚫 Rejected in the report and releases them`; proposed composite: `fix-time, proposed · 2 components: PERF-001 <title>, PERF-003 <title> — <first sentence of Problem> — drops the proposal, nothing is written`.
+The question has two steps, so that keeping every composite, the usual answer, is one choice and no step needs an empty submission. Claude Code reports an empty multi-select submission as `The user did not answer the questions.` and requires two to four options per question.
+
+**Composite options.** Either step names a composite the same way:
+
+- label: `[HIGH] COMP-001: Missing input validation layer` — severity, ID and title, under Step 2.4's 60-character title rule;
+- description, persisted composite: `review · 3 components: SEC-002 <title>, SEC-003 <title>, ARCH-001 <title> — <first sentence of Problem> — marks COMP-001 🚫 Rejected in the report and releases them`; proposed composite: `fix-time, proposed · 2 components: PERF-001 <title>, PERF-003 <title> — <first sentence of Problem> — drops the proposal, nothing is written`.
+
+**Step 1 — keep or dissolve.** One AskUserQuestion call with one question, `multiSelect: false` and two options, in this order. With `<Y>` dispatchable composites:
+
+- `<Y>` ≥ 2: question `Keep all <Y> composites as single fixes, or dissolve some into their components?`; options `Keep all <Y>` — `Fix each composite as one unit: one fix-auto call applies its Remediation to all of its components.` — and `Dissolve some` — `Pick the composites to dissolve on the next question; their components are fixed individually.`
+- `<Y>` = 1: question `Keep COMP-001 as a single fix, or dissolve it into its components?`, with the composite's ID; options `Keep COMP-001` — the composite's option label followed by ` — one fix-auto call applies its Remediation to all of its components.` — and `Dissolve COMP-001` — the composite's option description. No step 2 follows.
+
+`Keep all <Y>` and `Keep COMP-001` keep every composite; `Dissolve COMP-001` dissolves the one composite; `Dissolve some` opens step 2.
+
+**Step 2 — which composites.** Asked only after `Dissolve some`. AskUserQuestion with `multiSelect: true` and one question per call. Each page lists up to **three** composites, in Step 2.4's table order, followed by one more option; `<Y>` composites take ⌈`<Y>`/3⌉ pages, every page is answered in sequence, selections accumulate across pages, and every dispatchable composite appears on exactly one page.
+
+- question: `Dissolve which composites into their components?`, followed by ` (page X of N)` when there is more than one page;
+- options: the page's composites as **Composite options** names them, then label `None of these` with description `Keep the <n> composites on this page as single fixes.`, `<n>` being how many the page lists.
+
+A composite selected on a page is dissolved whether or not `None of these` is selected beside it. A page answered with `None of these` alone keeps its composites; when every page is answered that way, nothing is dissolved.
 
 **Effects of dissolving.** A **proposed** composite is dropped: nothing is written, its number is released, and its components return to the individual list. A **persisted** composite is marked for a `**Status:** 🚫 Rejected (YYYY-MM-DD) — dissolved into components` line on its block, written at Step 3.0; that status releases its components (a released component without a status of its own is an ordinary unfixed finding). Released components pass through Step 2.2's severity floor and Step 2.2.5's Fix-policy partition again.
 
 Then print one line per dissolved composite, naming the released components and where each went — `Dissolved COMP-002: 2 components released — 1 joins the fix list, 1 requires a decision, 0 below the severity floor; total to fix 13` — followed by a re-render of the affected part of the pre-flight: the released components as issue-table rows (`#`, ID, severity, title, location, and the Source and Report columns where shown) with recomputed `By severity` and `Requires user decision (skipped)` lines, so the full list the gate asks about is on screen. The last line's total is the `total_count` Step 2.5's question and its `Yes — fix all <total_count>` label use.
 
-**The gate is fail-closed.** Where the question cannot be asked — AskUserQuestion unavailable, or it errors — no composite is dispatched as a unit this run: every proposed composite is dropped and nothing is persisted, and every persisted composite is treated as dissolved for the run with its components dispatched individually, no dissolution status written. The pre-flight and Step 4.2's Composition block carry `Dissolve question: unavailable — <reason>; all composites dissolved for this run`. Silence is never read as consent.
+**The gate is fail-closed.** Where the question cannot be asked — AskUserQuestion unavailable, as in a subagent or a print-mode run without `--yes`, or it errors — or a step comes back without one of its listed options selected (an empty submission, a dismissed question, or a typed answer, which is never interpreted), no composite is dispatched as a unit this run: every proposed composite is dropped and nothing is persisted, and every persisted composite is treated as dissolved for the run with its components dispatched individually, no dissolution status written. Selections made on pages already answered are discarded. The pre-flight and Step 4.2's Composition block carry `Dissolve question: unavailable — <reason>; all composites dissolved for this run`, where `<reason>` names the missing tool, the error, or `no answer`. Silence is never read as consent.
 
-This is the one human gate on a grouping. A composite that passes it is fixed as a unit.
+This is the one human gate on a grouping, and `--yes` passes it in advance. A composite that passes it is fixed as a unit.
 
 ### Step 2.5: Confirmation gate
 
-**With `skip_confirmation`** (the `--yes` token), do not ask. After Step 2.4.5 has applied every dissolution, including its fail-closed path, freeze `preflight_snapshot`: the report names, severity floor, total and per-severity counts, skipped needs-decision count and IDs, all ordered issue-table rows with their Source/Report column visibility, and the Composites block with its bound components and composition-pass disclosures.
+**With `skip_confirmation`** (the `--yes` token), do not ask. After Step 2.4.5, which with `skip_confirmation` asks nothing and keeps every composite, freeze `preflight_snapshot`: the report names, severity floor, total and per-severity counts, skipped needs-decision count and IDs, all ordered issue-table rows with their Source/Report column visibility, and the Composites block with its bound components, composition-pass disclosures and `Dissolve question: skipped (--yes)` line.
 
 Keep this snapshot unchanged through Steps 3–4: do not rebuild it from the edited reports or replace it if Step 3.0 falls back to individual dispatches after a marker-write failure. It records the intended batch at the gate; Step 4.2's Results and Composition blocks report what actually happened.
 
@@ -645,7 +662,7 @@ Step 4 finished everything the report said could be fixed without you. This step
 
 1. Mark tasks 3 and 4 as `completed` using TaskUpdate. They never ran, and no abort helper closed them; on this path Step 5 owns their rows as well as its own. Doing it here rather than at the end means no row dangles even if the answer is "no".
 2. Print the "Requires user decision" list yourself, in the rendering Step 4.2 gives it — `- [SEVERITY] ID: Title — Drift-class: <class>`, with `—` where the `**Drift-class:**` field is missing. Step 4.2 never ran on this path, so without this the offer would be a question about findings you were never shown.
-3. **Run the composite gate here.** Step 2.4.5 and Step 3.0 were skipped with the rest of Step 2 and Steps 3–4, but Step 1.6 ran and its proposals exist, every one of them needs-decision. Print Step 2.4's Composites block, ask Step 2.4.5's dissolve question (fail-closed as there), and — only once the user answers **yes** to the offer below — run Step 3.0's persistence writes before `code-review:decision-gate` is loaded at Step 5.4, so the gate's pins are computed over blocks that already carry the markers. A **no** writes nothing. The run's commitment point on this path is that `yes`. A component released by a dissolution here has no fix list to join: Steps 3–4 were skipped. One that partitions to `auto` is not dispatched this run, and its delta line renders it as `left for the next bulk run` rather than `joins the fix list`; one that partitions to needs-decision joins the `needs_decision` list, and the offer's `<N>` and batch count are recomputed before it is asked.
+3. **Run the composite gate here.** Step 2.4.5 and Step 3.0 were skipped with the rest of Step 2 and Steps 3–4, but Step 1.6 ran and its proposals exist, every one of them needs-decision. Print Step 2.4's Composites block, ask Step 2.4.5's dissolve question as that step states it (both steps, fail-closed as there, and not at all with `skip_confirmation`, which keeps every composite), and — only once the user answers **yes** to the offer below — run Step 3.0's persistence writes before `code-review:decision-gate` is loaded at Step 5.4, so the gate's pins are computed over blocks that already carry the markers. A **no** writes nothing. The run's commitment point on this path is that `yes`. A component released by a dissolution here has no fix list to join: Steps 3–4 were skipped. One that partitions to `auto` is not dispatched this run, and its delta line renders it as `left for the next bulk run` rather than `joins the fix list`; one that partitions to needs-decision joins the `needs_decision` list, and the offer's `<N>` and batch count are recomputed before it is asked.
 
 **On the normal path** all three are already done — Step 4.2 printed that list and closed task 4, and Steps 2.4.5 and 3.0 ran the composite gate — so only mark task 5 as `in_progress` using TaskUpdate.
 
