@@ -14,6 +14,9 @@
  *   Every review attempt first removes that section; the recorded hash covers the file with the new section. Only a
  *   plan file whose real path lies in the session's `local://` directory is written, and never one edited while the
  *   reviewer ran.
+ * - State: each plan file's rounds, hash, outcome and reviewed text are saved in `plan-review-state.json` in the session's
+ *   artifacts directory, so restarting OMP and resuming the session does not reset its rounds. A session without a
+ *   session file keeps this state only in the process.
  * - Records: with `[plan-review] records = true` in the av configuration (off by default; a contributor's tool for
  *   Plan Review's eval and cost measurement), every plan_review call, whatever its result, saves one JSON record in the
  *   session's artifacts directory (`plan-review/<start>-<id>.json`): the plan text sent to the reviewer, its raw
@@ -22,7 +25,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rename, rm } from "node:fs/promises";
 import { join, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ExecResult } from "@oh-my-pi/pi-coding-agent/exec/exec";
@@ -57,9 +60,22 @@ type Severity = "blocker" | "concern" | "nit";
 const SEVERITIES: Record<Severity, true> = { blocker: true, concern: true, nit: true };
 
 type Finding = { severity: Severity; location: string; issue: string; fix: string };
-type Review = { hash: string; outcome: "approve" | "approve-with-concerns" | "revise" | "unavailable" | "skipped"; rounds: number };
+type Review = {
+	hash: string;
+	outcome: "approve" | "approve-with-concerns" | "revise" | "unavailable" | "skipped";
+	rounds: number;
+	text: string;
+};
+const REVIEW_OUTCOMES: Record<Review["outcome"], true> = {
+	approve: true,
+	"approve-with-concerns": true,
+	revise: true,
+	unavailable: true,
+	skipped: true,
+};
 
 const RECORDS_DIR = "plan-review";
+const STATE_FILE = "plan-review-state.json";
 /** Reads `[plan-review] records` through the shared av_config loader, which is Python. */
 const RECORDS_SETTING = join(import.meta.dir, "..", "scripts", "records_setting.py");
 const RECORDS_SETTING_TIMEOUT_MS = 30_000;
@@ -341,14 +357,86 @@ async function saveRecord(record: ReviewRecord, ctx: ExtensionContext): Promise<
 	}
 }
 
+/** Restore valid review entries from this session's artifacts; a failed read gives plans fresh rounds and only warns. */
+async function loadReviews(ctx: ExtensionContext): Promise<Map<string, Review>> {
+	const reviews = new Map<string, Review>();
+	const dir = ctx.sessionManager.getArtifactsDir();
+	if (!dir) return reviews;
+	const path = join(dir, STATE_FILE);
+	let detail: string | undefined;
+	try {
+		const file = Bun.file(path);
+		if (!(await file.exists())) return reviews;
+		const saved: unknown = await file.json();
+		if (typeof saved !== "object" || saved === null || Array.isArray(saved)) throw new Error("saved review state must be an object");
+		const invalid: string[] = [];
+		for (const [url, entry] of Object.entries(saved)) {
+			if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+				invalid.push(`invalid entry for ${url}`);
+				continue;
+			}
+			const { hash, outcome, rounds, text } = entry as Record<string, unknown>;
+			if (
+				typeof hash !== "string" ||
+				typeof text !== "string" ||
+				typeof outcome !== "string" ||
+				!Object.hasOwn(REVIEW_OUTCOMES, outcome) ||
+				typeof rounds !== "number" ||
+				!Number.isInteger(rounds) ||
+				rounds < 0
+			) {
+				invalid.push(`invalid entry for ${url}`);
+				continue;
+			}
+			reviews.set(url, { hash, outcome: outcome as Review["outcome"], rounds, text });
+		}
+		if (invalid.length > 0) detail = invalid.join(", ");
+	} catch (error) {
+		detail = String(error);
+	}
+	if (detail) {
+		ctx.ui.notify(
+			`Plan review could not read its saved review state (${path}), so this session's plans get fresh review rounds.\n${detail}`,
+			"warning",
+		);
+	}
+	return reviews;
+}
+
+/** Atomically replace the session's saved state; a failed write leaves the in-process review and gate intact. */
+async function saveReviews(reviews: Map<string, Review>, ctx: ExtensionContext): Promise<void> {
+	const dir = ctx.sessionManager.getArtifactsDir();
+	if (!dir) return;
+	const path = join(dir, STATE_FILE);
+	const temp = `${path}.${randomUUID().slice(0, 8)}.tmp`;
+	try {
+		await mkdir(dir, { recursive: true });
+		await Bun.write(temp, `${JSON.stringify(Object.fromEntries(reviews))}\n`);
+		await rename(temp, path);
+	} catch (error) {
+		await rm(temp, { force: true }).catch(() => {});
+		ctx.ui.notify(
+			`Plan review could not save its review state, so an OMP restart would give this session's plans fresh review rounds.\n${String(error)}`,
+			"warning",
+		);
+	}
+}
+
 export default function planReviewExtension(pi: ExtensionAPI): void {
 	const version = pluginVersion();
 	/** Latest review per plan file path, for the current session: `local://` plan files belong to one session. */
-	const reviews = new Map<string, Review>();
-	// `/new`, `/resume`, a fork and a session reload keep this extension loaded; their plan files need fresh reviews.
+	let reviews: Promise<Map<string, Review>> | undefined;
+	// `/new`, `/resume`, a fork and a session reload keep this extension loaded; each session has its own state file,
+	// so the next call loads the new session's file.
 	pi.on("session_switch", () => {
-		reviews.clear();
+		reviews = undefined;
 	});
+	const sessionReviews = (ctx: ExtensionContext) => (reviews ??= loadReviews(ctx));
+	const storeReview = async (url: string, review: Review, ctx: ExtensionContext) => {
+		const state = await sessionReviews(ctx);
+		state.set(url, review);
+		await saveReviews(state, ctx);
+	};
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (!planModeChange(ctx)) return undefined;
@@ -386,7 +474,7 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 				const plan = await resolvePlan(params.title, ctx);
 				if (!plan) throw new Error(`No plan file found for "${params.title}". Write the plan to local://<slug>-plan.md first.`);
 				record.url = plan.url;
-				const rounds = reviews.get(plan.url)?.rounds ?? 0;
+				const rounds = (await sessionReviews(ctx)).get(plan.url)?.rounds ?? 0;
 				if (rounds >= MAX_ROUNDS) {
 					record.outcome = "exhausted";
 					return textResult(
@@ -403,8 +491,8 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 				const hash = sha256(body);
 				record.round = round;
 				record.plan = { text: body, sha256: hash };
-				const unavailable = (reason: string) => {
-					reviews.set(plan.url, { hash, outcome: "unavailable", rounds: round });
+				const unavailable = async (reason: string) => {
+					await storeReview(plan.url, { hash, outcome: "unavailable", rounds: round, text: body }, ctx);
 					record.outcome = "unavailable";
 					record.reason = reason;
 					record.proposeSha256 = hash;
@@ -414,8 +502,8 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 						{ url: plan.url, round, outcome: "unavailable" },
 					);
 				};
-				const skipped = () => {
-					reviews.set(plan.url, { hash, outcome: "skipped", rounds });
+				const skipped = async () => {
+					await storeReview(plan.url, { hash, outcome: "skipped", rounds, text: body }, ctx);
 					record.outcome = "skipped";
 					record.proposeSha256 = hash;
 					ctx.ui.notify(
@@ -426,8 +514,8 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 						`Plan review cancelled by the user. If the user asks to propose the plan, write "${plan.slug}" to xd://propose; its current text goes to approval unreviewed.`,
 					);
 				};
-				const cancelled = () => {
-					if (signal?.reason === USER_INTERRUPT_LABEL) return skipped();
+				const cancelled = async () => {
+					if (signal?.reason === USER_INTERRUPT_LABEL) return await skipped();
 					record.outcome = "cancelled";
 					return new Error("Plan review cancelled.");
 				};
@@ -450,8 +538,8 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 						timeout: REVIEW_TIMEOUT_MS,
 					});
 				} catch (error) {
-					if (signal?.aborted) throw cancelled();
-					return unavailable(`${String(error)}.`);
+					if (signal?.aborted) throw await cancelled();
+					return await unavailable(`${String(error)}.`);
 				} finally {
 					clearInterval(heartbeat);
 				}
@@ -461,13 +549,13 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 					record.reviewer = answer.reviewer;
 					record.answer = answer.text;
 				}
-				if (signal?.aborted) throw cancelled();
-				if (result.killed) return unavailable(`the reviewer did not finish within ${REVIEW_TIMEOUT_MS / 60_000} minutes.`);
-				if (result.code !== 0) return unavailable(`the reviewer exited with code ${result.code}: ${result.stderr.trim().slice(-500)}`);
-				if (!answer) return unavailable(`the reviewer's output has no final answer: ${result.stdout.trim().slice(-500)}`);
+				if (signal?.aborted) throw await cancelled();
+				if (result.killed) return await unavailable(`the reviewer did not finish within ${REVIEW_TIMEOUT_MS / 60_000} minutes.`);
+				if (result.code !== 0) return await unavailable(`the reviewer exited with code ${result.code}: ${result.stderr.trim().slice(-500)}`);
+				if (!answer) return await unavailable(`the reviewer's output has no final answer: ${result.stdout.trim().slice(-500)}`);
 				const { reviewer, text } = answer;
 				const findings = parseFindings(text);
-				if (!findings) return unavailable(`${reviewer}'s answer is not the expected JSON: ${text.trim().slice(0, 500)}`);
+				if (!findings) return await unavailable(`${reviewer}'s answer is not the expected JSON: ${text.trim().slice(0, 500)}`);
 				record.findings = findings;
 
 				const blocked = findings.some(finding => finding.severity === "blocker");
@@ -478,15 +566,16 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 				let reviewed = body;
 				let listed = false;
 				let changed = false;
+				let annotated: string | undefined;
 				let unlisted = "the plugin writes open findings only into plan files stored in this session's local:// directory";
 				if (open.length > 0 && writable) {
+					const by = `Plan Review (${reviewer}, round ${round} of ${MAX_ROUNDS})`;
+					const intro = lastRound
+						? `${by} still found blockers in its last round. These findings remain open: decide on them when you approve the plan. The plan-review plugin wrote this section; any later review of the plan replaces it.`
+						: `${by} found no blockers. These concerns remain open and do not block approval: decide on them when you approve the plan. The plan-review plugin wrote this section; any later review of the plan replaces it.`;
+					annotated = withOpenFindings(body, intro, open);
 					// The review can run for minutes: never overwrite an edit made meanwhile, nor write through a swapped-in symlink.
 					if (await stillHolds(writable, body)) {
-						const by = `Plan Review (${reviewer}, round ${round} of ${MAX_ROUNDS})`;
-						const intro = lastRound
-							? `${by} still found blockers in its last round. These findings remain open: decide on them when you approve the plan. The plan-review plugin wrote this section; any later review of the plan replaces it.`
-							: `${by} found no blockers. These concerns remain open and do not block approval: decide on them when you approve the plan. The plan-review plugin wrote this section; any later review of the plan replaces it.`;
-						const annotated = withOpenFindings(body, intro, open);
 						try {
 							await Bun.write(writable, annotated);
 							reviewed = annotated;
@@ -498,11 +587,12 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 						changed = true;
 					}
 				}
-				// A plan that changed during the review gets no hash: this review does not cover its current text.
-				const gateHash = changed ? "" : sha256(reviewed);
-				reviews.set(plan.url, { hash: gateHash, outcome, rounds: round });
+				// Keep the canonical snapshot's hash usable for byte-exact restoration after a concurrent edit.
+				const snapshot = changed ? (annotated ?? body) : reviewed;
+				const gateHash = sha256(snapshot);
+				await storeReview(plan.url, { hash: gateHash, outcome, rounds: round, text: snapshot }, ctx);
 				record.outcome = outcome;
-				record.proposeSha256 = gateHash || null;
+				record.proposeSha256 = changed ? null : gateHash;
 				const status = { approve: "approved", "approve-with-concerns": "approved with open concerns", revise: "changes requested" }[outcome];
 				const lines = [
 					`Plan review of ${plan.url} by ${reviewer}, round ${round} of ${MAX_ROUNDS}: ${status}.`,
@@ -559,7 +649,7 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 		// OMP's own proposal handler reports a missing plan file.
 		if (!plan) return undefined;
 		const hash = sha256(plan.content);
-		const review = reviews.get(plan.url);
+		const review = (await sessionReviews(ctx)).get(plan.url);
 		if (review?.hash === hash && review.outcome !== "revise") return undefined;
 		if (review && review.rounds >= MAX_ROUNDS) {
 			ctx.ui.notify(

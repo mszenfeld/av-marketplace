@@ -116,6 +116,10 @@ beforeEach(() => {
 		},
 		ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
 	} as unknown as ExtensionContext;
+	loadExtension();
+});
+
+function loadExtension(): void {
 	hooks = new Map();
 	planReviewExtension({
 		zod,
@@ -135,7 +139,7 @@ beforeEach(() => {
 			return { stdout: answer.stdout ?? reviewerStdout(answer.text), stderr: "reviewer failed", code: answer.code ?? 0, killed: false };
 		},
 	} as unknown as ExtensionAPI);
-});
+}
 
 afterEach(() => {
 	vi.useRealTimers();
@@ -762,19 +766,181 @@ test("a plan edited during the last blocking round keeps the edit and hands its 
 	expect(notifications.at(-1)).toEqual(expect.objectContaining({ level: "warning" }));
 });
 
-test("a session switch clears used rounds and reviews, so the next plan is reviewed again", async () => {
+test("each session keeps its own review rounds: another session starts fresh, switching back restores them", async () => {
 	for (let round = 1; round <= MAX_ROUNDS; round++) {
 		writeFileSync(planPath, `# Feature plan\n\nRevision ${round}.\n`);
 		answers.push({ text: BLOCKER });
 		expect(await review()).toContain(`round ${round} of ${MAX_ROUNDS}: changes requested`);
 	}
 
+	const sessionManager = ctx.sessionManager as unknown as { getArtifactsDir: () => string };
+	sessionManager.getArtifactsDir = () => join(root, "other-artifacts");
+	mkdirSync(join(root, "other-artifacts", "local"), { recursive: true });
+	writeFileSync(join(root, "other-artifacts", "local", "feature-plan.md"), "# Feature plan\n\nAnother session.\n");
+
 	const hook = hooks.get("session_switch");
 	if (!hook) throw new Error("Missing session_switch hook");
 	await hook({}, ctx);
 
-	expect(await propose()).toEqual(expect.objectContaining({ block: true }));
+	expect(((await propose()) as Blocked).reason).toContain("This plan has not been reviewed");
 	answers.push({ text: NIT_ONLY });
 	expect(await review()).toContain(`round 1 of ${MAX_ROUNDS}: approved`);
 	expect(reviewerCalls).toBe(MAX_ROUNDS + 1);
+
+	sessionManager.getArtifactsDir = () => join(root, "artifacts");
+	await hook({}, ctx);
+	expect(await review()).toContain(`All ${MAX_ROUNDS} plan review rounds`);
+	expect(reviewerCalls).toBe(MAX_ROUNDS + 1);
+});
+
+test("review rounds survive an OMP restart that resumes the session", async () => {
+	answers.push({ text: BLOCKER });
+	await review();
+
+	loadExtension();
+	expect(((await propose()) as Blocked).reason).toContain("has not changed since");
+	writeFileSync(planPath, "# Feature plan\n\nRevised after restart.\n");
+	answers.push({ text: NIT_ONLY });
+	expect(await review()).toContain(`round 2 of ${MAX_ROUNDS}: approved`);
+	expect(await propose()).toBeUndefined();
+	expect(reviewerCalls).toBe(2);
+});
+
+test.each([
+	"not json",
+	'{"local://feature-plan.md": {"hash": 1}}',
+	"null",
+	"[]",
+	'"state"',
+	"1",
+])("an unreadable review state (%s) warns and the session's plans get fresh rounds", async (state: string) => {
+	writeFileSync(join(root, "artifacts", "plan-review-state.json"), state);
+	answers.push({ text: NIT_ONLY });
+	expect(await review()).toContain(`round 1 of ${MAX_ROUNDS}: approved`);
+	expect(notifications).toEqual([
+		expect.objectContaining({
+			level: "warning",
+			message: expect.stringContaining("could not read its saved review state"),
+		}),
+	]);
+});
+
+test("invalid saved entries are skipped with one warning while valid reviews are restored", async () => {
+	const text = readFileSync(planPath, "utf8");
+	const valid = { hash: sha(text), outcome: "revise", rounds: 1, text };
+	const invalid = [
+		null,
+		{ ...valid, hash: 1 },
+		{ ...valid, text: null },
+		{ ...valid, outcome: "constructor" },
+		{ ...valid, outcome: "__proto__" },
+		{ ...valid, rounds: -1 },
+		{ ...valid, rounds: 0.5 },
+		{ ...valid, rounds: "1" },
+	];
+	writeFileSync(join(root, "artifacts", "plan-review-state.json"), JSON.stringify({
+		"local://feature-plan.md": valid,
+		...Object.fromEntries(invalid.map((entry, index) => [`local://invalid-${index}-plan.md`, entry])),
+	}));
+	expect(((await propose()) as Blocked).reason).toContain("has not changed since");
+	expect(notifications).toHaveLength(1);
+	expect(notifications[0].level).toBe("warning");
+	expect(notifications[0].message).toEndWith(
+		invalid.map((_, index) => `invalid entry for local://invalid-${index}-plan.md`).join(", "),
+	);
+	writeFileSync(planPath, "# Feature plan\n\nRevised.\n");
+	answers.push({ text: NIT_ONLY });
+	expect(await review()).toContain(`round 2 of ${MAX_ROUNDS}: approved`);
+	const state = JSON.parse(readFileSync(join(root, "artifacts", "plan-review-state.json"), "utf8"));
+	expect(Object.keys(state)).toEqual(["local://feature-plan.md"]);
+});
+
+test("concurrent calls share one saved-state load", async () => {
+	writeFileSync(join(root, "artifacts", "plan-review-state.json"), "not json");
+	const results = await Promise.all([propose(), propose()]);
+	for (const result of results) expect((result as Blocked).reason).toContain("This plan has not been reviewed");
+	expect(notifications).toHaveLength(1);
+});
+
+test("a review state that cannot be saved warns, and the gate keeps it until OMP exits", async () => {
+	chmodSync(join(root, "artifacts"), 0o555);
+	try {
+		answers.push({ text: CONCERN });
+		expect(await review()).toContain("approved with open concerns");
+		expect(notifications).toEqual([
+			expect.objectContaining({
+				level: "warning",
+				message: expect.stringContaining("could not save its review state"),
+			}),
+		]);
+		expect(await propose()).toBeUndefined();
+		expect(readdirSync(join(root, "artifacts"))).toEqual(["local"]);
+	} finally {
+		chmodSync(join(root, "artifacts"), 0o755);
+	}
+});
+
+test("saved review state holds the annotated text and matching hash, separately from review records", async () => {
+	userConfig(RECORDS_ON);
+	answers.push({ text: CONCERN });
+	await review();
+	const text = readFileSync(planPath, "utf8");
+	const statePath = join(root, "artifacts", "plan-review-state.json");
+	expect(JSON.parse(readFileSync(statePath, "utf8"))).toEqual({
+		"local://feature-plan.md": { hash: sha(text), outcome: "approve-with-concerns", rounds: 1, text },
+	});
+	expect(readFileSync(statePath, "utf8")).toEndWith("\n");
+	expect(newRecord().proposeSha256).toBe(sha(text));
+	expect(readdirSync(join(root, "artifacts")).sort()).toEqual(["local", "plan-review", "plan-review-state.json"]);
+	loadExtension();
+	expect(await propose()).toBeUndefined();
+});
+
+test("without an artifacts directory review state stays in memory without warnings", async () => {
+	const context = ctx as unknown as { localProtocolOptions: { getArtifactsDir: () => string; getSessionId: () => string } };
+	context.localProtocolOptions = { getArtifactsDir: () => join(root, "artifacts"), getSessionId: () => "test-session" };
+	const sessionManager = ctx.sessionManager as unknown as { getArtifactsDir: () => string | null };
+	sessionManager.getArtifactsDir = () => null;
+	answers.push({ text: NIT_ONLY });
+	expect(await review()).toContain(`round 1 of ${MAX_ROUNDS}: approved`);
+	expect(await propose()).toBeUndefined();
+	expect(notifications).toEqual([]);
+	expect(existsSync(join(root, "artifacts", "plan-review-state.json"))).toBe(false);
+	loadExtension();
+	expect(((await propose()) as Blocked).reason).toContain("This plan has not been reviewed");
+});
+
+test("a final-round symlink swap saves a canonical snapshot with a usable hash for manual restoration", async () => {
+	userConfig(RECORDS_ON);
+	const outside = join(root, "outside-plan.md");
+	const edited = "# Feature plan\n\nEdited during the last review.\n";
+	writeFileSync(outside, edited);
+	for (let round = 1; round <= MAX_ROUNDS; round++) {
+		writeFileSync(planPath, `# Feature plan\n\nRevision ${round}.\n`);
+		if (round === MAX_ROUNDS) {
+			duringReview = () => {
+				rmSync(planPath);
+				symlinkSync(outside, planPath);
+			};
+		}
+		answers.push({ text: BLOCKER });
+		await review();
+		const record = newRecord();
+		if (round === MAX_ROUNDS) expect(record.proposeSha256).toBeNull();
+	}
+	const state = JSON.parse(readFileSync(join(root, "artifacts", "plan-review-state.json"), "utf8"))["local://feature-plan.md"];
+	expect(state.rounds).toBe(MAX_ROUNDS);
+	expect(state.outcome).toBe("revise");
+	expect(state.text).toStartWith(`# Feature plan\n\nRevision ${MAX_ROUNDS}.\n\n## Open review findings\n`);
+	expect(state.text).toContain("still found blockers in its last round");
+	expect(state.text).toContain("- [blocker] Task 2:");
+	expect(state.text).toContain("- [concern] Task 1:");
+	expect(state.hash).toBe(sha(state.text));
+
+	loadExtension();
+	expect(await review()).toContain(`All ${MAX_ROUNDS} plan review rounds`);
+	expect(readFileSync(outside, "utf8")).toBe(edited);
+	writeFileSync(outside, state.text);
+	expect(await propose()).toBeUndefined();
+	expect(reviewerCalls).toBe(MAX_ROUNDS);
 });
