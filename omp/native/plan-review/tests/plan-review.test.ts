@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, expect, test, vi } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as zod from "@oh-my-pi/omptype/zod";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
-import planReviewExtension, { MAX_ROUNDS } from "../extensions/plan-review";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import deliveryExtension from "../../delivery/extensions/delivery";
+import planReviewExtension, { MAX_ROUNDS, PLAN_CHECK_CHANNEL } from "../extensions/plan-review";
 
 type Hook = (event: { toolName?: string; input?: unknown }, ctx: ExtensionContext) => Promise<unknown>;
 type ToolResult = { content: { type: string; text: string }[] };
@@ -21,7 +24,7 @@ type SavedRecord = {
 	round: number | null;
 	startedAt: string;
 	endedAt: string;
-	outcome: "approve" | "approve-with-concerns" | "revise" | "unavailable" | "skipped" | "cancelled" | "exhausted" | "error";
+	outcome: "approve" | "approve-with-concerns" | "revise" | "unavailable" | "skipped" | "cancelled" | "exhausted" | "error" | "rejected";
 	reason: string | null;
 	reviewer: string | null;
 	plan: { text: string; sha256: string } | null;
@@ -59,6 +62,7 @@ let abortedStdout: string;
 let seenRecords: Set<string>;
 let configHome: string;
 let python: "real" | "missing";
+let events: EventBus;
 
 function assistantMessage(content: unknown[], usage: unknown) {
 	return { role: "assistant", provider: "openai-codex", model: "gpt-6-astra", content, usage };
@@ -107,6 +111,7 @@ beforeEach(() => {
 	configHome = join(root, "config-home");
 	mkdirSync(configHome);
 	python = "real";
+	events = new EventBus();
 	ctx = {
 		cwd: root,
 		sessionManager: {
@@ -123,6 +128,7 @@ function loadExtension(): void {
 	hooks = new Map();
 	planReviewExtension({
 		zod,
+		events,
 		on: (name: string, handler: Hook) => hooks.set(name, handler),
 		registerTool: (definition: Tool) => {
 			tool = definition;
@@ -146,9 +152,10 @@ afterEach(() => {
 	rmSync(root, { recursive: true, force: true });
 });
 
-/** The records setting runs on the real python3 and reads only this test's user config home and repository. */
+/** Reads records settings in this test's config home; only that script can simulate missing python3. */
 function runPython(args: string[], cwd: string | undefined) {
-	if (python === "missing") throw new Error('Executable not found in $PATH: "python3"');
+	if (python === "missing" && args.includes(join(import.meta.dir, "..", "scripts", "records_setting.py")))
+		throw new Error('Executable not found in $PATH: "python3"');
 	const run = Bun.spawnSync([PYTHON, ...args], { cwd, env: { ...process.env, XDG_CONFIG_HOME: configHome } });
 	return { stdout: run.stdout.toString(), stderr: run.stderr.toString(), code: run.exitCode ?? -1, killed: false };
 }
@@ -266,21 +273,7 @@ test("with records turned on, calls that end without a review still save one rec
 		proposeSha256: failed.plan!.sha256,
 	});
 
-	writeFileSync(planPath, "# Feature plan\n\nRevision 2.\n");
-	answers.push({ text: "", killed: true });
-	await review();
-	const timedOut = newRecord();
-	records.push(timedOut);
-	expect(timedOut).toMatchObject({
-		outcome: "unavailable",
-		round: 2,
-		reason: expect.stringContaining("did not finish within 15 minutes"),
-		reviewer: null,
-		answer: null,
-		usage: null,
-	});
-
-	const text = "# Feature plan\n\nRevision 3.\n";
+	const text = "# Feature plan\n\nRevision 2.\n";
 	writeFileSync(planPath, text);
 	abortedStdout = reviewerStdout("partial");
 	let controller = new AbortController();
@@ -292,7 +285,7 @@ test("with records turned on, calls that end without a review still save one rec
 	records.push(skipped);
 	expect(skipped).toMatchObject({
 		outcome: "skipped",
-		round: 3,
+		round: 2,
 		plan: { text },
 		proposeSha256: skipped.plan!.sha256,
 		reviewer: "openai-codex/gpt-6-astra",
@@ -311,23 +304,24 @@ test("with records turned on, calls that end without a review still save one rec
 	records.push(cancelled);
 	expect(cancelled).toMatchObject({
 		outcome: "cancelled",
-		round: 3,
+		round: 2,
 		proposeSha256: null,
 		answer: null,
 		usage: null,
 	});
 
 	duringReview = undefined;
-	answers.push({ text: "I think the plan is fine." });
+	answers.push({ text: "", killed: true });
 	await review();
-	const malformed = newRecord();
-	records.push(malformed);
-	expect(malformed).toMatchObject({
+	const timedOut = newRecord();
+	records.push(timedOut);
+	expect(timedOut).toMatchObject({
 		outcome: "unavailable",
-		round: 3,
-		reason: expect.stringContaining("not the expected JSON"),
-		answer: "I think the plan is fine.",
-		findings: null,
+		round: 2,
+		reason: expect.stringContaining("did not finish within 15 minutes"),
+		reviewer: null,
+		answer: null,
+		usage: null,
 	});
 
 	expect(await review()).toContain(`All ${MAX_ROUNDS} plan review rounds`);
@@ -338,8 +332,25 @@ test("with records turned on, calls that end without a review still save one rec
 		url: "local://feature-plan.md",
 		round: null,
 		plan: null,
+		proposeSha256: null,
 	});
 
+	const otherPath = join(root, "artifacts", "local", "other-plan.md");
+	writeFileSync(otherPath, "# Other plan\n");
+	answers.push({ text: "I think the plan is fine." });
+	await review("other");
+	const malformed = newRecord();
+	records.push(malformed);
+	expect(malformed).toMatchObject({
+		title: "other",
+		outcome: "unavailable",
+		round: 1,
+		reason: expect.stringContaining("not the expected JSON"),
+		answer: "I think the plan is fine.",
+		findings: null,
+	});
+
+	rmSync(otherPath);
 	rmSync(planPath);
 	await expect(review()).rejects.toThrow("No plan file found");
 	const missing = newRecord();
@@ -349,7 +360,8 @@ test("with records turned on, calls that end without a review still save one rec
 		url: null,
 	});
 	expect(missing.reason).toStartWith('No plan file found for "feature".');
-	for (const record of records) expect(record).toMatchObject({ title: "feature", version: VERSION });
+	for (const record of records)
+		expect(record).toMatchObject({ title: record === malformed ? "other" : "feature", version: VERSION });
 });
 
 test.each([
@@ -421,6 +433,74 @@ test("xd://propose blocks an unreviewed plan and leaves other writes alone", asy
 	expect(await hook?.({ toolName: "write", input: { path: "README.md", content: "feature" } }, ctx)).toBeUndefined();
 });
 
+test("another plugin's rejected plan check saves a record without using a round or running the reviewer", async () => {
+	userConfig(RECORDS_ON);
+	writeFileSync(planPath, "# Feature plan\n\nChange the code.\n\n## Open review findings\n\nStale findings.\n");
+	let rejects = true;
+	events.on(PLAN_CHECK_CHANNEL, data => {
+		expect(data).toMatchObject({ url: "local://feature-plan.md", file: realpathSync(planPath), cwd: root });
+		expect(readFileSync(planPath, "utf8")).not.toContain("Stale findings.");
+		if (typeof data !== "object" || data === null || !("problems" in data) || !Array.isArray(data.problems))
+			throw new Error("Invalid check request");
+		data.problems.push(Promise.resolve(rejects ? ["", " ", "Task 1 has no Files block."] : []));
+		data.problems.push(Promise.reject(new Error("An unrelated check failed")));
+	});
+	const rejected = await review();
+	expect(rejected).toContain("another plugin's plan check rejects local://feature-plan.md");
+	expect(rejected).toContain("This call used no round.");
+	expect(rejected).toContain("- Task 1 has no Files block.");
+	expect(rejected).toContain('write {"title": "feature"} to xd://plan_review again');
+	expect(reviewerCalls).toBe(0);
+	expect(newRecord()).toMatchObject({
+		outcome: "rejected",
+		reason: "Task 1 has no Files block.",
+		round: null,
+		plan: { text: "# Feature plan\n\nChange the code.\n", sha256: sha("# Feature plan\n\nChange the code.\n") },
+		proposeSha256: null,
+	});
+	expect(existsSync(join(root, "artifacts", "plan-review-state.json"))).toBe(false);
+	expect(((await propose()) as Blocked).reason).toContain("has not been reviewed");
+	rejects = false;
+	answers.push({ text: NIT_ONLY });
+	expect(await review()).toContain(`round 1 of ${MAX_ROUNDS}: approved`);
+	expect(reviewerCalls).toBe(1);
+});
+
+test("Delivery rejects invalid task structure before the final round, then its correction is reviewed and both gates accept it", async () => {
+	python = "missing";
+	execFileSync("git", ["init", "-q", root]);
+	writeFileSync(join(root, "README.md"), "# Guide\n");
+	const deliveryHooks = new Map<string, Hook>();
+	deliveryExtension({
+		events,
+		on: (name: string, handler: Hook) => deliveryHooks.set(name, handler),
+		exec: async (command: string, args: string[]) => {
+			const result = Bun.spawnSync([command === "python3" ? PYTHON : command, ...args], { cwd: root });
+			return { stdout: result.stdout.toString(), stderr: result.stderr.toString(), code: result.exitCode ?? -1, killed: false };
+		},
+	} as unknown as ExtensionAPI);
+	const valid = "# Feature plan\n\n### Task 1: Update docs\n**Commit:** docs: update guide\n**Files:**\n- Modify: `README.md`\n\nUpdate the guide.\n";
+	writeFileSync(planPath, valid);
+	answers.push({ text: BLOCKER });
+	await review();
+	const statePath = join(root, "artifacts", "plan-review-state.json");
+	const state = readFileSync(statePath, "utf8");
+	writeFileSync(planPath, valid.replace("**Files:**\n- Modify: `README.md`\n", ""));
+	const deliveryGate = deliveryHooks.get("tool_call");
+	if (!deliveryGate) throw new Error("Missing Delivery gate");
+	const event = { toolName: "write", input: { path: "xd://propose", content: "feature" } };
+	expect(await review()).toContain("This call used no round.");
+	expect(reviewerCalls).toBe(1);
+	expect(readFileSync(statePath, "utf8")).toBe(state);
+	expect(((await propose()) as Blocked).block).toBe(true);
+	writeFileSync(planPath, valid.replace("Update the guide.", "Update the guide and check it."));
+	answers.push({ text: CONCERN });
+	expect(await review()).toContain(`round 2 of ${MAX_ROUNDS}: approved`);
+	expect(reviewerCalls).toBe(MAX_ROUNDS);
+	expect(await propose()).toBeUndefined();
+	expect(await deliveryGate(event, ctx)).toBeUndefined();
+});
+
 test("a title that names no plan file is checked against the plan xd://propose falls back to", async () => {
 	// OMP resolves an unusable title to the newest *plan.md; the gate must judge that same file.
 	expect(((await propose("feature/Rename the script")) as Blocked).block).toBe(true);
@@ -434,7 +514,7 @@ test("requested changes keep the plan blocked until a review approves its revise
 	answers.push({ text: BLOCKER }, { text: NIT_ONLY });
 
 	const first = await review();
-	expect(first).toContain("by openai-codex/gpt-6-astra, round 1 of 3: changes requested");
+	expect(first).toContain(`by openai-codex/gpt-6-astra, round 1 of ${MAX_ROUNDS}: changes requested`);
 	expect(first).toContain("- [blocker] Task 2: The script it runs does not exist. Fix: Name the existing script.");
 	expect(readFileSync(planPath, "utf8")).not.toContain("## Open review findings");
 	expect(first).toContain("- [concern] Task 1: No test covers the change. Fix: Add a test.");
@@ -444,7 +524,7 @@ test("requested changes keep the plan blocked until a review approves its revise
 	expect(((await propose()) as Blocked).reason).toContain("changed since its last review");
 
 	const second = await review();
-	expect(second).toContain("round 2 of 3: approved");
+	expect(second).toContain(`round 2 of ${MAX_ROUNDS}: approved`);
 	expect(second).toContain("- [nit] Summary: Wording.");
 	expect(await propose()).toBeUndefined();
 
@@ -459,7 +539,7 @@ test("a review with concerns and no blockers approves the plan and lists the con
 	expect(result).toContain("- [nit] Summary: Wording.");
 	expect(result).toContain('"## Open review findings" section');
 	const plan = readFileSync(planPath, "utf8");
-	expect(plan).toStartWith("# Feature plan\n\nChange the code.\n\n## Open review findings\n\nPlan Review (openai-codex/gpt-6-astra, round 1 of 3) found no blockers.");
+	expect(plan).toStartWith(`# Feature plan\n\nChange the code.\n\n## Open review findings\n\nPlan Review (openai-codex/gpt-6-astra, round 1 of ${MAX_ROUNDS}) found no blockers.`);
 	expect(plan).toEndWith("\n\n- [concern] Task 1: No test covers the change. Fix: Add a test.\n");
 	expect(plan).not.toContain("[nit]");
 	expect(await propose()).toBeUndefined();
@@ -537,7 +617,6 @@ test.each(["```", "````", "~~~", "~~~~"])("an unclosed %s fence is closed before
 	answers.push(
 		{ text: CONCERN },
 		{ text: CONCERN.replace("No test covers the change.", "The rollout needs a check.") },
-		{ text: NIT_ONLY },
 	);
 
 	await review();
@@ -552,12 +631,6 @@ test.each(["```", "````", "~~~", "~~~~"])("an unclosed %s fence is closed before
 	expect(replaced).toContain("- [concern] Task 1: The rollout needs a check.");
 	expect(replaced).not.toContain("No test covers the change.");
 	expect(replaced).not.toContain("round 1 of");
-	expect(await propose()).toBeUndefined();
-
-	await review();
-	expect(reviewerPrompts[2]).toContain(closed);
-	expect(reviewerPrompts[2]).not.toContain("- [concern]");
-	expect(readFileSync(planPath, "utf8")).toBe(closed);
 	expect(await propose()).toBeUndefined();
 });
 
@@ -574,7 +647,7 @@ test("a plan outside the session's local:// directory is reviewed as it is and n
 	const path = useCwdPlan(content);
 	answers.push({ text: CONCERN });
 	const result = await review();
-	expect(result).toContain("Plan review of PLAN.md by openai-codex/gpt-6-astra, round 1 of 3: approved with open concerns.");
+	expect(result).toContain(`Plan review of PLAN.md by openai-codex/gpt-6-astra, round 1 of ${MAX_ROUNDS}: approved with open concerns.`);
 	expect(result).toContain("only into plan files stored in this session's local:// directory. Tell the user about them");
 	expect(reviewerPrompts[0]).toContain("Written by hand.");
 	expect(readFileSync(path, "utf8")).toBe(content);
@@ -660,7 +733,7 @@ test("review progress updates immediately and every 15 seconds, then stops when 
 
 	const updateCount = updates.length;
 	vi.advanceTimersByTime(60_000);
-	expect(updates.map(text => text.match(/^Plan review round 1\/3: (\d+:\d\d) elapsed/)?.[1])).toEqual(["0:00", "0:15", "0:30"]);
+	expect(updates.map(text => text.match(new RegExp(`^Plan review round 1/${MAX_ROUNDS}: (\\d+:\\d\\d) elapsed`))?.[1])).toEqual(["0:00", "0:15", "0:30"]);
 	for (const text of updates) expect(text.split("\n")[0].length).toBeLessThan(70);
 	expect(updates).toHaveLength(updateCount);
 });
@@ -677,14 +750,12 @@ test("a review that cannot run lets that plan text through with a warning", asyn
 	expect(await propose()).toBeUndefined();
 });
 
-test("a reviewer run that fails, times out or answers badly uses one of the rounds", async () => {
-	const failures = [
-		{ answer: { text: "", code: 1 }, reason: "exited with code 1" },
-		{ answer: { text: "", killed: true }, reason: "did not finish within 15 minutes" },
-		{ answer: { text: "I think the plan is fine." }, reason: "not the expected JSON" },
-	];
-	for (const [index, { answer, reason }] of failures.entries()) {
-		const round = index + 1;
+test.each([
+	{ answer: { text: "", code: 1 }, reason: "exited with code 1" },
+	{ answer: { text: "", killed: true }, reason: "did not finish within 15 minutes" },
+	{ answer: { text: "I think the plan is fine." }, reason: "not the expected JSON" },
+])("a reviewer run that $reason uses one of the rounds", async ({ answer, reason }) => {
+	for (let round = 1; round <= MAX_ROUNDS; round++) {
 		writeFileSync(planPath, `# Feature plan\n\nRevision ${round}.\n`);
 		answers.push(answer);
 		const result = await review();
@@ -692,11 +763,9 @@ test("a reviewer run that fails, times out or answers badly uses one of the roun
 		expect(result).toContain(reason);
 	}
 
-	writeFileSync(planPath, "# Feature plan\n\nRevision 4.\n");
 	expect(await review()).toContain(`All ${MAX_ROUNDS} plan review rounds`);
 	expect(reviewerCalls).toBe(MAX_ROUNDS);
 	expect(await propose()).toBeUndefined();
-	expect(notifications.at(-1)?.message).toContain(`all ${MAX_ROUNDS} rounds are used`);
 });
 
 test("an abort with the user-interrupt reason lets that plan text through until the plan changes", async () => {
@@ -745,7 +814,7 @@ test("after the last round its open blockers and concerns go to approval in the 
 	expect(notifications.at(-1)).toEqual(expect.objectContaining({ level: "warning" }));
 });
 
-test("a plan edited during the last blocking round keeps the edit and hands its findings to the user", async (): Promise<void> => {
+test("a plan edited during the last round is restored with that round's findings and the edit listed", async (): Promise<void> => {
 	const edited = "# Feature plan\n\nEdited during the last review.\n";
 	let last = "";
 	for (let round = 1; round <= MAX_ROUNDS; round++) {
@@ -755,15 +824,187 @@ test("a plan edited during the last blocking round keeps the edit and hands its 
 		last = await review();
 	}
 	expect(last).toContain(`round ${MAX_ROUNDS} of ${MAX_ROUNDS}: changes requested`);
-	expect(last).toContain("- [blocker] Task 2: The script it runs does not exist. Fix: Name the existing script.");
-	expect(last).toContain("- [concern] Task 1: No test covers the change. Fix: Add a test.");
-	expect(last).toContain(`changed while the review ran, so the plugin did not list the open findings in it, and all ${MAX_ROUNDS} review rounds are used.`);
-	expect(last).toContain('Tell the user about the findings above, then write "feature" to xd://propose; the user decides on them.');
-	expect(last).not.toContain("xd://plan_review");
+	expect(last).toContain("restores the text this review covered");
 	expect(readFileSync(planPath, "utf8")).toBe(edited);
+	expect(((await propose()) as Blocked).reason).toContain("changed after the last one");
+	expect(await review()).toContain("listed your 1 later edit");
 	expect(reviewerCalls).toBe(MAX_ROUNDS);
+	const restored = readFileSync(planPath, "utf8");
+	expect(restored).toStartWith(`# Feature plan\n\nRevision ${MAX_ROUNDS}.\n\n## Open review findings\n`);
+	expect(restored).toContain("still found blockers in its last round");
+	expect(restored).toContain("- [blocker] Task 2:");
+	expect(restored).toContain("- [concern] Task 1:");
+	expect(restored).toEndWith(`- [edit] Feature plan: changed after the last review round, not reviewed.\n  \`\`\`diff\n  @@ -3,1 +3,1 @@\n  -Revision ${MAX_ROUNDS}.\n  +Edited during the last review.\n  \`\`\`\n`);
 	expect(await propose()).toBeUndefined();
-	expect(notifications.at(-1)).toEqual(expect.objectContaining({ level: "warning" }));
+});
+
+test("after the last round xd://propose accepts only the reviewed text, and plan_review restores it with later edits listed", async () => {
+	userConfig(RECORDS_ON);
+	writeFileSync(planPath, "# Feature plan\n\n## Context\n\nChange the code.\n\n### Task 1: Change the code\n\nEdit src/a.ts.\n\n## Verification\n\nRun the tests.\n");
+	answers.push({ text: CONCERN }, { text: CONCERN });
+	await review();
+	newRecord();
+	writeFileSync(planPath, readFileSync(planPath, "utf8").replace("Edit src/a.ts.", "Edit src/a.ts and src/b.ts."));
+	expect(await review()).toContain("This was the last review round");
+	newRecord();
+	const reviewed = readFileSync(planPath, "utf8");
+	writeFileSync(planPath, reviewed
+		.replace("Change the code.\n", "")
+		.replace("Edit src/a.ts and src/b.ts.", "Edit src/a.ts, src/b.ts and src/c.ts.")
+		.replace("Run the tests.", "Run the tests.\nRun the linter."));
+	const blocked = (await propose()) as Blocked;
+	expect(blocked.block).toBe(true);
+	expect(blocked.reason).toContain("changed after the last one");
+	expect(blocked.reason).toContain("xd://plan_review");
+	expect(await review()).toContain("listed your 3 later edits");
+	expect(reviewerCalls).toBe(MAX_ROUNDS);
+	const restored = readFileSync(planPath, "utf8");
+	expect(restored).toStartWith(`${reviewed.trimEnd()}\n\nThe planner changed the plan after Plan Review's last round (${MAX_ROUNDS} of ${MAX_ROUNDS}).`);
+	expect(restored).toEndWith([
+		"- [edit] Context: changed after the last review round, not reviewed.",
+		"  ```diff",
+		"  @@ -5,1 +4,0 @@",
+		"  -Change the code.",
+		"  ```",
+		"- [edit] Task 1: Change the code: changed after the last review round, not reviewed.",
+		"  ```diff",
+		"  @@ -9,1 +8,1 @@",
+		"  -Edit src/a.ts and src/b.ts.",
+		"  +Edit src/a.ts, src/b.ts and src/c.ts.",
+		"  ```",
+		"- [edit] Verification: changed after the last review round, not reviewed.",
+		"  ```diff",
+		"  @@ -13,0 +13,1 @@",
+		"  +Run the linter.",
+		"  ```",
+		"",
+	].join("\n"));
+	expect(newRecord()).toMatchObject({ outcome: "exhausted", round: null, plan: null, proposeSha256: sha(restored) });
+	expect(await propose()).toBeUndefined();
+	expect(await review()).toContain('are used. Write "feature" to xd://propose');
+	expect(newRecord()).toMatchObject({ outcome: "exhausted", proposeSha256: null });
+	writeFileSync(planPath, `${restored.slice(0, restored.indexOf("\n\n## Open review findings"))}\n`);
+	expect(await review()).toContain('only its "## Open review findings" section changed');
+	expect(readFileSync(planPath, "utf8")).toBe(restored);
+	expect(newRecord().proposeSha256).toBe(sha(restored));
+	expect(await propose()).toBeUndefined();
+});
+
+test("after the last round an edited plan outside the session's local:// directory stays blocked until the agent undoes the edits", async () => {
+	const path = useCwdPlan("# Feature plan\n\nRevision 0.\n");
+	for (let round = 1; round <= MAX_ROUNDS; round++) {
+		writeFileSync(path, `# Feature plan\n\nRevision ${round}.\n`);
+		answers.push({ text: CONCERN });
+		await review();
+	}
+	const reviewed = readFileSync(path, "utf8");
+	const edited = reviewed.replace(`Revision ${MAX_ROUNDS}.`, "Revised after the last round.");
+	writeFileSync(path, edited);
+	const result = await review();
+	expect(result).toContain("undo these edits");
+	expect(result).toContain("The plugin writes only plan files stored in this session's local:// directory");
+	expect(result).toContain("- [edit] Feature plan:");
+	expect(result).toContain(`  -Revision ${MAX_ROUNDS}.`);
+	expect(result).toContain("  +Revised after the last round.");
+	expect(readFileSync(path, "utf8")).toBe(edited);
+	expect(((await propose()) as Blocked).reason).toContain("changed after the last one");
+	writeFileSync(path, reviewed);
+	expect(await propose()).toBeUndefined();
+	expect(reviewerCalls).toBe(MAX_ROUNDS);
+});
+
+test.each([
+	{
+		name: "text before any heading",
+		before: "Before.\n## Later\nAfter.\n",
+		after: "Changed.\n## Later\nAfter.\n",
+		location: "Plan",
+		hunk: "@@ -1,1 +1,1 @@\n  -Before.\n  +Changed.",
+	},
+	{
+		name: "a removed heading",
+		before: "# Feature plan\n\n## Old section\nBody.\n",
+		after: "# Feature plan\n\n## New section\nBody.\n",
+		location: "Old section",
+		hunk: "@@ -3,1 +3,1 @@\n  -## Old section\n  +## New section",
+	},
+	{
+		name: "an insertion before a heading",
+		before: "# Feature plan\n\n## Next\nBody.\n",
+		after: "# Feature plan\n\nInserted.\n## Next\nBody.\n",
+		location: "Feature plan",
+		hunk: "@@ -2,0 +3,1 @@\n  +Inserted.",
+	},
+	{
+		name: "a heading inside a backtick fence",
+		before: "# Feature plan\n\n```markdown\n## Example\nOld.\n```\n",
+		after: "# Feature plan\n\n```markdown\n## Example\nNew.\n```\n",
+		location: "Feature plan",
+		hunk: "@@ -5,1 +5,1 @@\n  -Old.\n  +New.",
+	},
+	{
+		name: "a heading inside a CRLF tilde fence",
+		before: "# Feature plan\r\n\r\n~~~markdown\r\n## Example\r\nOld.\r\n~~~\r\n",
+		after: "# Feature plan\r\n\r\n~~~markdown\r\n## Example\r\nNew.\r\n~~~\r\n",
+		location: "Feature plan",
+		hunk: "@@ -5,1 +5,1 @@\n  -Old.\r\n  +New.\r",
+	},
+	{
+		name: "adjacent changes including an empty line and fence markers",
+		before: "# Feature plan\n\nOld.\n\n```\nEnd.\n",
+		after: "# Feature plan\n\nNew.\n~~~\nEnd.\n",
+		location: "Feature plan",
+		hunk: "@@ -3,3 +3,2 @@\n  -Old.\n  -\n  -```\n  +New.\n  +~~~",
+	},
+])("later edits locate $name outside fenced examples and keep their diff in one list item", async ({ before, after, location, hunk }) => {
+	writeFileSync(planPath, after);
+	writeFileSync(join(root, "artifacts", "plan-review-state.json"), JSON.stringify({
+		"local://feature-plan.md": { hash: sha(before), outcome: "approve", rounds: MAX_ROUNDS, text: before },
+	}));
+	expect(await review()).toContain("listed your 1 later edit");
+	const restored = readFileSync(planPath, "utf8");
+	expect(restored).toStartWith(before.trimEnd());
+	expect(restored).toEndWith(`- [edit] ${location}: changed after the last review round, not reviewed.\n  \`\`\`diff\n  ${hunk}\n  \`\`\`\n`);
+	expect(await propose()).toBeUndefined();
+	expect(reviewerCalls).toBe(0);
+});
+
+test.each(["a failed write", "a concurrent edit"])("restoration refused after the last round for %s leaves the file and review state unchanged", async (failure: string) => {
+	for (let round = 1; round <= MAX_ROUNDS; round++) {
+		writeFileSync(planPath, `# Feature plan\n\nRevision ${round}.\n`);
+		answers.push({ text: CONCERN });
+		await review();
+	}
+	const statePath = join(root, "artifacts", "plan-review-state.json");
+	const state = readFileSync(statePath, "utf8");
+	const reviewed = readFileSync(planPath, "utf8");
+	const edited = "# Feature plan\n\nEdited after the last review.\n";
+	const concurrent = "# Feature plan\n\nEdited again while restoring.\n";
+	writeFileSync(planPath, edited);
+	const originalFile = Bun.file;
+	const realPlanPath = realpathSync(planPath);
+	let reads = 0;
+	const spy = failure === "a concurrent edit"
+		? vi.spyOn(Bun, "file").mockImplementation((...args) => {
+			if ((args[0] === planPath || args[0] === realPlanPath) && ++reads === 2) writeFileSync(planPath, concurrent);
+			return originalFile(...args);
+		})
+		: undefined;
+	if (failure === "a failed write") chmodSync(planPath, 0o444);
+	try {
+		const result = await review();
+		expect(result).toContain("undo these edits");
+		expect(result).toContain(failure === "a failed write" ? "The plugin could not restore it" : "The plan file changed while the plugin read it");
+		expect(readFileSync(planPath, "utf8")).toBe(failure === "a failed write" ? edited : concurrent);
+		expect(readFileSync(statePath, "utf8")).toBe(state);
+		expect(((await propose()) as Blocked).block).toBe(true);
+	} finally {
+		spy?.mockRestore();
+		chmodSync(planPath, 0o644);
+	}
+	writeFileSync(planPath, reviewed);
+	expect(await propose()).toBeUndefined();
+	expect(reviewerCalls).toBe(MAX_ROUNDS);
 });
 
 test("each session keeps its own review rounds: another session starts fresh, switching back restores them", async () => {
@@ -938,8 +1179,13 @@ test("a final-round symlink swap saves a canonical snapshot with a usable hash f
 	expect(state.hash).toBe(sha(state.text));
 
 	loadExtension();
-	expect(await review()).toContain(`All ${MAX_ROUNDS} plan review rounds`);
+	expect(((await propose()) as Blocked).reason).toContain("changed after the last one");
+	const refused = await review();
+	expect(refused).toContain("undo these edits");
+	expect(refused).toContain("The plugin writes only plan files stored in this session's local:// directory");
 	expect(readFileSync(outside, "utf8")).toBe(edited);
+	expect(((await propose()) as Blocked).block).toBe(true);
+	expect(JSON.parse(readFileSync(join(root, "artifacts", "plan-review-state.json"), "utf8"))["local://feature-plan.md"]).toEqual(state);
 	writeFileSync(outside, state.text);
 	expect(await propose()).toBeUndefined();
 	expect(reviewerCalls).toBe(MAX_ROUNDS);

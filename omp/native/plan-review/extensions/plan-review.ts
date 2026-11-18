@@ -7,13 +7,15 @@
  * - While the reviewer runs, the tool reports its round and elapsed time every PROGRESS_INTERVAL_MS.
  * - `write xd://propose`: blocked until a review found no blockers in the current plan text, the review could not run
  *   for that text, its run was aborted with OMP's user-interrupt reason (Esc, leaving plan mode, an RPC or ACP
- *   cancel, or an extension's ctx.abort()), or MAX_ROUNDS reviewer runs of the plan file were used;
- *   a run that fails or times out counts as one of them.
+ *   cancel, or an extension's ctx.abort()). A run that fails or times out counts as one of MAX_ROUNDS runs;
+ *   after them only the last round's reviewed text, with its findings section, reaches approval.
  * - Open findings: a review without blockers writes its concerns, and a last round with blockers its blockers and
  *   concerns, to a `## Open review findings` section at the end of the plan file, which the approval dialog shows.
  *   Every review attempt first removes that section; the recorded hash covers the file with the new section. Only a
  *   plan file whose real path lies in the session's `local://` directory is written, and never one edited while the
  *   reviewer ran.
+ * - After the last round, plan_review runs no reviewer: it restores the reviewed text and lists later changes as
+ *   unreviewed `[edit]` findings for the user to decide on at approval.
  * - State: each plan file's rounds, hash, outcome and reviewed text are saved in `plan-review-state.json` in the session's
  *   artifacts directory, so restarting OMP and resuming the session does not reset its rounds. A session without a
  *   session file keeps this state only in the process.
@@ -33,9 +35,13 @@ import { type LocalProtocolOptions, resolveLocalRoot } from "@oh-my-pi/pi-coding
 import { resolveApprovedPlan } from "@oh-my-pi/pi-coding-agent/plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile, resolvePlanFilePath } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-files";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { diffLineRuns } from "@oh-my-pi/pi-natives";
 import { parseXdUrl } from "@oh-my-pi/pi-tui/tools/xd-url";
 
-export const MAX_ROUNDS = 3;
+export const MAX_ROUNDS = 2;
+/** Other plugins register asynchronous structural checks synchronously on this shared event. */
+export const PLAN_CHECK_CHANNEL = "plan-review:check-plan";
+export type PlanCheckRequest = { url: string; file: string; cwd: string; problems: Promise<string[]>[] };
 /** Plan path OMP's plan mode starts with when none was chosen. */
 const DEFAULT_PLAN_URL = "local://PLAN.md";
 const OPEN_FINDINGS_HEADING = "## Open review findings";
@@ -80,7 +86,7 @@ const STATE_FILE = "plan-review-state.json";
 const RECORDS_SETTING = join(import.meta.dir, "..", "scripts", "records_setting.py");
 const RECORDS_SETTING_TIMEOUT_MS = 30_000;
 
-type Outcome = Review["outcome"] | "cancelled" | "exhausted" | "error";
+type Outcome = Review["outcome"] | "cancelled" | "exhausted" | "error" | "rejected";
 /** One plan_review call as saved in the session's artifacts directory; the field order is the file's. */
 type ReviewRecord = {
 	version: string | null;
@@ -101,7 +107,7 @@ type ReviewRecord = {
 
 const PLAN_REVIEW_PROMPT = `# Plan review
 
-This session has the plan-review plugin: a reviewer model checks every plan before it goes to approval. When the plan file is ready, write \`{"title": "<slug>"}\` to xd://plan_review, using the slug you will write to xd://propose. Only blockers request another round. When a review reports a blocker, resolve every blocker and concern it reports in the plan file, or state in the plan why a finding does not apply, then run the review again. A review without blockers approves the plan: if it reports concerns, the plugin lists them in a \`${OPEN_FINDINGS_HEADING}\` section at the end of the plan file, where the user decides on them in the approval dialog. Propose the plan without revising it for those concerns, and never write or edit that section yourself. xd://propose is blocked until a review finds no blockers in the current plan text or ${MAX_ROUNDS} review rounds are used; when the last round still finds blockers, the plugin lists its blockers and concerns in the same section. If the user cancels a running review (Esc), do not review that unchanged plan text again unless the user asks: write the slug to xd://propose when the user wants the plan proposed, and that text goes to approval unreviewed. After any edit to the plan, review it again as usual.`;
+This session has the plan-review plugin: a reviewer model checks every plan before it goes to approval. When the plan file is ready, write \`{"title": "<slug>"}\` to xd://plan_review, using the slug you will write to xd://propose. Only blockers request another round. When a review reports a blocker, resolve every blocker and concern it reports in the plan file, or state in the plan why a finding does not apply, then run the review again. A review without blockers approves the plan: if it reports concerns, the plugin lists them in a \`${OPEN_FINDINGS_HEADING}\` section at the end of the plan file, where the user decides on them in the approval dialog. Propose the plan without revising it for those concerns, and never write or edit that section yourself. xd://propose is blocked until a review finds no blockers in the current plan text or ${MAX_ROUNDS} review rounds are used; when the last round still finds blockers, the plugin lists its blockers and concerns in the same section. After the last round, xd://propose accepts only the text that round reviewed, so do not edit the plan after it. If you do, write {"title": "<slug>"} to xd://plan_review again: no reviewer runs; the plugin restores the reviewed text and lists your edits in that section, unreviewed. If the user cancels a running review (Esc), do not review that unchanged plan text again unless the user asks: write the slug to xd://propose when the user wants the plan proposed, and that text goes to approval unreviewed. Until the rounds are used, review the plan again after any edit.`;
 
 const REVIEWER_PROMPT = `You review an implementation plan before a human approves it. The plan is quoted below; the repository is the current directory.
 
@@ -160,7 +166,7 @@ async function stillHolds(file: string, text: string): Promise<boolean> {
 async function resolvePlan(
 	title: string,
 	ctx: ExtensionContext,
-): Promise<{ url: string; slug: string; content: string; writable: string | undefined } | undefined> {
+): Promise<{ url: string; slug: string; content: string; file: string; writable: string | undefined } | undefined> {
 	const localProtocolOptions = ctx.localProtocolOptions ?? {
 		getArtifactsDir: () => ctx.sessionManager.getArtifactsDir(),
 		getSessionId: () => ctx.sessionManager.getSessionId(),
@@ -174,8 +180,8 @@ async function resolvePlan(
 			listPlanFiles: () => listPlanFiles({ localProtocolOptions }),
 		});
 		const slug = planFilePath.replace(/^.*\//, "").replace(/\.md$/i, "").replace(/-plan$/i, "");
-		const file = resolvePlanFilePath(planFilePath, { localProtocolOptions, cwd: ctx.cwd });
-		return { url: planFilePath, slug, content: planContent, writable: sessionFile(file, localProtocolOptions) };
+		const file = realpathSync(resolvePlanFilePath(planFilePath, { localProtocolOptions, cwd: ctx.cwd }));
+		return { url: planFilePath, slug, content: planContent, file, writable: sessionFile(file, localProtocolOptions) };
 	} catch {
 		return undefined;
 	}
@@ -289,11 +295,76 @@ function withoutOpenFindings(content: string): string {
 }
 
 /** Append findings outside any fence the plan left open, so a later review can remove the section. */
-function withOpenFindings(body: string, intro: string, findings: Finding[]): string {
+function withOpenFindings(body: string, block: string): string {
 	let fence: string | undefined;
 	for (const line of body.split("\n")) fence = fenceAfterLine(line, fence);
 	const closed = `${body.trimEnd()}${fence ? `\n${fence}` : ""}`;
-	return `${closed}\n\n${OPEN_FINDINGS_HEADING}\n\n${intro}\n\n${findings.map(formatFinding).join("\n")}\n`;
+	return `${closed}\n\n${OPEN_FINDINGS_HEADING}\n\n${block}\n`;
+}
+
+const EDITS_INTRO = `The planner changed the plan after Plan Review's last round (${MAX_ROUNDS} of ${MAX_ROUNDS}). The plan-review plugin restored the text that round reviewed and lists those changes here, unreviewed: decide on them when you approve the plan.`;
+
+/** Format native line-diff runs as one Delivery finding per contiguous change, outside fenced example headings. */
+function planEdits(before: string, after: string): string[] {
+	const oldLines = before.split("\n");
+	const newLines = after.split("\n");
+	const edits: string[] = [];
+	let oldIndex = 0;
+	let newIndex = 0;
+	let oldStart = 0;
+	let newStart = 0;
+	let removed = 0;
+	let added = 0;
+	let scanned = 0;
+	let fence: string | undefined;
+	let location = "Plan";
+	const flush = (): void => {
+		if (removed === 0 && added === 0) return;
+		const end = oldStart + (removed > 0 ? 1 : 0);
+		for (; scanned < end; scanned++) {
+			const line = oldLines[scanned];
+			fence = fenceAfterLine(line, fence);
+			const heading = fence === undefined ? /^#{1,6}\s+(.+)$/.exec(line.trimEnd()) : null;
+			if (heading) location = heading[1].trim();
+		}
+		const lines = [
+			`- [edit] ${location}: changed after the last review round, not reviewed.`,
+			"  ```diff",
+			`  @@ -${oldStart + (removed > 0 ? 1 : 0)},${removed} +${newStart + (added > 0 ? 1 : 0)},${added} @@`,
+		];
+		for (let i = oldStart; i < oldStart + removed; i++) lines.push(`  -${oldLines[i]}`);
+		for (let i = newStart; i < newStart + added; i++) lines.push(`  +${newLines[i]}`);
+		lines.push("  ```");
+		edits.push(lines.join("\n"));
+		removed = 0;
+		added = 0;
+	};
+	for (const run of diffLineRuns(before, after)) {
+		if (!run.added && !run.removed) {
+			flush();
+			oldIndex += run.count;
+			newIndex += run.count;
+			continue;
+		}
+		if (removed === 0 && added === 0) {
+			oldStart = oldIndex;
+			newStart = newIndex;
+		}
+		if (run.removed) {
+			removed += run.count;
+			oldIndex += run.count;
+		} else {
+			added += run.count;
+			newIndex += run.count;
+		}
+	}
+	flush();
+	return edits;
+}
+
+function withEdits(text: string, edits: string[]): string {
+	const block = `${EDITS_INTRO}\n\n${edits.join("\n")}`;
+	return withoutOpenFindings(text) !== text ? `${text.trimEnd()}\n\n${block}\n` : withOpenFindings(text, block);
 }
 
 function textResult(text: string, details: Record<string, unknown>) {
@@ -447,7 +518,7 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 		name: "plan_review",
 		label: "Plan Review",
 		description:
-			"Review a plan-mode plan with the advisor-role model before proposing it. Pass the slug you will write to xd://propose; returns blockers, concerns and nits. Only blockers keep xd://propose blocked; the concerns of a review without blockers go to approval in the plan file.",
+			"Review a plan-mode plan with the advisor-role model before proposing it. Pass the slug you will write to xd://propose; returns blockers, concerns and nits. Only blockers keep xd://propose blocked; the concerns of a review without blockers go to approval in the plan file. After the last round it runs no reviewer: it restores the text that round reviewed and lists any later edit in the plan file.",
 		parameters: pi.zod.object({
 			title: pi.zod.string().describe("Plan slug, the same text you write to xd://propose"),
 		}),
@@ -474,12 +545,46 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 				const plan = await resolvePlan(params.title, ctx);
 				if (!plan) throw new Error(`No plan file found for "${params.title}". Write the plan to local://<slug>-plan.md first.`);
 				record.url = plan.url;
-				const rounds = (await sessionReviews(ctx)).get(plan.url)?.rounds ?? 0;
-				if (rounds >= MAX_ROUNDS) {
+				const review = (await sessionReviews(ctx)).get(plan.url);
+				const rounds = review?.rounds ?? 0;
+				if (review && rounds >= MAX_ROUNDS) {
 					record.outcome = "exhausted";
+					if (sha256(plan.content) === review.hash)
+						return textResult(
+							`All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used. Write "${plan.slug}" to xd://propose; the user decides on the plan without another review.`,
+							{ url: plan.url, rounds, edits: 0, restored: false },
+						);
+					const view = plan.writable ? withoutOpenFindings : (text: string): string => text;
+					const edits = planEdits(view(review.text), view(plan.content));
+					let reason = "The plugin writes only plan files stored in this session's local:// directory";
+					if (plan.writable) {
+						if (await stillHolds(plan.writable, plan.content)) {
+							const restored = edits.length > 0 ? withEdits(review.text, edits) : review.text;
+							let written = false;
+							try {
+								await Bun.write(plan.writable, restored);
+								written = true;
+							} catch (error) {
+								reason = `The plugin could not restore it (${String(error)})`;
+							}
+							if (written) {
+								const hash = sha256(restored);
+								await storeReview(plan.url, { ...review, hash, text: restored }, ctx);
+								record.proposeSha256 = hash;
+								return textResult(
+									edits.length > 0
+										? `All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used, and the plan changed after the last one. The plugin restored the text that round reviewed and listed your ${edits.length} later ${edits.length === 1 ? "edit" : "edits"} in the "${OPEN_FINDINGS_HEADING}" section at the end of ${plan.url}, unreviewed; the user decides on them in the approval dialog. Do not edit the plan again. Write "${plan.slug}" to xd://propose.`
+										: `All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used, and only its "${OPEN_FINDINGS_HEADING}" section changed after the last one; only the plugin writes that section. The plugin restored the text that round reviewed. Do not edit the plan again. Write "${plan.slug}" to xd://propose.`,
+									{ url: plan.url, rounds, edits: edits.length, restored: true },
+								);
+							}
+						} else {
+							reason = "The plan file changed while the plugin read it";
+						}
+					}
 					return textResult(
-						`All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used. Write "${plan.slug}" to xd://propose; the user decides on the plan without another review.`,
-						{ url: plan.url, rounds },
+						`All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used, and the plan changed after the last one. ${reason}, so undo these edits in ${plan.url} until it holds the text that round reviewed, then write "${plan.slug}" to xd://propose; tell the user about any edit you still want:\n\n${edits.join("\n")}`,
+						{ url: plan.url, rounds, edits: edits.length, restored: false },
 					);
 				}
 				const round = rounds + 1;
@@ -489,8 +594,25 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 				const body = writable ? withoutOpenFindings(plan.content) : plan.content;
 				if (writable && body !== plan.content) await Bun.write(writable, body);
 				const hash = sha256(body);
-				record.round = round;
 				record.plan = { text: body, sha256: hash };
+				const request: PlanCheckRequest = { url: plan.url, file: plan.file, cwd: ctx.cwd, problems: [] };
+				// Replay evals and older extension fakes have no event bus; no installed checker means no structural veto.
+				pi.events?.emit(PLAN_CHECK_CHANNEL, request);
+				const checks = await Promise.allSettled(request.problems);
+				const problems = checks.flatMap(check =>
+					check.status === "fulfilled" && Array.isArray(check.value)
+						? check.value.filter(problem => typeof problem === "string" && problem.trim().length > 0)
+						: [],
+				);
+				if (problems.length > 0) {
+					record.outcome = "rejected";
+					record.reason = problems.join("\n");
+					return textResult(
+						`Plan review did not run: another plugin's plan check rejects ${plan.url}, and the review rounds go only to a plan it accepts. This call used no round.\n${problems.map(problem => `- ${problem}`).join("\n")}\nFix these in the plan file, then write {"title": ${JSON.stringify(plan.slug)}} to xd://plan_review again.`,
+						{ url: plan.url, outcome: "rejected", problems },
+					);
+				}
+				record.round = round;
 				const unavailable = async (reason: string) => {
 					await storeReview(plan.url, { hash, outcome: "unavailable", rounds: round, text: body }, ctx);
 					record.outcome = "unavailable";
@@ -561,7 +683,8 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 				const blocked = findings.some(finding => finding.severity === "blocker");
 				const concerns = findings.filter(finding => finding.severity === "concern");
 				const outcome = blocked ? "revise" : concerns.length > 0 ? "approve-with-concerns" : "approve";
-				const lastRound = blocked && round >= MAX_ROUNDS;
+				const last = round >= MAX_ROUNDS;
+				const lastRound = blocked && last;
 				const open = lastRound ? findings.filter(finding => finding.severity !== "nit") : outcome === "approve-with-concerns" ? concerns : [];
 				let reviewed = body;
 				let listed = false;
@@ -573,7 +696,7 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 					const intro = lastRound
 						? `${by} still found blockers in its last round. These findings remain open: decide on them when you approve the plan. The plan-review plugin wrote this section; any later review of the plan replaces it.`
 						: `${by} found no blockers. These concerns remain open and do not block approval: decide on them when you approve the plan. The plan-review plugin wrote this section; any later review of the plan replaces it.`;
-					annotated = withOpenFindings(body, intro, open);
+					annotated = withOpenFindings(body, `${intro}\n\n${open.map(formatFinding).join("\n")}`);
 					// The review can run for minutes: never overwrite an edit made meanwhile, nor write through a swapped-in symlink.
 					if (await stillHolds(writable, body)) {
 						try {
@@ -599,9 +722,9 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 					...(findings.length > 0 ? ["", ...findings.map(formatFinding)] : []),
 					"",
 				];
-				if (changed && round >= MAX_ROUNDS)
+				if (changed && last)
 					lines.push(
-						`${plan.url} changed while the review ran, so the plugin did not list the open findings in it, and all ${MAX_ROUNDS} review rounds are used. Tell the user about the findings above, then write "${plan.slug}" to xd://propose; the user decides on them.`,
+						`${plan.url} changed while the review ran, so the plugin did not list the open findings in it, and all ${MAX_ROUNDS} review rounds are used. Write {"title": ${JSON.stringify(plan.slug)}} to xd://plan_review: no reviewer runs; the plugin restores the text this review covered with the findings above and lists your edit in the "${OPEN_FINDINGS_HEADING}" section, unreviewed. Then write "${plan.slug}" to xd://propose.`,
 					);
 				else if (changed)
 					lines.push(
@@ -610,7 +733,7 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 				else if (outcome === "approve") lines.push(`Write "${plan.slug}" to xd://propose to request approval.`);
 				else if (outcome === "approve-with-concerns" && listed)
 					lines.push(
-						`The concerns are listed in the "${OPEN_FINDINGS_HEADING}" section at the end of ${plan.url}, where the user decides on them in the approval dialog. Do not revise the plan for them and do not edit that section: any edit to the plan needs a new review. Write "${plan.slug}" to xd://propose to request approval.`,
+						`The concerns are listed in the "${OPEN_FINDINGS_HEADING}" section at the end of ${plan.url}, where the user decides on them in the approval dialog. Do not revise the plan for them and do not edit that section${last ? "" : ": any edit to the plan needs a new review"}. Write "${plan.slug}" to xd://propose to request approval.`,
 					);
 				else if (outcome === "approve-with-concerns")
 					lines.push(
@@ -627,6 +750,10 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 				else
 					lines.push(
 						`Resolve every blocker and concern in the plan file, or state in the plan why one does not apply. Then write {"title": ${JSON.stringify(plan.slug)}} to xd://plan_review again; xd://propose stays blocked until a review finds no blockers in the current plan.`,
+					);
+				if (last && !changed)
+					lines.push(
+						`This was the last review round: xd://propose now accepts only the text it reviewed. Do not edit ${plan.url} any more; after an edit, write {"title": ${JSON.stringify(plan.slug)}} to xd://plan_review, which runs no reviewer, restores that text and lists your edit in the "${OPEN_FINDINGS_HEADING}" section, unreviewed.`,
 					);
 				return textResult(lines.join("\n"), { url: plan.url, reviewer, round, outcome, findings });
 			} catch (error) {
@@ -650,14 +777,17 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 		if (!plan) return undefined;
 		const hash = sha256(plan.content);
 		const review = (await sessionReviews(ctx)).get(plan.url);
+		const used = review !== undefined && review.rounds >= MAX_ROUNDS;
 		if (review?.hash === hash && review.outcome !== "revise") return undefined;
-		if (review && review.rounds >= MAX_ROUNDS) {
-			ctx.ui.notify(
-				`Plan review: all ${MAX_ROUNDS} rounds are used and the current plan text has no approving review; it goes to approval without another review.`,
-				"warning",
-			);
+		if (review?.hash === hash && used) {
+			ctx.ui.notify(`Plan review: the last of the ${MAX_ROUNDS} review rounds still found blockers; the plan goes to approval with them open.`, "warning");
 			return undefined;
 		}
+		if (used)
+			return {
+				block: true,
+				reason: `All ${MAX_ROUNDS} review rounds of ${plan.url} are used and the plan changed after the last one, so its current text has no review. Write {"title": ${JSON.stringify(plan.slug)}} to xd://plan_review: no reviewer runs; the plugin restores the text that round reviewed and lists your later edits in the "${OPEN_FINDINGS_HEADING}" section. Then write "${plan.slug}" to xd://propose again.`,
+			};
 		const next = `write {"title": ${JSON.stringify(plan.slug)}} to xd://plan_review`;
 		return {
 			block: true,
