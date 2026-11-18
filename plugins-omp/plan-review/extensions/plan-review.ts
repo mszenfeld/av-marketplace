@@ -17,8 +17,9 @@
  * - After the last round, plan_review runs no reviewer: it restores the reviewed text and lists later changes as
  *   unreviewed `[edit]` findings for the user to decide on at approval.
  * - State: each plan file's rounds, hash, outcome and reviewed text are saved in `plan-review-state.json` in the session's
- *   artifacts directory, so restarting OMP and resuming the session does not reset its rounds. A session without a
- *   session file keeps this state only in the process.
+ *   artifacts directory, so restarting OMP and resuming the session does not reset its rounds. Approval ends that plan's
+ *   review cycle and clears its state; reusing the file starts fresh rounds. A session without a session file keeps this
+ *   state only in the process.
  * - Records: with `[plan-review] records = true` in the av configuration (off by default; a contributor's tool for
  *   Plan Review's eval and cost measurement), every plan_review call, whatever its result, saves one JSON record in the
  *   session's artifacts directory (`plan-review/<start>-<id>.json`): the plan text sent to the reviewer, its raw
@@ -44,6 +45,10 @@ export const PLAN_CHECK_CHANNEL = "plan-review:check-plan";
 export type PlanCheckRequest = { url: string; file: string; cwd: string; problems: Promise<string[]>[] };
 /** Plan path OMP's plan mode starts with when none was chosen. */
 const DEFAULT_PLAN_URL = "local://PLAN.md";
+// OMP's plan-mode-approved prompt; tests use the upstream template, as Delivery's approval hook does.
+const APPROVED_PLAN_PREFIX = "Plan approved.";
+const PLAN_TAG_START = '<plan path="';
+const PLAN_TAG_END = '">';
 const OPEN_FINDINGS_HEADING = "## Open review findings";
 const REVIEW_TIMEOUT_MS = 15 * 60_000;
 const PROGRESS_INTERVAL_MS = 15_000;
@@ -132,6 +137,16 @@ function planModeChange(ctx: ExtensionContext): { data?: Record<string, unknown>
 		if (entry.type === "mode_change") return entry.mode === "plan" ? entry : undefined;
 	}
 	return undefined;
+}
+
+/** The plan whose approval ends a review cycle, using the same prompt contract as Delivery. */
+function approvedPlanUrl(prompt: string): string | undefined {
+	if (!prompt.startsWith(APPROVED_PLAN_PREFIX)) return undefined;
+	const tagStart = prompt.indexOf(PLAN_TAG_START);
+	if (tagStart < 0) return undefined;
+	const tagEnd = prompt.indexOf("\n", tagStart);
+	const tag = prompt.slice(tagStart, tagEnd < 0 ? undefined : tagEnd);
+	return tag.endsWith(PLAN_TAG_END) ? tag.slice(PLAN_TAG_START.length, -PLAN_TAG_END.length) : undefined;
 }
 
 /**
@@ -332,8 +347,9 @@ function planEdits(before: string, after: string): string[] {
 			"  ```diff",
 			`  @@ -${oldStart + (removed > 0 ? 1 : 0)},${removed} +${newStart + (added > 0 ? 1 : 0)},${added} @@`,
 		];
-		for (let i = oldStart; i < oldStart + removed; i++) lines.push(`  -${oldLines[i]}`);
-		for (let i = newStart; i < newStart + added; i++) lines.push(`  +${newLines[i]}`);
+		// Markdown and universal-newline readers must not turn one prefixed diff line into multiple lines.
+		for (let i = oldStart; i < oldStart + removed; i++) lines.push(`  -${oldLines[i].replace(/\r/g, "\\r")}`);
+		for (let i = newStart; i < newStart + added; i++) lines.push(`  +${newLines[i].replace(/\r/g, "\\r")}`);
 		lines.push("  ```");
 		edits.push(lines.join("\n"));
 		removed = 0;
@@ -487,7 +503,7 @@ async function saveReviews(reviews: Map<string, Review>, ctx: ExtensionContext):
 	} catch (error) {
 		await rm(temp, { force: true }).catch(() => {});
 		ctx.ui.notify(
-			`Plan review could not save its review state, so an OMP restart would give this session's plans fresh review rounds.\n${String(error)}`,
+			`Plan review could not save its review state, so an OMP restart may not restore this session's current review rounds.\n${String(error)}`,
 			"warning",
 		);
 	}
@@ -508,8 +524,15 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 		state.set(url, review);
 		await saveReviews(state, ctx);
 	};
+	const forgetReview = async (url: string, ctx: ExtensionContext) => {
+		const state = await sessionReviews(ctx);
+		if (state.delete(url)) await saveReviews(state, ctx);
+	};
 
 	pi.on("before_agent_start", async (event, ctx) => {
+		// Approval can keep this session alive; the next plan in the same file is a new planning cycle.
+		const approved = approvedPlanUrl(event.prompt);
+		if (approved) await forgetReview(approved, ctx);
 		if (!planModeChange(ctx)) return undefined;
 		return { systemPrompt: [...event.systemPrompt, PLAN_REVIEW_PROMPT] };
 	});
@@ -554,7 +577,9 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 							`All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used. Write "${plan.slug}" to xd://propose; the user decides on the plan without another review.`,
 							{ url: plan.url, rounds, edits: 0, restored: false },
 						);
-					const view = plan.writable ? withoutOpenFindings : (text: string): string => text;
+					const view = plan.writable
+						? (text: string): string => `${withoutOpenFindings(text).trimEnd()}\n`
+						: (text: string): string => text;
 					const edits = planEdits(view(review.text), view(plan.content));
 					let reason = "The plugin writes only plan files stored in this session's local:// directory";
 					if (plan.writable) {
