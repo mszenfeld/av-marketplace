@@ -355,7 +355,7 @@ FINDINGS_PLAN = """# Plan
 
 ## Open review findings
 
-Plan Review (openai-codex/gpt-6-astra, round 1 of 3) found no blockers. These concerns remain open and do not block approval: decide on them when you approve the plan. The plan-review plugin wrote this section; any later review of the plan replaces it.
+Plan Review (openai-codex/gpt-6.2-astra, round 1 of 3) found no blockers. These concerns remain open and do not block approval: decide on them when you approve the plan. The plan-review plugin wrote this section; any later review of the plan replaces it.
 
 - [concern] Task 1: No test covers the change. Fix: Add a test.
 - [blocker] Task 2: The script it runs does not exist.

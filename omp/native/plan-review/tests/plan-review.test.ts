@@ -61,7 +61,7 @@ let configHome: string;
 let python: "real" | "missing";
 
 function assistantMessage(content: unknown[], usage: unknown) {
-	return { role: "assistant", provider: "openai-codex", model: "gpt-6-astra", content, usage };
+	return { role: "assistant", provider: "openai-codex", model: "gpt-6.2-astra", content, usage };
 }
 
 function reviewerStdout(text: string): string {
@@ -201,7 +201,7 @@ test("with records turned on, every review saves a record with the text sent to 
 		round: 1,
 		outcome: "revise",
 		reason: null,
-		reviewer: "openai-codex/gpt-6-astra",
+		reviewer: "openai-codex/gpt-6.2-astra",
 		plan: { text, sha256: sha(text) },
 		answer: BLOCKER,
 		findings: [
@@ -240,7 +240,7 @@ test("a record keeps the usage of every reviewer turn, also of turns before a co
 		outcome: "approve",
 		usage: USAGE,
 		answer: '{"findings": []}',
-		reviewer: "openai-codex/gpt-6-astra",
+		reviewer: "openai-codex/gpt-6.2-astra",
 	});
 });
 
@@ -255,7 +255,7 @@ test("with records turned on, calls that end without a review still save one rec
 		outcome: "unavailable",
 		round: 1,
 		reason: expect.stringContaining("exited with code 1: reviewer failed"),
-		reviewer: "openai-codex/gpt-6-astra",
+		reviewer: "openai-codex/gpt-6.2-astra",
 		answer: "",
 		usage: USAGE,
 		findings: null,
@@ -291,7 +291,7 @@ test("with records turned on, calls that end without a review still save one rec
 		round: 3,
 		plan: { text },
 		proposeSha256: skipped.plan!.sha256,
-		reviewer: "openai-codex/gpt-6-astra",
+		reviewer: "openai-codex/gpt-6.2-astra",
 		answer: "partial",
 		usage: USAGE,
 		findings: null,
@@ -430,7 +430,7 @@ test("requested changes keep the plan blocked until a review approves its revise
 	answers.push({ text: BLOCKER }, { text: NIT_ONLY });
 
 	const first = await review();
-	expect(first).toContain("by openai-codex/gpt-6-astra, round 1 of 3: changes requested");
+	expect(first).toContain("by openai-codex/gpt-6.2-astra, round 1 of 3: changes requested");
 	expect(first).toContain("- [blocker] Task 2: The script it runs does not exist. Fix: Name the existing script.");
 	expect(readFileSync(planPath, "utf8")).not.toContain("## Open review findings");
 	expect(first).toContain("- [concern] Task 1: No test covers the change. Fix: Add a test.");
@@ -455,7 +455,7 @@ test("a review with concerns and no blockers approves the plan and lists the con
 	expect(result).toContain("- [nit] Summary: Wording.");
 	expect(result).toContain('"## Open review findings" section');
 	const plan = readFileSync(planPath, "utf8");
-	expect(plan).toStartWith("# Feature plan\n\nChange the code.\n\n## Open review findings\n\nPlan Review (openai-codex/gpt-6-astra, round 1 of 3) found no blockers.");
+	expect(plan).toStartWith("# Feature plan\n\nChange the code.\n\n## Open review findings\n\nPlan Review (openai-codex/gpt-6.2-astra, round 1 of 3) found no blockers.");
 	expect(plan).toEndWith("\n\n- [concern] Task 1: No test covers the change. Fix: Add a test.\n");
 	expect(plan).not.toContain("[nit]");
 	expect(await propose()).toBeUndefined();
@@ -570,7 +570,7 @@ test("a plan outside the session's local:// directory is reviewed as it is and n
 	const path = useCwdPlan(content);
 	answers.push({ text: CONCERN });
 	const result = await review();
-	expect(result).toContain("Plan review of PLAN.md by openai-codex/gpt-6-astra, round 1 of 3: approved with open concerns.");
+	expect(result).toContain("Plan review of PLAN.md by openai-codex/gpt-6.2-astra, round 1 of 3: approved with open concerns.");
 	expect(result).toContain("only into plan files stored in this session's local:// directory. Tell the user about them");
 	expect(reviewerPrompts[0]).toContain("Written by hand.");
 	expect(readFileSync(path, "utf8")).toBe(content);

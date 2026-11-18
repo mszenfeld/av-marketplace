@@ -46,7 +46,7 @@ This is the mapping we run the plugins with and test them on. Put it in `~/.omp/
 ```yaml
 modelRoles:
   plan: anthropic/claude-fable-5-1:max
-  advisor: openai-codex/gpt-6-astra
+  advisor: openai-codex/gpt-6.2-astra
   executor: openai-codex/gpt-6-sol:xhigh
   code_review: anthropic/claude-opus-5-5:xhigh
   challenger: openai-codex/gpt-6-sol:xhigh
