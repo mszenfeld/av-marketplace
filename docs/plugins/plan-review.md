@@ -11,7 +11,7 @@ Install the plugin and map the `advisor` model role in `~/.omp/agent/config.yml`
 ```yaml
 modelRoles:
   plan: anthropic/claude-fable-5-1:max
-  advisor: openai-codex/gpt-6-astra
+  advisor: openai-codex/gpt-6.2-astra
 ```
 
 Without `modelRoles.advisor`, OMP resolves the role through `slow`. The role only picks the reviewer's model; OMP's Advisor runtime stays off unless you enable it (`advisor.enabled`).
@@ -26,7 +26,7 @@ OMP loads the plugin's extension when the `omp` process starts. After installing
 4. The plugin lists the concerns of a review without blockers in a `## Open review findings` section at the end of the plan file, so the approval dialog shows them and you decide on them when you approve. When Delivery runs the approved plan, the implementer and the reviewer of every task receive them as well, and Delivery applies those about the plan's `## Verification` that hold to its checks, or prints them as `manual` checks when they need a project file or a step outside the delivery ([Delivery](delivery.md#plan-review-findings)). The agent proposes the plan without revising it for them. Writing the section needs no new review, and every review removes the previous section before the reviewer reads the plan, so the section always belongs to the latest review. The plugin writes only plan files stored in the session's `local://` directory, where plan mode keeps its plans, and leaves a plan alone if it changed while the reviewer ran; then the agent reviews the current text again, unless that was the last of the 3 rounds. For a plan file stored elsewhere, when writing the section fails, or when the plan changed while the last round's reviewer ran, the agent reports the findings to you instead.
 5. Writing the slug to `xd://propose` is blocked until a review finds no blockers in the current plan text. Until the 3 rounds are used, any edit after that review, including an edit of the `## Open review findings` section, needs another review; after them, `xd://propose` lets any text through with a warning.
 
-A review round takes minutes: about 7 minutes (median) in our sessions with `openai-codex/gpt-6-astra`. The reviewer stops after 15 minutes.
+A review round takes minutes: about 7 minutes (median) in our sessions with `openai-codex/gpt-6.2-astra`. The reviewer stops after 15 minutes.
 
 Every reviewer run of a plan file is a round, including a run that cannot finish. After 3 rounds of one plan file, `xd://propose` lets the plan through with a warning. When the last round still found blockers, the plugin lists its blockers and concerns in the `## Open review findings` section, and you decide on them in the approval dialog. One plan waits at most 3 × 15 minutes for reviews. If a review cannot run (no `omp` on `PATH`, a reviewer error, an answer that is not the expected JSON, or 15 minutes without an answer), the plugin warns and lets that plan text through unreviewed.
 
