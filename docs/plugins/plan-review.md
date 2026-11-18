@@ -10,7 +10,7 @@ Install the plugin and map the `advisor` model role in `~/.omp/agent/config.yml`
 
 ```yaml
 modelRoles:
-  plan: anthropic/claude-fable-5-1:max
+  plan: anthropic/claude-opus-5-5:max
   advisor: openai-codex/gpt-6.2-astra
 ```
 
