@@ -10,8 +10,8 @@ Install the plugin and map the `advisor` model role in `~/.omp/agent/config.yml`
 
 ```yaml
 modelRoles:
-  plan: anthropic/claude-fable-5-1:max
-  advisor: openai-codex/gpt-6-astra
+  plan: anthropic/claude-opus-5-5:max
+  advisor: openai-codex/gpt-6.2-astra
 ```
 
 Without `modelRoles.advisor`, OMP resolves the role through `slow`. The role only picks the reviewer's model; OMP's Advisor runtime stays off unless you enable it (`advisor.enabled`).
@@ -28,7 +28,7 @@ OMP loads the plugin's extension when the `omp` process starts. After installing
 
    If the agent edits the plan after the last round, `xd://propose` is blocked. Calling `xd://plan_review` again runs no reviewer: it restores the reviewed text and appends each contiguous change to the plan body as an `[edit]` list item at the end of `## Open review findings`. Each item names the plan section and includes an `@@` hunk header, removed lines (`-`) and added lines (`+`). Carriage returns in those lines appear as literal `\r`, so newline normalization cannot turn a diff line into a task heading or a fence. The approval dialog shows these edits as unreviewed, and Delivery passes them to its agents as findings. Only the plugin writes the findings section; edits to that section are undone without an `[edit]` item. The plugin never writes a plan outside the session's `local://` directory: it returns the same edit items and tells the agent to undo the edits before proposing the plan. If restoring a local plan fails, the agent must undo its edits too.
 
-A review round takes minutes: about 7 minutes (median) in our sessions with `openai-codex/gpt-6-astra`. The reviewer stops after 15 minutes.
+A review round takes minutes: about 7 minutes (median) in our sessions with `openai-codex/gpt-6.2-astra`. The reviewer stops after 15 minutes.
 
 Every reviewer run of a plan file is a round, including a run that cannot finish. After 2 rounds of one plan file, the reviewer no longer checks it (step 5). When the last round still found blockers, the plugin lists its blockers and concerns in the `## Open review findings` section, and you decide on them in the approval dialog. One plan waits at most 2 × 15 minutes for reviews. If a review cannot run (no `omp` on `PATH`, a reviewer error, an answer that is not the expected JSON, or 15 minutes without an answer), the plugin warns and lets that plan text through unreviewed.
 
