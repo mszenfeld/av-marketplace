@@ -47,11 +47,11 @@ This is the mapping we run the plugins with and test them on. Put it in `~/.omp/
 modelRoles:
   plan: anthropic/claude-opus-5-5:max
   advisor: openai-codex/gpt-6.2-astra
-  executor: openai-codex/gpt-6-sol:xhigh
+  executor: openai-codex/gpt-6.2-sol:xhigh
   code_review: anthropic/claude-opus-5-5:xhigh
-  challenger: openai-codex/gpt-6-sol:xhigh
+  challenger: openai-codex/gpt-6.2-sol:xhigh
   analyst: anthropic/claude-opus-5-5:xhigh
-  tester: openai-codex/gpt-6-sol:low
+  tester: openai-codex/gpt-6.2-sol:low
 ```
 
 The suffix after a model sets its thinking level. The mapping pairs each check with a different model family than the work it checks:
