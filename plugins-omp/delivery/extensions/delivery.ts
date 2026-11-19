@@ -103,6 +103,39 @@ function approvedPlanPath(prompt: string): string | undefined {
 }
 
 export default function deliveryExtension(pi: ExtensionAPI): void {
+	// Shared contract with Plan Review, without making either optional plugin import the other.
+	// Push the promise before the first await: EventBus.emit does not await listeners.
+	pi.events.on("plan-review:check-plan", data => {
+		if (
+			typeof data !== "object" ||
+			data === null ||
+			!("url" in data) ||
+			!("file" in data) ||
+			!("cwd" in data) ||
+			!("problems" in data)
+		)
+			return;
+		const { url, file, cwd, problems } = data;
+		if (
+			typeof url !== "string" ||
+			!url.startsWith("local://") ||
+			typeof file !== "string" ||
+			typeof cwd !== "string" ||
+			!Array.isArray(problems)
+		)
+			return;
+		problems.push((async (): Promise<string[]> => {
+			const root = await gitRoot(pi, cwd);
+			if (!root || !existsSync(file)) return [];
+			try {
+				const result = await checkPlan(pi, root, file);
+				return [...result.problems, ...result.no_files];
+			} catch {
+				return [];
+			}
+		})());
+	});
+
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (inPlanMode(ctx)) {
 			if (!(await gitRoot(pi, ctx.cwd))) return undefined;
