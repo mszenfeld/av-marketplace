@@ -508,6 +508,11 @@ async function saveReviews(reviews: Map<string, Review>, ctx: ExtensionContext):
 	}
 }
 
+/** The slug as one shell word: bare when it needs no quoting, else single-quoted. */
+function commandWord(slug: string): string {
+	return /^[A-Za-z0-9._/-]+$/.test(slug) ? slug : `'${slug.replaceAll("'", "'\\''")}'`;
+}
+
 /**
  * `command` split into simple commands at unquoted `;`, `&`, `|`, `(`, `)` and newlines, each a list of its words
  * without quotes. `null` stands for a word the shell would expand: one with `$` or a backquote outside single quotes.
@@ -638,6 +643,7 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 			try {
 				const plan = await resolvePlan(params.title, ctx);
 				if (!plan) throw new Error(`No plan file found for "${params.title}". Write the plan to local://<slug>-plan.md first.`);
+				const slugWord = commandWord(plan.slug);
 				record.url = plan.url;
 				const review = (await sessionReviews(ctx)).get(plan.url);
 				const rounds = review?.rounds ?? 0;
@@ -645,7 +651,7 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 					record.outcome = "exhausted";
 					if (sha256(plan.content) === review.hash)
 						return textResult(
-							`All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used. Run \`propose ${plan.slug}\`; the user decides on the plan without another review.`,
+							`All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used. Run \`propose ${slugWord}\`; the user decides on the plan without another review.`,
 							{ url: plan.url, rounds, edits: 0, restored: false },
 						);
 					const view = plan.writable
@@ -669,8 +675,8 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 								record.proposeSha256 = hash;
 								return textResult(
 									edits.length > 0
-										? `All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used, and the plan changed after the last one. The plugin restored the text that round reviewed and listed your ${edits.length} later ${edits.length === 1 ? "edit" : "edits"} in the "${OPEN_FINDINGS_HEADING}" section at the end of ${plan.url}, unreviewed; the user decides on them in the approval dialog. Do not edit the plan again. Run \`propose ${plan.slug}\`.`
-										: `All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used, and only its "${OPEN_FINDINGS_HEADING}" section changed after the last one; only the plugin writes that section. The plugin restored the text that round reviewed. Do not edit the plan again. Run \`propose ${plan.slug}\`.`,
+										? `All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used, and the plan changed after the last one. The plugin restored the text that round reviewed and listed your ${edits.length} later ${edits.length === 1 ? "edit" : "edits"} in the "${OPEN_FINDINGS_HEADING}" section at the end of ${plan.url}, unreviewed; the user decides on them in the approval dialog. Do not edit the plan again. Run \`propose ${slugWord}\`.`
+										: `All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used, and only its "${OPEN_FINDINGS_HEADING}" section changed after the last one; only the plugin writes that section. The plugin restored the text that round reviewed. Do not edit the plan again. Run \`propose ${slugWord}\`.`,
 									{ url: plan.url, rounds, edits: edits.length, restored: true },
 								);
 							}
@@ -679,7 +685,7 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 						}
 					}
 					return textResult(
-						`All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used, and the plan changed after the last one. ${reason}, so undo these edits in ${plan.url} until it holds the text that round reviewed, then run \`propose ${plan.slug}\`; tell the user about any edit you still want:\n\n${edits.join("\n")}`,
+						`All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used, and the plan changed after the last one. ${reason}, so undo these edits in ${plan.url} until it holds the text that round reviewed, then run \`propose ${slugWord}\`; tell the user about any edit you still want:\n\n${edits.join("\n")}`,
 						{ url: plan.url, rounds, edits: edits.length, restored: false },
 					);
 				}
@@ -704,7 +710,7 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 					record.outcome = "rejected";
 					record.reason = problems.join("\n");
 					return textResult(
-						`Plan review did not run: another plugin's plan check rejects ${plan.url}, and the review rounds go only to a plan it accepts. This call used no round.\n${problems.map(problem => `- ${problem}`).join("\n")}\nFix these in the plan file, then run \`plan_review ${plan.slug}\` again.`,
+						`Plan review did not run: another plugin's plan check rejects ${plan.url}, and the review rounds go only to a plan it accepts. This call used no round.\n${problems.map(problem => `- ${problem}`).join("\n")}\nFix these in the plan file, then run \`plan_review ${slugWord}\` again.`,
 						{ url: plan.url, outcome: "rejected", problems },
 					);
 				}
@@ -716,7 +722,7 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 					record.proposeSha256 = hash;
 					ctx.ui.notify(`Plan review could not run (round ${round} of ${MAX_ROUNDS}); the plan goes to approval unreviewed.\n${reason}`, "warning");
 					return textResult(
-						`Plan review could not run (round ${round} of ${MAX_ROUNDS}); run \`propose ${plan.slug}\`, the plan goes to approval unreviewed.\n${reason}`,
+						`Plan review could not run (round ${round} of ${MAX_ROUNDS}); run \`propose ${slugWord}\`, the plan goes to approval unreviewed.\n${reason}`,
 						{ url: plan.url, round, outcome: "unavailable" },
 					);
 				};
@@ -729,7 +735,7 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 						"warning",
 					);
 					return new Error(
-						`Plan review cancelled by the user. If the user asks to propose the plan, run \`propose ${plan.slug}\`; its current text goes to approval unreviewed.`,
+						`Plan review cancelled by the user. If the user asks to propose the plan, run \`propose ${slugWord}\`; its current text goes to approval unreviewed.`,
 					);
 				};
 				const cancelled = async () => {
@@ -820,36 +826,36 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 				];
 				if (changed && last)
 					lines.push(
-						`${plan.url} changed while the review ran, so the plugin did not list the open findings in it, and all ${MAX_ROUNDS} review rounds are used. Run \`plan_review ${plan.slug}\`: no reviewer runs; the plugin restores the text this review covered with the findings above and lists your edit in the "${OPEN_FINDINGS_HEADING}" section, unreviewed. Then run \`propose ${plan.slug}\`.`,
+						`${plan.url} changed while the review ran, so the plugin did not list the open findings in it, and all ${MAX_ROUNDS} review rounds are used. Run \`plan_review ${slugWord}\`: no reviewer runs; the plugin restores the text this review covered with the findings above and lists your edit in the "${OPEN_FINDINGS_HEADING}" section, unreviewed. Then run \`propose ${slugWord}\`.`,
 					);
 				else if (changed)
 					lines.push(
-						`${plan.url} changed while the review ran, so the plugin did not list the open findings in it and this review does not cover its current text. Run \`plan_review ${plan.slug}\` again.`,
+						`${plan.url} changed while the review ran, so the plugin did not list the open findings in it and this review does not cover its current text. Run \`plan_review ${slugWord}\` again.`,
 					);
-				else if (outcome === "approve") lines.push(`Run \`propose ${plan.slug}\` to request approval.`);
+				else if (outcome === "approve") lines.push(`Run \`propose ${slugWord}\` to request approval.`);
 				else if (outcome === "approve-with-concerns" && listed)
 					lines.push(
-						`The concerns are listed in the "${OPEN_FINDINGS_HEADING}" section at the end of ${plan.url}, where the user decides on them in the approval dialog. Do not revise the plan for them and do not edit that section${last ? "" : ": any edit to the plan needs a new review"}. Run \`propose ${plan.slug}\` to request approval.`,
+						`The concerns are listed in the "${OPEN_FINDINGS_HEADING}" section at the end of ${plan.url}, where the user decides on them in the approval dialog. Do not revise the plan for them and do not edit that section${last ? "" : ": any edit to the plan needs a new review"}. Run \`propose ${slugWord}\` to request approval.`,
 					);
 				else if (outcome === "approve-with-concerns")
 					lines.push(
-						`${plan.url} does not list these concerns: ${unlisted}. Tell the user about them, then run \`propose ${plan.slug}\` to request approval.`,
+						`${plan.url} does not list these concerns: ${unlisted}. Tell the user about them, then run \`propose ${slugWord}\` to request approval.`,
 					);
 				else if (lastRound && listed)
 					lines.push(
-						`All ${MAX_ROUNDS} review rounds are used. The blockers and concerns are listed in the "${OPEN_FINDINGS_HEADING}" section at the end of ${plan.url}. Run \`propose ${plan.slug}\`; the user decides on these findings.`,
+						`All ${MAX_ROUNDS} review rounds are used. The blockers and concerns are listed in the "${OPEN_FINDINGS_HEADING}" section at the end of ${plan.url}. Run \`propose ${slugWord}\`; the user decides on these findings.`,
 					);
 				else if (lastRound)
 					lines.push(
-						`All ${MAX_ROUNDS} review rounds are used. ${plan.url} does not list these findings: ${unlisted}. Tell the user about the blockers and concerns above, then run \`propose ${plan.slug}\`; the user decides on them.`,
+						`All ${MAX_ROUNDS} review rounds are used. ${plan.url} does not list these findings: ${unlisted}. Tell the user about the blockers and concerns above, then run \`propose ${slugWord}\`; the user decides on them.`,
 					);
 				else
 					lines.push(
-						`Resolve every blocker and concern in the plan file, or state in the plan why one does not apply. Then run \`plan_review ${plan.slug}\` again; \`propose\` stays blocked until a review finds no blockers in the current plan.`,
+						`Resolve every blocker and concern in the plan file, or state in the plan why one does not apply. Then run \`plan_review ${slugWord}\` again; \`propose\` stays blocked until a review finds no blockers in the current plan.`,
 					);
 				if (last && !changed)
 					lines.push(
-						`This was the last review round: \`propose\` now accepts only the text it reviewed. Do not edit ${plan.url} any more; after an edit, run \`plan_review ${plan.slug}\`, which runs no reviewer, restores that text and lists your edit in the "${OPEN_FINDINGS_HEADING}" section, unreviewed.`,
+						`This was the last review round: \`propose\` now accepts only the text it reviewed. Do not edit ${plan.url} any more; after an edit, run \`plan_review ${slugWord}\`, which runs no reviewer, restores that text and lists your edit in the "${OPEN_FINDINGS_HEADING}" section, unreviewed.`,
 					);
 				return textResult(lines.join("\n"), { url: plan.url, reviewer, round, outcome, findings });
 			} catch (error) {
@@ -883,18 +889,19 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 			ctx.ui.notify(`Plan review: the last of the ${MAX_ROUNDS} review rounds still found blockers; the plan goes to approval with them open.`, "warning");
 			return undefined;
 		}
+		const slugWord = commandWord(plan.slug);
 		if (used)
 			return {
 				block: true,
-				reason: `All ${MAX_ROUNDS} review rounds of ${plan.url} are used and the plan changed after the last one, so its current text has no review. Run \`plan_review ${plan.slug}\`: no reviewer runs; the plugin restores the text that round reviewed and lists your later edits in the "${OPEN_FINDINGS_HEADING}" section. Then run \`propose ${plan.slug}\` again.`,
+				reason: `All ${MAX_ROUNDS} review rounds of ${plan.url} are used and the plan changed after the last one, so its current text has no review. Run \`plan_review ${slugWord}\`: no reviewer runs; the plugin restores the text that round reviewed and lists your later edits in the "${OPEN_FINDINGS_HEADING}" section. Then run \`propose ${slugWord}\` again.`,
 			};
-		const next = `run \`plan_review ${plan.slug}\``;
+		const next = `run \`plan_review ${slugWord}\``;
 		return {
 			block: true,
 			reason:
 				review?.hash === hash
 					? `Plan review requested changes (round ${review.rounds} of ${MAX_ROUNDS}) and the plan has not changed since. Resolve every blocker and concern in the plan file, or state in the plan why one does not apply, then ${next} again.`
-					: `${review ? "The plan changed since its last review." : "This plan has not been reviewed."} Before proposing it, ${next} and follow its result, then run \`propose ${plan.slug}\` again.`,
+					: `${review ? "The plan changed since its last review." : "This plan has not been reviewed."} Before proposing it, ${next} and follow its result, then run \`propose ${slugWord}\` again.`,
 		};
 	});
 }

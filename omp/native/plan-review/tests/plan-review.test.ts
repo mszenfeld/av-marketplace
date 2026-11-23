@@ -445,6 +445,37 @@ test("propose blocks an unreviewed plan and leaves other tool calls alone", asyn
 	expect(await proposeCall({ toolName: "bash", input: { command: "git log --grep propose" } })).toBeUndefined();
 });
 
+test.each([
+	["upgrade docs", "'upgrade docs'"],
+	["team's $docs", "'team'\\''s $docs'"],
+])("commands for the %s plan keep its slug as one argument", async (slug: string, quoted: string): Promise<void> => {
+	rmSync(planPath);
+	writeFileSync(join(root, "artifacts", "local", `${slug}-plan.md`), "# Upgrade docs\n\nUpdate the guide.\n");
+
+	const command = `propose ${quoted}`;
+	const proposal = { toolName: "bash", input: { command } };
+	expect(await proposeCall(proposal)).toMatchObject({
+		block: true,
+		reason: expect.stringContaining(`run \`plan_review ${quoted}\``),
+	});
+
+	const stopRejecting = events.on(PLAN_CHECK_CHANNEL, data => {
+		if (typeof data !== "object" || data === null || !("problems" in data) || !Array.isArray(data.problems))
+			throw new Error("Invalid check request");
+		data.problems.push(Promise.resolve(["Update the guide's filename."]));
+	});
+	expect(await review(slug)).toContain(`run \`plan_review ${quoted}\` again`);
+	stopRejecting();
+
+	for (let round = 1; round <= MAX_ROUNDS; round++) {
+		answers.push({ text: NIT_ONLY });
+		const result = await review(slug);
+		expect(result).toContain(`Run \`${command}\` to request approval.`);
+		if (round === MAX_ROUNDS) expect(result).toContain(`after an edit, run \`plan_review ${quoted}\``);
+	}
+	expect(await proposeCall(proposal)).toBeUndefined();
+});
+
 test("another plugin's rejected plan check saves a record without using a round or running the reviewer", async () => {
 	userConfig(RECORDS_ON);
 	writeFileSync(planPath, "# Feature plan\n\nChange the code.\n\n## Open review findings\n\nStale findings.\n");
