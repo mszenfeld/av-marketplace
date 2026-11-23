@@ -16,6 +16,8 @@ omp plugin install <plugin>@av-marketplace
 
 QA and Code Review's auto-accept and `after_review` need Python 3.11 or newer as `python3`, Delivery needs Python 3.9 or newer, and Commit needs `jq`; see [Prerequisites](installation.md#prerequisites).
 
+Delivery's and Plan Review's extensions need OMP 19.1.0 or newer: they check a plan when it is submitted with the `propose` command, which replaced `xd://propose` in that release. QA's OMP edition needs it too: its browser steps read the `browser` guide at `help://eval/browser`, which 19.1.0 moved from `xd://eval/browser`.
+
 ## Updating
 
 ```bash
@@ -47,11 +49,11 @@ This is the mapping we run the plugins with and test them on. Put it in `~/.omp/
 modelRoles:
   plan: anthropic/claude-opus-5-5:max
   advisor: openai-codex/gpt-6.2-astra
-  executor: openai-codex/gpt-6-sol:xhigh
+  executor: openai-codex/gpt-6.2-sol:xhigh
   code_review: anthropic/claude-opus-5-5:xhigh
-  challenger: openai-codex/gpt-6-sol:xhigh
+  challenger: openai-codex/gpt-6.2-sol:xhigh
   analyst: anthropic/claude-opus-5-5:xhigh
-  tester: openai-codex/gpt-6-sol:low
+  tester: openai-codex/gpt-6.2-sol:low
 ```
 
 The suffix after a model sets its thinking level. The mapping pairs each check with a different model family than the work it checks:
