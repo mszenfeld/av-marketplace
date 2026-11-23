@@ -865,7 +865,7 @@ test("a plan edited during the last round is restored with that round's findings
 	expect(await propose()).toBeUndefined();
 });
 
-test("after the last round xd://propose accepts only the reviewed text, and plan_review restores it with later edits listed", async () => {
+test("after the last round propose accepts only the reviewed text, and plan_review restores it with later edits listed", async () => {
 	userConfig(RECORDS_ON);
 	writeFileSync(planPath, "# Feature plan\n\n## Context\n\nChange the code.\n\n### Task 1: Change the code\n\nEdit src/a.ts.\n\n## Verification\n\nRun the tests.\n");
 	answers.push({ text: CONCERN }, { text: CONCERN });
@@ -882,7 +882,7 @@ test("after the last round xd://propose accepts only the reviewed text, and plan
 	const blocked = (await propose()) as Blocked;
 	expect(blocked.block).toBe(true);
 	expect(blocked.reason).toContain("changed after the last one");
-	expect(blocked.reason).toContain("xd://plan_review");
+	expect(blocked.reason).toContain("Run `plan_review feature`");
 	expect(await review()).toContain("listed your 3 later edits");
 	expect(reviewerCalls).toBe(MAX_ROUNDS);
 	const restored = readFileSync(planPath, "utf8");
@@ -908,7 +908,7 @@ test("after the last round xd://propose accepts only the reviewed text, and plan
 	].join("\n"));
 	expect(newRecord()).toMatchObject({ outcome: "exhausted", round: null, plan: null, proposeSha256: sha(restored) });
 	expect(await propose()).toBeUndefined();
-	expect(await review()).toContain('are used. Write "feature" to xd://propose');
+	expect(await review()).toContain("are used. Run `propose feature`");
 	expect(newRecord()).toMatchObject({ outcome: "exhausted", proposeSha256: null });
 	const body = restored.slice(0, restored.indexOf("\n\n## Open review findings"));
 	for (const ending of ["", "\n", "\n\n", "\n\n\n"]) {

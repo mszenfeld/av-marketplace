@@ -38,7 +38,7 @@ The plugin saves each plan file's review state in `plan-review-state.json` in th
 
 Approving the plan ends its review cycle: OMP's `Plan approved.` prompt clears that plan file's in-memory and saved state, without changing the approved file or other plans' state. This also applies when approval keeps or compacts the session's context. If you later re-enter plan mode and update the same file for another request, its next review starts at round 1, rather than restoring the previous cycle's text.
 
-With Delivery installed, its task check runs before every reviewer round for `local://` plans in a git repository. It checks the same violations that Delivery's `xd://propose` gate blocks, including missing file lists. A rejected plan gets no review and uses no round until the agent fixes it, so even the last round reviews a plan that passes Delivery's check. If the router fails, Delivery adds no problem and the review proceeds. The `## Open review findings` section does not change the task check: it comes after the last task, and a task ends at the next `##` heading.
+With Delivery installed, its task check runs before every reviewer round for `local://` plans in a git repository. It checks the same violations that Delivery's `propose` gate blocks, including missing file lists. A rejected plan gets no review and uses no round until the agent fixes it, so even the last round reviews a plan that passes Delivery's check. If the router fails, Delivery adds no problem and the review proceeds. The `## Open review findings` section does not change the task check: it comes after the last task, and a task ends at the next `##` heading.
 
 ## Review records
 

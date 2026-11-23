@@ -645,7 +645,7 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 					record.outcome = "exhausted";
 					if (sha256(plan.content) === review.hash)
 						return textResult(
-							`All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used. Write "${plan.slug}" to xd://propose; the user decides on the plan without another review.`,
+							`All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used. Run \`propose ${plan.slug}\`; the user decides on the plan without another review.`,
 							{ url: plan.url, rounds, edits: 0, restored: false },
 						);
 					const view = plan.writable
@@ -669,8 +669,8 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 								record.proposeSha256 = hash;
 								return textResult(
 									edits.length > 0
-										? `All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used, and the plan changed after the last one. The plugin restored the text that round reviewed and listed your ${edits.length} later ${edits.length === 1 ? "edit" : "edits"} in the "${OPEN_FINDINGS_HEADING}" section at the end of ${plan.url}, unreviewed; the user decides on them in the approval dialog. Do not edit the plan again. Write "${plan.slug}" to xd://propose.`
-										: `All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used, and only its "${OPEN_FINDINGS_HEADING}" section changed after the last one; only the plugin writes that section. The plugin restored the text that round reviewed. Do not edit the plan again. Write "${plan.slug}" to xd://propose.`,
+										? `All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used, and the plan changed after the last one. The plugin restored the text that round reviewed and listed your ${edits.length} later ${edits.length === 1 ? "edit" : "edits"} in the "${OPEN_FINDINGS_HEADING}" section at the end of ${plan.url}, unreviewed; the user decides on them in the approval dialog. Do not edit the plan again. Run \`propose ${plan.slug}\`.`
+										: `All ${MAX_ROUNDS} plan review rounds for ${plan.url} are used, and only its "${OPEN_FINDINGS_HEADING}" section changed after the last one; only the plugin writes that section. The plugin restored the text that round reviewed. Do not edit the plan again. Run \`propose ${plan.slug}\`.`,
 									{ url: plan.url, rounds, edits: edits.length, restored: true },
 								);
 							}
@@ -704,7 +704,7 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 					record.outcome = "rejected";
 					record.reason = problems.join("\n");
 					return textResult(
-						`Plan review did not run: another plugin's plan check rejects ${plan.url}, and the review rounds go only to a plan it accepts. This call used no round.\n${problems.map(problem => `- ${problem}`).join("\n")}\nFix these in the plan file, then write {"title": ${JSON.stringify(plan.slug)}} to xd://plan_review again.`,
+						`Plan review did not run: another plugin's plan check rejects ${plan.url}, and the review rounds go only to a plan it accepts. This call used no round.\n${problems.map(problem => `- ${problem}`).join("\n")}\nFix these in the plan file, then run \`plan_review ${plan.slug}\` again.`,
 						{ url: plan.url, outcome: "rejected", problems },
 					);
 				}
@@ -849,7 +849,7 @@ export default function planReviewExtension(pi: ExtensionAPI): void {
 					);
 				if (last && !changed)
 					lines.push(
-						`This was the last review round: xd://propose now accepts only the text it reviewed. Do not edit ${plan.url} any more; after an edit, write {"title": ${JSON.stringify(plan.slug)}} to xd://plan_review, which runs no reviewer, restores that text and lists your edit in the "${OPEN_FINDINGS_HEADING}" section, unreviewed.`,
+						`This was the last review round: \`propose\` now accepts only the text it reviewed. Do not edit ${plan.url} any more; after an edit, run \`plan_review ${plan.slug}\`, which runs no reviewer, restores that text and lists your edit in the "${OPEN_FINDINGS_HEADING}" section, unreviewed.`,
 					);
 				return textResult(lines.join("\n"), { url: plan.url, reviewer, round, outcome, findings });
 			} catch (error) {
