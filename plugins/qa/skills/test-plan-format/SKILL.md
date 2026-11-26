@@ -30,6 +30,9 @@ Every test plan MUST follow this structure; omit optional sections and `**Blocke
 - Date: <YYYY-MM-DD>
 - Branch: <current checkout branch>
 - Head: <current checkout HEAD sha>
+- Review: draft
+- Changed files:
+  - `<changed path>`
 
 ## Changes Summary
 
@@ -136,7 +139,7 @@ The BE tester sees only the output of `qa-redact`: it replaces values under sens
 
 ## Config references and preconditions
 
-- `## Source` records the diff source, base, date, current checkout `Branch:` and `Head:`. These identify the branch and snapshot for plan selection and staleness checks.
+- `## Source` records the diff source, base, date, current checkout `Branch:` and `Head:`, the review state `Review:` and the diff's `Changed files:`. `Branch:` and `Head:` identify the branch and snapshot for plan selection and staleness checks. The planner writes `Review: draft`; when the review ends, the engine replaces it with `approved`, `open` or `unreviewed`. `/qa:run` finishes the review of a plan that still says `draft` or `unreviewed` before testing it; a plan without `Review:`, such as a hand-written one, runs as written. `Changed files:` lists each changed path in backticks, one nested item per path, for a resumed review to check coverage against.
 - `## Setup` is optional human notes only, directly after the title when present. No consumer parses it. Do not declare URLs, credentials, database connections or service commands there; their configuration belongs in `.av/config.toml` and its local overrides.
 - `## Users` is the section between that heading and the next `## ` heading. Each line is `- <name>: existing|registered — <description>` (a `*` bullet is also accepted). Names match `[a-z][a-z0-9_]*`; the first declaration wins if repeated. A plain user signup can create is `registered`; a role or state signup cannot produce is `existing` and must be configured under `[qa.users.<name>]`. Include owner, other user and each required role; anonymous actions use no user credential. Use at most 10 registered users per plan.
 - An existing user's uppercased name gives only the fields the plan's tokens reference among `QA_<U>_EMAIL`, `QA_<U>_PASSWORD` and `QA_<U>_ID` (ID only when configured); a field no token names is never exposed, so a login as that user writes both `$QA_<U>_EMAIL` and `$QA_<U>_PASSWORD` in the scenario. A registered user's `$QA_<U>_EMAIL` / `$QA_<U>_ID` are tester-owned values from its registration step, not channel names. Its password is the run's `$QA_NEW_PASSWORD`; the dispatch supplies `$QA_TAG`, used in emails such as `qa+$QA_TAG-owner@test.local`. Using a registered user's values before registration ran is `NEED_INFO kind=fixture` naming the user at run time.
@@ -248,7 +251,7 @@ Before saving the plan, verify:
 - [ ] State Checks are repeatable, BE-only, use real table/column names or supported Redis read commands, and name a configured store (mandatory with several stores)
 - [ ] API paths match actual routes from the codebase
 - [ ] No placeholder text (TBD, TODO, fill in later)
-- [ ] `## Source` records the current checkout `Branch:` and `Head:`
+- [ ] `## Source` records the current checkout `Branch:` and `Head:`, `Review: draft` and every changed path under `Changed files:`
 - [ ] `## Setup`, if present, holds only optional human notes; targets, apps, values, stores and bring-up are config-owned
 - [ ] Credentials and exposed values use supported `$QA_NAME` / `${QA_NAME}` tokens; tokens/cookies are retained by the tester from preconditions, never `$QA_<U>_TOKEN` / cookie plan tokens or literal secrets
 - [ ] Every absolute URL anywhere in an FE or BE scenario, including Expected and edge cases, is on a config target origin; off-target response URLs are asserted by separate components, not literal URLs. Request/page paths have `- **Target:** <name>` where the section default does not apply

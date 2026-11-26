@@ -2,7 +2,7 @@
 
 `/qa:run` tests a change and reports observed failures with `QA-NNN` issue IDs. It can fix eligible issues and retest within fixed limits. Frontend tests use the browser; backend tests use APIs and configured stores; DESKTOP tests drive desktop apps headless in the background through installable driver plugins.
 
-**Version:** 3.2.1
+**Version:** 3.3.0
 
 ## Quick start
 
@@ -64,7 +64,7 @@ Run the complete workflow. The command accepts no flags; set policy in configura
 
 | Argument | Plan selection |
 |---|---|
-| Existing file | Use that plan explicitly; automatic staleness checks do not apply. |
+| Existing file | Use that plan explicitly; automatic staleness checks do not apply. A plan whose `## Source` still says `Review: draft` or `Review: unreviewed` gets its review finished first, without a new draft. |
 | Change source | Generate and review a plan for that source. |
 | No argument | Use the newest plan whose `## Source` names the current branch. Generate and review without asking when none matches or HEAD is detached. |
 
@@ -148,6 +148,24 @@ Interactive means the harness can deliver a question, not that shell stdin is a 
 
 See [Policy](qa/configuration.md#policy) for settings shared by both modes and [CI trust setup](../configuration.md#headless-runners-and-ci).
 
+#### Lines for automation
+
+An unattended harness can read these lines from the QA transcript: plan identity from `/qa:run` and `/qa:create-plan`, and a pre-start stop cause from `/qa:run`.
+
+`QA plan: <path> sha256=<hash> review=<state>` names the plan after the planner drafts it, after each revision, when the review ends and when `/qa:run` selects an existing plan. `review` is the `Review:` state in the plan's `## Source`: `draft` until the review ends, then `approved`, `open` or `unreviewed`; `none` for a plan without that line. Use the last identity line. If a session ends without a result or a `QA not run:` line, run `/qa:run <path>` if the file still has that hash. A `draft` or `unreviewed` plan goes through review without a new draft; other plans run as written. If there is no identity line or the hash no longer matches, use the original change source.
+
+`QA not run: <cause>` comes right before every `/qa:run` stop before a run starts, except a generated plan with nothing to test:
+
+| Cause | Meaning | Retry |
+|---|---|---|
+| `declined` | You declined a gate: trust, the configuration write, the dirty-tree question or a lock takeover. | Do not retry. |
+| `plan-blocker` | You stopped on an open plan blocker. | Do not retry. |
+| `headless` | A gate could not be asked. | Ask a person. |
+| `config` | Configuration is invalid, cannot be written or still lacks required keys or secrets. | Ask a person. |
+| `plan-failed` | Plan generation failed. | Retry with the change source. |
+| `plan-invalid` | The plan has plan errors, off-target URLs or no scenarios. | Ask a person. |
+| `error` | Any other stop before the run. | Ask a person. |
+
 ### `/qa:create-plan [change-source]`
 
 Author and review a plan without tests. Accepts the same change sources and no flags. Empty input uses the current branch or pull request. Plans live in `docs/testing/plans/YYYY-MM-DD-<topic>-test-plan.md`.
@@ -163,7 +181,7 @@ For `last N commits`, planning reads delivery plans named by valid Git `Delivery
 
 | Plan field | Human meaning |
 |---|---|
-| `## Source` | `Branch:` and `Head:` enable automatic selection and staleness checks. |
+| `## Source` | `Branch:` and `Head:` enable automatic selection and staleness checks; `Review:` records the review state and `Changed files:` the reviewed diff. |
 | `## Users` | Declares [existing or registered users](qa/configuration.md#users). |
 | `## Setup` | Optional human notes, never parsed configuration. |
 | `- **Target:** <name>` | Selects a configured origin for FE/BE or a configured app for DESKTOP; FE/BE cross-origin preconditions use configured absolute URLs. |
@@ -308,7 +326,7 @@ Scenario verdicts combine the main flow and every edge: failure, missing prerequ
 
 When feature scenarios exist but none passes, QA warns about shallow coverage. Auto-generated zero-failure plans can report low-confidence green. Existing all-SKIP/NEED_INFO plans stop with `No executable verifier — cannot gate`.
 
-A newly generated plan without executable scenarios exits without testers; an existing empty plan is an error. Generated plans can exit gracefully with no exercised scenarios.
+A newly generated plan or one whose review just resumed exits without testers if it has no executable scenarios; another existing empty plan is an error. Generated plans can exit gracefully with no exercised scenarios.
 
 QA distinguishes mutation-guard-only skips from setup, tooling and parsing gaps. Unlock hints name missing configuration, data, tools or reachability problems without printing secret values.
 
