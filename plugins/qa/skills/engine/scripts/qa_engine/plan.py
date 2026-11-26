@@ -45,9 +45,12 @@ USER_TOKEN = re.compile(r"(.+?)_(EMAIL|PASSWORD|ID)\Z")
 ENGINE_TOKENS = frozenset({"TAG", "NEW_PASSWORD"})
 USER_LINE = re.compile(r"^[ \t]*[-*][ \t]+([a-z][a-z0-9_]*)[ \t]*:[ \t]*(existing|registered)\b", re.MULTILINE)
 RELATIVE_PATH = re.compile(r"(?<![A-Za-z0-9_:/])/(?!/)[A-Za-z0-9_{?]")
-REVIEW_STATES = ("draft", "approved", "open", "unreviewed")
-RECORDED_REVIEW_STATES = ("approved", "open", "unreviewed")
-_SOURCE_BOUNDARY = re.compile(r"^#{1,2}\s+", re.MULTILINE)
+RECORDED_REVIEW_STATES = ("approved", "open", "blocked", "unreviewed")
+REVIEW_STATES = ("draft", *RECORDED_REVIEW_STATES)
+# Source matching also runs on unnormalized text so review writes preserve line endings.
+_LINE_START = r"(?:\A|(?<=\n)|(?<=\r)(?!\n))"
+_LINE_BREAK = re.compile(r"\r\n?|\n")
+_SOURCE_BOUNDARY = re.compile(rf"{_LINE_START}#{{1,2}}\s+")
 
 
 @dataclass
@@ -164,7 +167,7 @@ def _edges(text: str) -> list[Assertion]:
 
 
 def _source_span(text: str) -> tuple[int, int] | None:
-    section = re.search(r"^##[ \t]+Source[ \t]*(?=\r?$)", text, re.MULTILINE | re.IGNORECASE)
+    section = re.search(rf"{_LINE_START}##[ \t]+Source[ \t]*(?=[\r\n]|\Z)", text, re.IGNORECASE)
     if section is None:
         return None
 
@@ -180,8 +183,8 @@ def _source(text: str) -> dict[str, str]:
 
     start, end = span
     metadata: dict[str, str] = {}
-    pattern = r"^[ \t]*(?:-[ \t]*)?(?:\*\*)?(Branch|Head|Review):(?:\*\*)?[ \t]*(.*)$"
-    for match in re.finditer(pattern, text[start:end], re.MULTILINE | re.IGNORECASE):
+    pattern = rf"{_LINE_START}[ \t]*(?:-[ \t]*)?(?:\*\*)?(Branch|Head|Review):(?:\*\*)?[ \t]*([^\r\n]*)"
+    for match in re.finditer(pattern, text[start:end], re.IGNORECASE):
         metadata[match.group(1).lower()] = match.group(2).strip().strip("`")
 
     return metadata
@@ -212,10 +215,15 @@ def plan_identity(repo: Path, path: Path) -> dict[str, str]:
 
 
 def record_review(repo: Path, path: Path, state: str) -> dict[str, str]:
-    """Record a review outcome in Source and return the updated plan identity."""
+    """Record a review outcome without rewriting line endings, then return the plan identity."""
 
     if state not in RECORDED_REVIEW_STATES:
-        raise ConfigError("review state must be approved, open or unreviewed")
+        raise ConfigError("review state must be approved, open, blocked or unreviewed")
+
+    try:
+        path = path.resolve(strict=True)
+    except (OSError, RuntimeError) as error:  # Python 3.11–3.12 raise RuntimeError for symlink loops.
+        raise ConfigError("plan is not readable") from error
 
     _, text = _read_plan(path)
     span = _source_span(text)
@@ -225,13 +233,13 @@ def record_review(repo: Path, path: Path, state: str) -> dict[str, str]:
     start, end = span
     source = text[start:end]
     line = f"- Review: {state}"
-    flags = re.MULTILINE | re.IGNORECASE
-    pattern = r"^[ \t]*(?:-[ \t]*)?(?:\*\*)?Review:(?:\*\*)?[^\r\n]*(?=\r?$)"
-    updated, count = re.subn(pattern, lambda _: line, source, flags=flags)
+    pattern = rf"{_LINE_START}[ \t]*(?:-[ \t]*)?(?:\*\*)?Review:(?:\*\*)?[^\r\n]*"
+    updated, count = re.subn(pattern, lambda _: line, source, flags=re.IGNORECASE)
     if not count:
-        head = re.search(r"^[ \t]*(?:-[ \t]*)?(?:\*\*)?Head:[^\r\n]*(?=\r?$)", source, flags)
+        head = re.search(rf"{_LINE_START}[ \t]*(?:-[ \t]*)?(?:\*\*)?Head:[^\r\n]*", source, re.IGNORECASE)
         index = head.end() if head else 0
-        newline = "\r\n" if source.startswith("\r\n", index if index < len(source) else 0) else "\n"
+        line_break = _LINE_BREAK.match(source, index) or _LINE_BREAK.match(source)
+        newline = line_break.group() if line_break else "\n"
         updated = f"{source[:index]}{newline}{line}{source[index:]}"
 
     atomic_write(path, f"{text[:start]}{updated}{text[end:]}".encode("utf-8"))

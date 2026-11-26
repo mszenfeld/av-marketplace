@@ -64,7 +64,7 @@ Run the complete workflow. The command accepts no flags; set policy in configura
 
 | Argument | Plan selection |
 |---|---|
-| Existing file | Use that plan explicitly; automatic staleness checks do not apply. A plan whose `## Source` still says `Review: draft` or `Review: unreviewed` gets its review finished first, without a new draft. |
+| Existing file | Use that plan explicitly; automatic staleness checks do not apply. If `Review:` in `## Source` is `draft`, `blocked` or `unreviewed`, resume its review without drafting a new plan. |
 | Change source | Generate and review a plan for that source. |
 | No argument | Use the newest plan whose `## Source` names the current branch. Generate and review without asking when none matches or HEAD is detached. |
 
@@ -75,7 +75,7 @@ Automatic selection considers a plan stale when `Head:` is missing, invalid or n
 
 Interactive QA shows changed files and defaults to regeneration; headless QA regenerates. Failed generation never silently reuses an old plan. QA shows generated paths and FE, BE and DESKTOP scenario counts.
 
-Open blockers require an interactive run-anyway decision; headless runs stop. Concerns remain visible but do not stop execution.
+Open review blockers require an interactive run-anyway decision; headless runs stop. If a resumed review cannot clear a recorded blocker, the gate still applies. Choosing **Run anyway** applies to this invocation only. Concerns remain visible but do not stop execution.
 
 </details>
 
@@ -152,14 +152,18 @@ See [Policy](qa/configuration.md#policy) for settings shared by both modes and [
 
 An unattended harness can read these lines from the QA transcript: plan identity from `/qa:run` and `/qa:create-plan`, and a pre-start stop cause from `/qa:run`.
 
-`QA plan: <path> sha256=<hash> review=<state>` names the plan after the planner drafts it, after each revision, when the review ends and when `/qa:run` selects an existing plan. `review` is the `Review:` state in the plan's `## Source`: `draft` until the review ends, then `approved`, `open` or `unreviewed`; `none` for a plan without that line. Use the last identity line. If a session ends without a result or a `QA not run:` line, run `/qa:run <path>` if the file still has that hash. A `draft` or `unreviewed` plan goes through review without a new draft; other plans run as written. If there is no identity line or the hash no longer matches, use the original change source.
+`QA plan: <path> sha256=<hash> review=<state>` names the plan after the planner drafts it, after each revision, when the review ends and when `/qa:run` selects an existing plan. `review` is the `Review:` state in the plan's `## Source`: `draft` for a new draft, `approved` for a passing review, `open` for concerns only, `blocked` for an unresolved review blocker, `unreviewed` if the reviewer could not finish and no blocker is known, or `none` for a plan without that line.
+
+If a session ends without a result or a `QA not run:` line, use the last identity line. If the file still has that hash, run `/qa:run <path>`: `draft`, `blocked` and `unreviewed` plans go through review without a new draft, and any blocker that remains still requires a decision. Other plans run as written. If there is no identity line or the hash no longer matches, use the original change source.
+
+`blocked` records a plan review finding, not a `BLK-NN` defect in the code under test.
 
 `QA not run: <cause>` comes right before every `/qa:run` stop before a run starts, except a generated plan with nothing to test:
 
 | Cause | Meaning | Retry |
 |---|---|---|
 | `declined` | You declined a gate: trust, the configuration write, the dirty-tree question or a lock takeover. | Do not retry. |
-| `plan-blocker` | You stopped on an open plan blocker. | Do not retry. |
+| `plan-blocker` | You chose to stop rather than run with an unresolved review blocker. | Do not retry automatically. |
 | `headless` | A gate could not be asked. | Ask a person. |
 | `config` | Configuration is invalid, cannot be written or still lacks required keys or secrets. | Ask a person. |
 | `plan-failed` | Plan generation failed. | Retry with the change source. |
@@ -324,7 +328,7 @@ Read Coverage alongside the result. A green result can mean no observed failures
 
 Scenario verdicts combine the main flow and every edge: failure, missing prerequisite, skip, then pass. A skipped State Check alone does not downgrade runnable HTTP results. A whole-scenario PASS is still not proof of complete application behavior.
 
-When feature scenarios exist but none passes, QA warns about shallow coverage. Auto-generated zero-failure plans can report low-confidence green. Existing all-SKIP/NEED_INFO plans stop with `No executable verifier — cannot gate`.
+When feature scenarios exist but none passes, QA warns about shallow coverage. Auto-generated zero-failure plans, including one whose review just resumed, can report low-confidence green. Other existing all-SKIP/NEED_INFO plans stop with `No executable verifier — cannot gate`.
 
 A newly generated plan or one whose review just resumed exits without testers if it has no executable scenarios; another existing empty plan is an error. Generated plans can exit gracefully with no exercised scenarios.
 

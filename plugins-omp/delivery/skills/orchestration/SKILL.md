@@ -12,7 +12,7 @@ Procedures of the delivery plugin. The delivery extension starts the **Delivery 
 
 Inputs: `PLAN_SOURCE` — the plan as the caller gave it: a `local://` URL or a file path; `PLAN_FILE` — the plan's absolute file path, when the caller knows it.
 
-Run the steps in order. Every `stop` prints its message and ends the run.
+Run the steps in order. Every `stop` prints its message and ends the run. For a stop during **1. Preflight**, also print `QA not run: delivery-stopped` on its own line after the stop message and before ending the run.
 
 ### 1. Preflight
 

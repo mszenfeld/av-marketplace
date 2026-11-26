@@ -5,7 +5,7 @@ description: Shared QA plan authoring and bounded review for /qa:create-plan and
 
 # QA Plan Authoring
 
-Use this same workflow from `/qa:create-plan` and from `/qa:run` when `plan resolve` requests generation or regeneration. The `qa:test-planner` writes/revises the plan; the `qa:test-plan-reviewer` only reads it. Never write or edit the plan yourself. Running either command is the request to author the plan: do not add a confirmation question before drafting. `/qa:run` also uses the **Resume review** entry below for an existing plan whose `Review:` is `draft` or `unreviewed`.
+Use this same workflow from `/qa:create-plan` and from `/qa:run` when `plan resolve` requests generation or regeneration. The `qa:test-planner` writes/revises the plan; the `qa:test-plan-reviewer` only reads it. Never write or edit the plan yourself. Running either command is the request to author the plan: do not add a confirmation question before drafting. `/qa:run` also uses the **Resume review** entry below for an existing plan whose `Review:` is `draft`, `blocked` or `unreviewed`.
 
 ## Input
 
@@ -148,11 +148,11 @@ Run at most 3 review rounds. In round `n`:
 
 ### Step 5: Record the review outcome
 
-Run `plan review <plan> --state <outcome>`, where `<outcome>` is the `review.outcome` of the return contract (`approved`, `open` or `unreviewed`), and print the plan identity from its JSON. On failure, print the error and return the review outcome anyway. If the plan still says `draft` or `unreviewed`, a later `/qa:run <plan>` resumes its review.
+Run `plan review <plan> --state <state>`. Record `blocked` when `open_findings` contains a `blocker`, or when resuming a `blocked` plan whose `review.outcome` is `unreviewed`: a failed review cannot clear a recorded blocker. Otherwise record `review.outcome` (`approved`, `open` or `unreviewed`). Print the plan identity from the returned JSON. On failure, print the error and return the review outcome anyway. A later `/qa:run <plan>` resumes review if the saved state is `draft`, `blocked` or `unreviewed`.
 
 ## Resume review
 
-`/qa:run` uses this entry for an existing plan whose `plan identity` reports `review` `draft` or `unreviewed`: a draft whose review an interrupted session never finished, or a plan whose reviewer could not run. The caller supplies `Plan: <path>`, the `config` JSON and, when it has one, its `Desktop drivers:` block. Only task 3 of the progress tasks applies.
+`/qa:run` uses this entry for an existing plan whose `plan identity` reports `review` `draft`, `blocked` or `unreviewed`. The caller supplies `Plan: <path>`, the review state from `plan identity`, the `config` JSON and, when it has one, its `Desktop drivers:` block. Only task 3 of the progress tasks applies.
 
 1. Run qa:engine's Desktop drivers procedure, or reuse the caller's block. Skip Step 2's tool detection and browser probe: nothing is drafted.
 2. Build the Config block as in Input.

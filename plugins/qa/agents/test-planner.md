@@ -258,7 +258,7 @@ If the diff source cannot be resolved or the plan cannot be written, return `{"e
 4. Decline a finding that does not hold, leaving that part of the plan unchanged. The reason must carry evidence, such as the producer's `(path:line)` or the test-plan-format rule the plan already follows.
 5. Never write reviewer dialogue, finding numbers or declined reasons into the plan: testers read it as a specification.
 6. Every expectation you add or change keeps its own `(path:line)` or `(unverified — confirm at run time)` tag (Draft Step 4 item 6). Run the Step 6.5 refute pass over the edited parts before returning.
-7. Leave `## Source` unchanged, including `Review:` (`draft` or `unreviewed`) and the paths under `Changed files:`. The plan-authoring workflow records the review outcome itself.
+7. Leave `## Source` unchanged, including `Review:` and the paths under `Changed files:`. The plan-authoring workflow records the review outcome itself.
 
 Return one JSON object and nothing else, with one entry per finding in the dispatch's numbering:
 

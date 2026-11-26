@@ -2,6 +2,16 @@
 
 This page lists user-visible changes per release.
 
+## 3.3.0: plan identity, not-run causes and resumed plan reviews
+
+`/qa:run` and `/qa:create-plan` print `QA plan: <path> sha256=<hash> review=<state>` after the planner drafts a plan, after each revision and when the review ends. `/qa:run` also prints it when it selects an existing plan. Before every stop that happens before a run starts, `/qa:run` prints `QA not run: <cause>` immediately before the stop message, except when a generated plan has nothing to test. An unattended harness can use these lines to decide whether and how to run QA again. See [Lines for automation](../qa.md#lines-for-automation) for review states, causes and retry advice.
+
+A plan's `## Source` now includes `Review:` and `Changed files:`. The planner writes `Review: draft`; when the review ends, the new engine command `plan review` records `approved`, `open` (concerns only), `blocked` (an unresolved review blocker, distinct from a `BLK-NN` defect) or `unreviewed`. The new `plan identity` command reports the plan's path, SHA-256 hash and review state. `Changed files:` lists the paths changed in the diff, which a resumed review uses to check coverage.
+
+When `/qa:run <plan>` selects a plan marked `draft`, `blocked` or `unreviewed`, it first finishes the review in up to three rounds without drafting a new plan, then treats the plan as generated in this invocation. If a blocker remains, choose **Run anyway** or **Stop and fix the plan with /qa:create-plan**; a headless run stops. Plans without `Review:`, including plans written before 3.3.0 and hand-written plans that omit the field, run as written, as before.
+
+Delivery 0.11.0 prints `QA not run: <cause>` before each `QA: Not run` result and passes through the cause from `/qa:run` when QA stops before starting. With QA 3.2.1 or older, `/qa:run` does not print the cause line, so Delivery reports `error` for those `QA: Not run` results. Use QA 3.3.0 or later with Delivery 0.11.0.
+
 ## 3.2.1: browser guide for OMP 19.1
 
 In OMP, the testers and the plan-authoring probe read the `browser` guide at `help://eval/browser`, where OMP 19.1.0 moved it from `xd://eval/browser`. QA's OMP edition therefore needs OMP 19.1.0 or newer. The Claude Code edition is unchanged.

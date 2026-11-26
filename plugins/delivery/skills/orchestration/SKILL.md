@@ -42,7 +42,7 @@ The router's `agent` is final. Never ask the user which agent implements a task.
 
 ## Delivery run
 
-Run the steps in order. Every `stop` prints its message and ends the run.
+Run the steps in order. Every `stop` prints its message and ends the run. For a stop during **1. Preflight**, also print `QA not run: delivery-stopped` on its own line after the stop message and before ending the run.
 
 ### 1. Preflight
 
