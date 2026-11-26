@@ -19,12 +19,15 @@ STOP_MESSAGE = "Generated plan has no executable FE or BE scenarios"
 SOURCES = {
     "plugins/qa/commands/run.md": (
         f"> {STOP_MESSAGE} — nothing to test; not launching testers.\n"
+        "QA not run: <cause>\n"
     ),
     "plugins/delivery/skills/orchestration/SKILL.md": (
         f"- stopped with the `{STOP_MESSAGE}` message → `Nothing to test`.\n"
+        "QA not run: <cause>\n"
     ),
     "omp/native/delivery/skills/orchestration/SKILL.md": (
         f"- stopped with the `{STOP_MESSAGE}` message → `Nothing to test`.\n"
+        "QA not run: <cause>\n"
     ),
 }
 
@@ -64,9 +67,25 @@ class DeliveryQaContractTest(unittest.TestCase):
                 finally:
                     path.write_text(text, encoding="utf-8")
 
+    def test_cause_marker_drift_in_each_source_fails_and_names_the_path(self) -> None:
+        for relative, text in SOURCES.items():
+            with self.subTest(source=relative):
+                path = self.root / relative
+                path.write_text(text.replace("QA not run: <cause>\n", ""), encoding="utf-8")
+                try:
+                    code, _, stderr = self.run_check([])
+                    self.assertEqual(code, 1)
+                    self.assertIn(relative, stderr)
+                    self.assertIn("not-run cause marker", stderr)
+                finally:
+                    path.write_text(text, encoding="utf-8")
+
     def test_unrelated_explanation_can_change(self) -> None:
         path = self.root / "plugins/qa/commands/run.md"
-        path.write_text(f"> {STOP_MESSAGE} — a revised explanation.\n", encoding="utf-8")
+        path.write_text(
+            f"> {STOP_MESSAGE} — a revised explanation.\nQA not run: <cause>\n",
+            encoding="utf-8",
+        )
         code, _, stderr = self.run_check([])
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")

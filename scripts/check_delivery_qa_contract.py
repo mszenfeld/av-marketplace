@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Check the stop-message prefix Delivery uses to classify QA as Nothing to test.
+"""Check the texts Delivery reads from /qa:run: the stop-message prefix that
+classifies QA as Nothing to test and the "QA not run:" marker that carries
+the cause of Not run.
 
 Usage: python3 scripts/check_delivery_qa_contract.py
 Exit codes: 0 for parity, 1 for missing/drifting/unreadable sources, 2 for usage.
-The message suffix is prose; only the prefix consumed by Delivery is fixed.
+The stop-message suffix is prose; only its prefix is fixed.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STOP_MESSAGE = "Generated plan has no executable FE or BE scenarios"
+CAUSE_MARKER = "QA not run:"
 CONTRACT_FILES = (
     Path("plugins/qa/commands/run.md"),
     Path("plugins/delivery/skills/orchestration/SKILL.md"),
@@ -22,7 +25,7 @@ CONTRACT_FILES = (
 
 
 def check(root: Path) -> list[str]:
-    """Return every source that no longer contains the shared message prefix."""
+    """Return errors for unreadable sources or missing contract text."""
     errors: list[str] = []
     for relative in CONTRACT_FILES:
         try:
@@ -33,6 +36,8 @@ def check(root: Path) -> list[str]:
 
         if STOP_MESSAGE not in text:
             errors.append(f"{relative.as_posix()}: missing stop-message prefix {STOP_MESSAGE!r}")
+        if CAUSE_MARKER not in text:
+            errors.append(f"{relative.as_posix()}: missing not-run cause marker {CAUSE_MARKER!r}")
 
     return errors
 
@@ -49,7 +54,7 @@ def main(argv: list[str], root: Path = REPO_ROOT) -> int:
         for error in errors:
             print(f"  - {error}", file=sys.stderr)
         print(
-            "Keep the generated-plan stop prefix and both Delivery consumers in sync.",
+            "Keep the generated-plan stop prefix, the not-run cause marker and both Delivery consumers in sync.",
             file=sys.stderr,
         )
         return 1
