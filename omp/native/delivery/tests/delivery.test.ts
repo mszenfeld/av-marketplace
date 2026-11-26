@@ -5,9 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import approvedPlanPrompt from "@oh-my-pi/pi-coding-agent/prompts/system/plan-mode-approved" with { type: "text" };
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import deliveryExtension from "../extensions/delivery";
 
 type Hook = (event: { toolName?: string; input?: unknown; prompt?: string; systemPrompt?: string[] }, ctx: ExtensionContext) => Promise<unknown>;
+
+// The interpreter behind `python3`, resolved once: version-manager shims add a long start-up to every call.
+const PYTHON = Bun.spawnSync(["python3", "-c", "import sys; print(sys.executable)"]).stdout.toString().trim();
 
 const invalidPlan = `# Plan
 
@@ -30,6 +34,7 @@ let hooks: Map<string, Hook>;
 let notifications: string[];
 let execute: ExtensionAPI["exec"];
 let notificationLevels: string[];
+let events: EventBus;
 
 beforeEach(() => {
 	root = mkdtempSync(join(tmpdir(), "delivery-hooks-"));
@@ -49,7 +54,7 @@ beforeEach(() => {
 		ui: { notify: (message: string, level: string) => { notifications.push(message); notificationLevels.push(level); } },
 	} as unknown as ExtensionContext;
 	execute = async (command, args, options) => {
-		const process = Bun.spawn([command, ...args], {
+		const process = Bun.spawn([command === "python3" ? PYTHON : command, ...args], {
 			cwd: options?.cwd ?? root,
 			stdout: "pipe",
 			stderr: "pipe",
@@ -62,7 +67,8 @@ beforeEach(() => {
 		return { stdout, stderr, code, killed: false };
 	};
 	hooks = new Map();
-	deliveryExtension({ on: (name: string, handler: Hook) => hooks.set(name, handler), exec: (...args) => execute(...args) } as unknown as ExtensionAPI);
+	events = new EventBus();
+	deliveryExtension({ events, on: (name: string, handler: Hook) => hooks.set(name, handler), exec: (...args) => execute(...args) } as unknown as ExtensionAPI);
 });
 
 afterEach(() => rmSync(root, { recursive: true, force: true }));
@@ -87,6 +93,56 @@ test("propose blocks an unroutable plan, as a tool or as a bash command", async 
 	expect(await callHook("tool_call", { toolName: "propose", input: { title: "feature.md" } })).toBeUndefined();
 	expect(await callHook("tool_call", { toolName: "bash", input: { command: "propose --title=feature" } })).toBeUndefined();
 	expect(await callHook("tool_call", { toolName: "bash", input: { command: "propose --title feature" } })).toBeUndefined();
+});
+
+test("Plan Review's shared check synchronously registers the router result for a local plan", async () => {
+	const file = join(artifacts, "local", "feature-plan.md");
+	writeFileSync(file, invalidPlan);
+	const problems: Promise<string[]>[] = [];
+	const request = { url: "local://feature-plan.md", file, cwd: root, problems };
+	events.emit("plan-review:check-plan", request);
+	expect(problems).toHaveLength(1);
+	expect((await Promise.all(problems)).flat().join("\n")).toContain("Task 1 (Missing files): lists no files.");
+	writeFileSync(file, validPlan);
+	problems.length = 0;
+	events.emit("plan-review:check-plan", request);
+	expect(problems).toHaveLength(1);
+	expect(await Promise.all(problems)).toEqual([[]]);
+});
+
+test("Plan Review's shared check ignores non-local plans and malformed requests", () => {
+	const problems: Promise<string[]>[] = [];
+	const request = { url: "PLAN.md", file: join(root, "PLAN.md"), cwd: root, problems };
+	for (const value of [
+		request,
+		null,
+		"plan",
+		[],
+		{},
+		{ ...request, url: 1 },
+		{ ...request, url: "local://feature-plan.md", file: 1 },
+		{ ...request, url: "local://feature-plan.md", cwd: null },
+		{ ...request, url: "local://feature-plan.md", problems: "not an array" },
+	])
+		events.emit("plan-review:check-plan", value);
+	expect(problems).toEqual([]);
+});
+
+test.each(["missing file", "not a git repository", "router failure"])("Plan Review's shared check returns no problems for %s", async (failure: string) => {
+	const file = join(artifacts, "local", "feature-plan.md");
+	if (failure !== "missing file") writeFileSync(file, invalidPlan);
+	if (failure === "not a git repository") rmSync(join(root, ".git"), { recursive: true });
+	if (failure === "router failure") {
+		const realExec = execute;
+		execute = async (command, args, options) => {
+			if (command === "python3") throw new Error("Cannot run router");
+			return realExec(command, args, options);
+		};
+	}
+	const problems: Promise<string[]>[] = [];
+	events.emit("plan-review:check-plan", { url: "local://feature-plan.md", file, cwd: root, problems });
+	expect(problems).toHaveLength(1);
+	expect(await Promise.all(problems)).toEqual([[]]);
 });
 
 test("a bash command that runs propose in a form the check cannot read is blocked; other commands pass", async () => {
