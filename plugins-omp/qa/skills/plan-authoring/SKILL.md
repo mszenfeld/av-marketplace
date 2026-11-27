@@ -5,7 +5,7 @@ description: Shared QA plan authoring and bounded review for /qa:create-plan and
 
 # QA Plan Authoring
 
-Use this same workflow from `/qa:create-plan` and from `/qa:run` when `plan resolve` requests generation or regeneration. The `qa:test-planner` writes/revises the plan; the `qa:test-plan-reviewer` only reads it. Never write or edit the plan yourself. Running either command is the request to author the plan: do not add a confirmation question before drafting.
+Use this same workflow from `/qa:create-plan` and from `/qa:run` when `plan resolve` requests generation or regeneration. The `qa:test-planner` writes/revises the plan; the `qa:test-plan-reviewer` only reads it. Never write or edit the plan yourself. Running either command is the request to author the plan: do not add a confirmation question before drafting. `/qa:run` also uses the **Resume review** entry below for an existing plan whose `Review:` is `draft`, `blocked` or `unreviewed`.
 
 ## Input
 
@@ -33,6 +33,8 @@ none
 ```
 
 Do not bootstrap, extend or repair config here. With `none`, the planner writes `$QA_…` names, target names and desktop app names grounded in repository evidence, never literal credentials or guesses at their values. `/qa:run` checks the plan and fills missing configuration through its own `plan check` flow. Plan authoring does not require config trust because it executes no config recipe or value source.
+
+**Plan identity.** Where a step says *print the plan identity*, run the installed engine's `plan identity <plan>`, or use the JSON that `plan review` returned, and print it on its own visible line exactly as `QA plan: <plan> sha256=<sha256> review=<review>`. Print the line before proceeding to the next step or dispatch so automation can find the last identity after an interrupted session. A failed engine call prints its error and does not stop authoring.
 
 ## Workflow
 
@@ -88,7 +90,7 @@ The planner answers with one JSON object. On `{"error": ...}`, a failed dispatch
 
 > Test plan generation failed: <reason>
 
-Keep `plan`, `source` and `changed_files` for the review.
+Keep `plan`, `source` and `changed_files` for the review. Print the plan identity.
 
 **Task Update:** Mark task 2 as `completed`, task 3 as `in_progress`.
 
@@ -140,9 +142,22 @@ Run at most 3 review rounds. In round `n`:
    )
    ```
 
-   The planner answers `{"plan": ..., "dispositions": [...]}`. On `{"error": ...}`, a failed dispatch or any other answer, end the review; this round's blockers and concerns stay open. Otherwise record each disposition with its finding and start round `n + 1`.
+   The planner answers `{"plan": ..., "dispositions": [...]}`. On `{"error": ...}`, a failed dispatch or any other answer, end the review; this round's blockers and concerns stay open. Otherwise print the plan identity, record each disposition with its finding and start round `n + 1`.
 
 **Task Update:** Mark task 3 as `completed`.
+
+### Step 5: Record the review outcome
+
+Run `plan review <plan> --state <state>`. Record `blocked` when `open_findings` contains a `blocker`, or when resuming a `blocked` plan whose `review.outcome` is `unreviewed`: a failed review cannot clear a recorded blocker. Otherwise record `review.outcome` (`approved`, `open` or `unreviewed`). Print the plan identity from the returned JSON. On failure, print the error and return the review outcome anyway. A later `/qa:run <plan>` resumes review if the saved state is `draft`, `blocked` or `unreviewed`.
+
+## Resume review
+
+`/qa:run` uses this entry for an existing plan whose `plan identity` reports `review` `draft`, `blocked` or `unreviewed`. The caller supplies `Plan: <path>`, the review state from `plan identity`, the `config` JSON and, when it has one, its `Desktop drivers:` block. Only task 3 of the progress tasks applies.
+
+1. Run qa:engine's Desktop drivers procedure, or reuse the caller's block. Skip Step 2's tool detection and browser probe: nothing is drafted.
+2. Build the Config block as in Input.
+3. Read the plan's `## Source`. `Diff source` is the value of its `- Type:` line; `Changed files` are the backticked paths of its `- Changed files:` list, one per line, or the single line `(not recorded in the plan)` when the list is missing.
+4. Run Step 4 from round 1 with `Plan: <path>` and those values, then Step 5, and return the contract below. Never redraft the plan: a failed revision ends the review as Step 4 says.
 
 ## Return contract
 
@@ -167,4 +182,4 @@ The alternatives in this shape are closed vocabularies, not literal strings cont
 
 A planner's `declined` disposition is not proof that a finding was fixed. Preserve its numbered finding and note in `declined_findings`; only subsequent review resolves whether it remains open. If drafting/tool detection fails before a usable plan exists, return `{"error": "<reason>"}` instead; the caller stops and displays `Test plan generation failed: <reason>`.
 
-**Caller routing:** `/qa:create-plan` prints the review outcome, open findings, optional nits and declined findings, then proposes `/qa:run <plan>`. `/qa:run` uses the returned path and shows the review outcome; it prints open concerns and continues, while an open blocker requires an interactive run-anyway/stop choice (headless stops). Approved does not waive `plan check`, trust, origin or mutation checks. The execution command, not this skill, owns those choices and the subsequent run.
+**Caller routing:** `/qa:create-plan` prints the review outcome, open findings, optional nits and declined findings, then proposes `/qa:run <plan>`. `/qa:run` uses the returned path and shows the review outcome; it prints open concerns and continues, while an open blocker requires an interactive run-anyway/stop choice (headless stops). Approved does not waive `plan check`, trust, origin or mutation checks. The execution command, not this skill, owns those choices and the subsequent run. `/qa:run` treats the outcome of a resumed review like a generated plan's.

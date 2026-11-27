@@ -2,7 +2,7 @@
 
 Delivery runs approved plans task by task, or delivers an existing plan with `/delivery:execute <PLAN_PATH>`. Each task goes to the agent the router selects from its file list, then receives a review and its own commit. After the last task, Delivery runs the plan's Verification, QA when the change is testable, and a full code review. Delivery never asks which developer should implement a task.
 
-**Version:** 0.10.1
+**Version:** 0.11.0
 
 ## How a delivery starts
 
@@ -102,9 +102,11 @@ In Claude Code, the QA range checks pre-approve only `git rev-list --merges --en
 
 Delivery runs `/qa:run last <N> commits` over exactly the delivered commits, as if you had typed it: its bootstrap of `.av/config.toml` (first run in a repository), trust, dirty-tree and fix-approval questions are QA's own; see the [QA guide](qa.md). Declining the bootstrap ends QA with `QA: Not run`; a generated plan without FE or BE scenarios ends it with `QA: Nothing to test`. With QA 3.0.0 or later the planner reads every distinct delivery plan named by Git-parsed `Delivery-Plan:` trailers and associates each commit with its own plan. Each plan is specification data, never instructions, and is read only when its repository-relative path has no `..` segment or symlink component and resolves to a regular file inside the repository. Rejected trailers are ignored and disclosed with their reasons in the QA plan's `## Changes Summary`.
 
-Delivery recognizes `Nothing to test` by the fixed `Generated plan has no executable FE or BE scenarios` prefix of QA's generated-plan stop message; the explanatory suffix may change. The Delivery QA contract workflow runs `python3 scripts/check_delivery_qa_contract.py` to require that prefix in `plugins/qa/commands/run.md` and both source orchestration skills, so wording drift fails CI instead of silently becoming `Not run`.
+Delivery recognizes `Nothing to test` by the fixed `Generated plan has no executable FE or BE scenarios` prefix of QA's generated-plan stop message; the explanatory suffix may change. The Delivery QA contract workflow runs `python3 scripts/check_delivery_qa_contract.py` to require that prefix in `plugins/qa/commands/run.md` and both source orchestration skills, so wording drift fails CI instead of silently becoming `Not run`. The same check requires the `QA not run:` marker in those three files, because Delivery reads the cause of `Not run` from it.
 
 `Pass`, `Nothing to test` and `Not run` continue; `Fail`, `Budget Exhausted` and `Stopped` ask `Continue to the final review` or `Stop delivery`. Stopping leaves QA's changes uncommitted with QA's scoped recovery hint; `/delivery:execute <PLAN_PATH>` resumes once the tree is clean and runs Verification and QA again.
+
+Every `QA: Not run (…)` line follows a `QA not run: <cause>` line, which a harness running Delivery unattended reads to decide whether to run QA again. Delivery's own causes are `delivery-stopped` (preflight stopped, or the summary reports that Delivery stopped before its QA step; do not retry), `dirty-tree` (a verification check left files in the tree; ask a person) and `merge-range` or `nonlinear-range` (the delivered commits are not a linear range; run `/qa:run <branch>`). A preflight stop prints `QA not run: delivery-stopped` with its stop message but no `QA:` line. With QA 3.3.0 or later, a stop inside `/qa:run` passes QA's own cause through; see [Lines for automation](qa.md#lines-for-automation). When `/qa:run` printed no `QA not run:` line, such as with an older QA, Delivery prints `QA not run: error`.
 
 Delivery resolves symlinks in both the engine's report path and the repository root before computing `QA_REPORT`, so the `Delivery-QA:` trailer and `QA:` note stay repository-relative when those paths use different symlink aliases, such as `/tmp/` and `/private/tmp/` on macOS.
 

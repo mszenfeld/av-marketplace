@@ -12,7 +12,7 @@ Procedures of the delivery plugin. The delivery extension starts the **Delivery 
 
 Inputs: `PLAN_SOURCE` — the plan as the caller gave it: a `local://` URL or a file path; `PLAN_FILE` — the plan's absolute file path, when the caller knows it.
 
-Run the steps in order. Every `stop` prints its message and ends the run.
+Run the steps in order. Every `stop` prints its message and ends the run. For a stop during **1. Preflight**, also print `QA not run: delivery-stopped` on its own line after the stop message and before ending the run.
 
 ### 1. Preflight
 
@@ -83,7 +83,7 @@ Without a `## Verification` section, print `Verification: none in plan` and appl
 
 ### 4. QA
 
-Mark `QA` in progress. This step ends with `QA_RESULT`, one of `Skipped`, `Nothing to test`, `Not run`, `Pass`, `Fail`, `Budget Exhausted`, `Stopped`; `QA_NOTE`, its reason; `QA_REPORT`, the run's report path relative to `REPO` when a run started; and `FIX_PATHS`, the paths QA's fixer created or changed. Sub-step 7 commits only paths attributed to QA by these rules; nothing else is ever staged.
+Mark `QA` in progress. This step ends with `QA_RESULT`, one of `Skipped`, `Nothing to test`, `Not run`, `Pass`, `Fail`, `Budget Exhausted`, `Stopped`; `QA_NOTE`, its reason; `QA_CAUSE`, the cause code of a `Not run` result; `QA_REPORT`, the run's report path relative to `REPO` when a run started; and `FIX_PATHS`, the paths QA's fixer created or changed. Sub-step 7 commits only paths attributed to QA by these rules; nothing else is ever staged.
 
 **Path handling for sub-steps 4 and 7:** filenames are data, never shell source. Use a short Python driver with `subprocess.run(argv, check=True, capture_output=True)` (no `shell=True` or `text=True`) to capture `git status --porcelain=v1 -z --no-renames --untracked-files=all` as bytes. Split only on `b"\0"`; each non-empty record is the two-byte status, one separator byte, then the exact pathname bytes (`record[3:]`). `--no-renames` keeps rename endpoints as separate deletion/addition records. Keep `FIX_PATHS` and the groups as exact pathname bytes; do not split on whitespace/newlines, C-unquote, or decode/re-encode names. Persist the snapshots and NUL-separated `FIX_PATHS` in binary files in a private temporary directory outside `REPO` so they survive separate tool calls; remove that directory when QA finishes or stops. Never paste a status record or filename into a command, including `printf`, a heredoc or Python source; the driver must read paths from Git's binary output or these binary files. Only escape names for display.
 
@@ -91,12 +91,12 @@ Mark `QA` in progress. This step ends with `QA_RESULT`, one of `Skipped`, `Nothi
 
 1. `qa` root is `null` → `QA_RESULT=Skipped`, `QA_NOTE`: `qa@av-marketplace is not installed`; go to 8.
 2. `TESTABLE=$(python3 "$ROUTER" testable "$REPO" "$BASE")`; a non-zero exit → stop with the router's error. When its `testable` is false → `QA_RESULT=Skipped`, `QA_NOTE`: `no testable change among <length of excluded> changed paths`; go to 8.
-3. **Clean tree and range.** `git status --porcelain --untracked-files=all` prints anything (a verification check left files behind) → `QA_RESULT=Not run`, `QA_NOTE`: `the working tree has changes after verification: <paths, space-separated>`; go to 8. QA never adopts those changes. Then `git rev-list --merges "$BASE"..HEAD` prints anything → `QA_RESULT=Not run`, `QA_NOTE`: `commits since <BASE> include a merge; run /qa:run <BRANCH> yourself`; go to 8. Then `N=$(git rev-list --count "$BASE"..HEAD)`; `git rev-parse "HEAD~$N"` differs from `BASE` → the same `Not run` with `commits since <BASE> are not linear` and go to 8. Only a linear range reaches QA, so `last <N> commits` is exactly `BASE..HEAD`.
+3. **Clean tree and range.** `git status --porcelain --untracked-files=all` prints anything (a verification check left files behind) → `QA_RESULT=Not run`, `QA_CAUSE=dirty-tree`, `QA_NOTE`: `the working tree has changes after verification: <paths, space-separated>`; go to 8. QA never adopts those changes. Then `git rev-list --merges "$BASE"..HEAD` prints anything → `QA_RESULT=Not run`, `QA_CAUSE=merge-range`, `QA_NOTE`: `commits since <BASE> include a merge; run /qa:run <BRANCH> yourself`; go to 8. Then `N=$(git rev-list --count "$BASE"..HEAD)`; `git rev-parse "HEAD~$N"` differs from `BASE` → `QA_RESULT=Not run`, `QA_CAUSE=nonlinear-range`, `QA_NOTE`: `commits since <BASE> are not linear`; go to 8. Only a linear range reaches QA, so `last <N> commits` is exactly `BASE..HEAD`.
 4. `FIX_PATHS` starts empty. `read <qa root>/commands/run.md` and carry it out completely, as if it had been invoked with this argument in place of its `$ARGUMENTS`: `last <N> commits`. Its gates (config bootstrap and trust, dirty tree, fix approval, service start, takeover) go to the user through `ask` exactly as that command specifies; never answer one yourself. **Fix attribution:** immediately before every `code-review:fix-auto` dispatch of its Step 10, capture the NUL-separated status bytes using the path-handling rule above; immediately after that dispatch returns, capture them again. Compare the before/after maps of pathname bytes to two-byte status; every path with a new or different status joins `FIX_PATHS`. Relay QA's summary, `**Result:**` line and recovery wording as it prints them: its `Changes remain uncommitted for your control.` describes the tree before sub-step 7. If the QA run replaced delivery's todo list, `todo init` it again with `QA` and `Final code review` before continuing.
 5. `QA_RESULT`:
    - the run printed the engine `summary` → its `**Result:**` value (`Pass`, `Fail`, `Budget Exhausted` or `Stopped`); `QA_REPORT` is the `report` path that `run start` returned, made relative to `REPO` (`python3 -c 'import os,sys; print(os.path.relpath(os.path.realpath(sys.argv[1]), os.path.realpath(sys.argv[2])))' "<report path>" "$REPO"`); `QA_NOTE` is `QA_REPORT`, plus the stop reason for `Stopped`;
    - it stopped before `run start` succeeded with the `Generated plan has no executable FE or BE scenarios` message → `Nothing to test`, `QA_NOTE`: `the generated plan has no FE or BE scenarios`;
-   - it stopped before `run start` succeeded for any other reason (declined bootstrap or trust, invalid config, failed plan generation, an open blocker, plan check) → `Not run`, `QA_NOTE`: the first line of its stop message.
+   - it stopped before `run start` succeeded for any other reason (declined bootstrap or trust, invalid config, failed plan generation, an open blocker, plan check) → `Not run`, `QA_CAUSE`: the cause on the last `QA not run: <cause>` line the run printed, or `error` when it printed none; `QA_NOTE`: the first line of its stop message.
 6. `Fail`, `Budget Exhausted` or `Stopped` → use the `ask` tool: `QA ended with <QA_RESULT>. What now?` with options `Continue to the final review` and `Stop delivery`. `Stop delivery` → leave the working tree as it is, print the `QA:` line of sub-step 8, mark `QA` done, run **5. Summary** and end the run.
 7. **QA changes.** `git reset -q` (nothing QA staged survives; the working tree is untouched), then capture and parse `git status --porcelain=v1 -z --no-renames --untracked-files=all` using the path-handling rule above. First set aside the paths delivery never commits, whatever list they are on: anything under `docs/testing/reports/screenshots/` or `docs/testing/reports/responses/` (evidence; QA's guide keeps it out of version control because it can hold user data), `.av/local.toml`, `.av/secrets.local.env`, and `*.bak` files under `docs/testing/`. Sort the remaining status paths into four groups, each a list of exact pathname bytes:
    - fixes: the paths of `FIX_PATHS` that the status lists;
@@ -113,11 +113,11 @@ Mark `QA` in progress. This step ends with `QA_RESULT`, one of `Skipped`, `Nothi
      ```
    - configuration: `AV_COMMIT_SKILL=1 git commit -m "chore: add QA configuration for delivery $SLUG"`.
    - documents: `AV_COMMIT_SKILL=1 git commit -m "docs: add QA plan and report of delivery $SLUG"`.
-8. Print `QA: <QA_RESULT> (<QA_NOTE>)`. Mark `QA` done.
+8. For `Not run`, first print `QA not run: <QA_CAUSE>` on its own line. Then print `QA: <QA_RESULT> (<QA_NOTE>)`. Mark `QA` done.
 
 ### 5. Summary
 
-Print the table `Task | Agent | Routing | Fix rounds | Result`, one row per task handled in this run, then the `Verification:` lines and the `QA:` line; a run that stopped before step 4 prints `QA: Not run (delivery stopped before QA)` as that line. The `Routing` column holds the routing source. Then print one line `Task <N>: <issue>` for every finding of a task's last review whose `issue` starts with `Plan finding for another stack:`.
+Print the table `Task | Agent | Routing | Fix rounds | Result`, one row per task handled in this run, then the `Verification:` lines and the `QA:` line; a run that stopped before step 4 prints `QA not run: delivery-stopped` and then `QA: Not run (delivery stopped before QA)` as that line; a `Not run` from step 4 keeps its `QA not run:` line before the `QA:` line, as in sub-step 8. The `Routing` column holds the routing source. Then print one line `Task <N>: <issue>` for every finding of a task's last review whose `issue` starts with `Plan finding for another stack:`.
 
 ### 6. Final review
 

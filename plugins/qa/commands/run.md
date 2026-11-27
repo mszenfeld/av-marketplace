@@ -21,7 +21,7 @@ argument-hint: [plan path or change source]
 | `<plan path>` | Use that existing plan. |
 | `<change source>` | Author and review a plan for that source: `#123`, a branch, `last N commits`, or `staged`. |
 
-No options are accepted. If any argument token starts with `--`, stop **before I/O** with exactly:
+No options are accepted. If any argument token starts with `--`, print the **Not-run cause** below and stop **before I/O** with this exact error message:
 
 > Error: /qa:run takes no options; set policy in .av/config.toml (see docs/plugins/qa.md#configuration).
 
@@ -40,6 +40,18 @@ In OMP resolve `realpath skill://qa:engine/scripts/qa.py` and substitute the ret
 **Ask capability, not Bash stdin, decides interactivity.** Use `AskUserQuestion` (OMP: `ask`) for every human gate. An unavailable tool or a question the harness cannot deliver makes this invocation headless for the rest of the run. Never manufacture an answer, choose a likely option on behalf of the user, or treat an absent ask tool as consent; this fail-closed rule also applies when executing as a subagent. Do not run a TTY probe. Headless behavior is specified at each gate below; notably, `qa.fix = "approve"` still tests and reports but applies no fixes.
 
 **Mandatory stop recording and cleanup:** once `run start` succeeds, every stop, abort or error calls `run stop --run <run> --reason <reason> [--detail <safe-diagnostic>]` **before** flushing the partial report and entering Step 12. Use `user-abort` for a declined gate/interrupt, `config-drift` for `config changed during run`, `plan-changed` for a plan hash mismatch, `cleanup-error` for failed teardown/down, and `other` for remaining errors, headless hard stops or engine stop decisions. Detail contains only sanitized engine diagnostics, failing probe names/statuses or a short explanation, never values, headers or raw command/recipe output; the engine flattens it to one line. A repeated stop preserves the original reason. The engine summary, not narration beside it, owns `Stopped`. Do not repair state or keep testing against drifted config. Flush without `--final`; a recorded stop cannot write new Status lines even if `--final` is requested.
+
+**Not-run cause:** every stop before `run start` first succeeds, except Step 2's stop for a generated plan with nothing to test, prints `QA not run: <cause>` on its own visible line immediately before its stop message. Automation reads this line to decide whether to run QA again. Take the cause from this table; a stop the table does not name is `error`:
+
+| Cause | Stop |
+|---|---|
+| `declined` | The user declined a gate: trust (Step 1 or a Step 5 retry), **Apply and trust** in Config bootstrap, **Abort** in Step 4, or **Stop** instead of a lock takeover in Step 5. |
+| `plan-blocker` | The user chose **Stop and fix the plan with /qa:create-plan** at Step 2's open-blocker gate. |
+| `headless` | A required gate before the run could not be asked: missing config (Step 1), trust, the open-blocker gate, required config gaps (Step 3), a dirty tree (Step 4) or a live lock (Step 5). |
+| `config` | Invalid config; a Config bootstrap that cannot be written (`proposal: null`, inaccessible evidence, a key set in `.av/local.toml`, preview errors after the retry, a compare-and-swap conflict, missing `.av/secrets.local.env` entries); a changed trust hash at acceptance or a second `trust required`; required config gaps left after the extension. |
+| `plan-failed` | `Test plan generation failed: <reason>` while generating or regenerating the plan. |
+| `plan-invalid` | `plan_errors` or `off_target` in Step 3, or an existing plan without FE, BE or DESKTOP scenarios that is not marked generated. |
+| `error` | Any other stop before the run starts, such as an option-like argument, an engine, version or I/O error, or an unreadable plan. |
 
 **Capture before bootstrap writes:** after argument validation and before Step 1 can write shared config, run `git -c core.quotePath=false diff --name-only HEAD`. Retain each full path (never whitespace-separated fields) and use Write to save a JSON array of those paths to a temporary `<baseline-file>` outside the repository, including `[]` for a clean tree. This is input to `run start --baseline-file <baseline-file>`, not a sidecar edit. It preserves pre-existing config/gitignore dirt but excludes this invocation's subsequent bootstrap writes. Keep the file through start retries; remove it after a successful start.
 
@@ -62,17 +74,17 @@ On `trust = new` or `changed`, show the complete masked `trust_subset` and ask o
 
 Run `plan resolve` with the original positional argument as one quoted operand (omit the operand when empty).
 
-- `reuse`: keep the returned path.
+- `reuse`: keep the returned path, run `plan identity <plan>` and print its result on its own visible line as `QA plan: <plan> sha256=<sha256> review=<review>`. When `review` is `draft`, `blocked` or `unreviewed`, load `qa:plan-authoring` at its **Resume review** entry with that path, the recorded review state, the safe `config` metadata and the `Desktop drivers:` block if this invocation has one, and keep the block it returns. QA drafted that plan and its review ends in this invocation, so mark it **generated in this invocation** as below. A failed `plan identity` call stops with its error.
 - `generate`: load `qa:plan-authoring` with the returned source and safe `config` metadata, plus the `Desktop drivers:` block when this invocation already ran the Desktop drivers procedure. Follow its shared draft/review workflow; do not ask for permission to generate, write an inline plan or duplicate its tool probes. Use its returned path without re-globbing, and keep the `Desktop drivers:` block it produced for the rest of the invocation. Mark it **generated in this invocation** and pass `--generated` at Step 5, including start retries and repair restarts. Show `Generated plan: <path> — N FE, M BE, K DESKTOP` using the saved plan's scenario headings.
-- `stale`: list `changed_files`; interactive → ask once: **Regenerate** (default) / **Use existing plan**. Headless → regenerate through the same skill and mark it generated as above. A failed regeneration never falls back to the stale plan; choosing the existing plan does not set the generated marker.
+- `stale`: list `changed_files`; interactive → ask once: **Regenerate** (default) / **Use existing plan**. Headless → regenerate through the same skill and mark it generated as above. A failed regeneration never falls back to the stale plan. Choosing the existing plan continues as `reuse` above; it is marked generated only when its review resumes.
 
-Show the authoring skill's review outcome, reason and unresolved findings. An open `blocker` → interactive: **Run anyway** / **Stop and fix the plan with /qa:create-plan**; headless or a declined gate → stop and list it. Print open concerns and continue; an unreviewed plan is never described as approved.
+If the authoring skill ran, show its review outcome, reason and unresolved findings. A `blocker` in `open_findings`, or a resumed `blocked` plan whose review returned `unreviewed`, requires the same gate: interactive → **Run anyway** / **Stop and fix the plan with /qa:create-plan**; headless or a declined gate → stop. If a failed review leaves a previously recorded blocker unresolved, explain that even when no new blocker text is available. **Run anyway** applies only to this invocation; do not change the recorded review state. When the gate does not apply or the user chooses **Run anyway**, print open concerns and continue. An unreviewed plan is never described as approved.
 
-Read the selected plan. If it has zero FE, zero BE and zero DESKTOP scenarios **and was just generated in Step 2**, stop gracefully before starting a run:
+Read the selected plan. If it has zero FE, zero BE and zero DESKTOP scenarios **and was generated in Step 2, a resumed review included**, stop gracefully before starting a run:
 
 > Generated plan has no executable FE or BE scenarios and no DESKTOP scenario — nothing to test (e.g. a backend-only change fully covered by the unit/integration suite). Relying on that suite; not launching testers.
 
-A reused/existing plan with zero scenarios instead stops with `Error: plan <path> has no executable FE, BE or DESKTOP scenarios.` Name the selected plan; do not reuse the generated-plan success message.
+A reused plan not marked generated with zero scenarios instead stops with `Error: plan <path> has no executable FE, BE or DESKTOP scenarios.` Name the selected plan; do not reuse the generated-plan success message.
 
 ### Step 3: Check the plan against config
 
@@ -97,7 +109,7 @@ A successful config bootstrap's own `.av/config.toml` and `.gitignore` changes a
 
 ### Step 5: Start the run
 
-Run `run start <plan> --baseline-file <baseline-file>` on the first pass, adding `--generated` **only** when Step 2 generated/regenerated this invocation's plan. Retain `run`, `dir`, `sidecar`, `report` and `idempotency`. On **Repair restart**, replace `--baseline-file` with `--baseline-run <ended-run-id>`; never pass both. Preserve these switches on trust retries and an approved takeover. Let the engine reuse/adopt/rebaseline artifacts and preserve stored provenance; never copy, move or hash them yourself.
+Run `run start <plan> --baseline-file <baseline-file>` on the first pass, adding `--generated` **only** when Step 2 marked the plan **generated in this invocation**. Retain `run`, `dir`, `sidecar`, `report` and `idempotency`. On **Repair restart**, replace `--baseline-file` with `--baseline-run <ended-run-id>`; never pass both. Preserve these switches on trust retries and an approved takeover. Let the engine reuse/adopt/rebaseline artifacts and preserve stored provenance; never copy, move or hash them yourself.
 
 - `trust required`: re-read `config`, use Step 1's trust question **once**, then return to Step 3 with the selected plan kept. Headless or a second failure → stop.
 - A live origin lock: show the holder's run ID and start time; interactive → ask whether to **Take over** the interrupted run or **Stop**, then on approval add `--takeover <holder-run-id>` to the same `run start` call, retaining its baseline and generated switches. Headless → stop, naming the holder. No blind takeover; the old account ledger must survive.
@@ -286,7 +298,7 @@ Interactive only. This is the generic `qa:env-config` detection/write contract p
 5. Approval → `config apply <proposal-file> --snapshot <preview-snapshot> --approved-hash <preview-trust-hash>`. Compare-and-swap conflicts write nothing; show the error and stop. Never retry against a new snapshot without approval. The engine alone writes `.av/config.toml` and `.gitignore` atomically and records the approved trust hash.
 6. Required missing `file:.av/secrets.local.env#NAME` entries → print **names only** to fill and stop. Never create/populate the secret file, ask for a value in chat or bypass the channel. Otherwise re-read `config` and continue at the caller's step.
 
-**Repair restart:** allow at most **one repair per failure kind per invocation**, across restarts. After a successful Step 6 repair, record `run stop --run <run> --reason other --detail 'configuration repaired; restarting'`, flush the current partial report and run Step 12 completely (`users teardown`, Accounts report update, `services down` only when this run started them, `summary`, `run end`). Retain the **ended run ID** as `<baseline-run>` even though `run end` deletes its private directory. Restart at Step 3 with the same plan and current trusted config, then Step 5 calls `run start <plan> --baseline-run <baseline-run>` (plus `--generated` when Step 2 generated it). The durable sidecar keeps the first pass's dirty paths and fingerprints across every restart. Do not reuse the old active run ID, targets, credentials or origin/store locks. A second failure of that kind records a stop with its diagnostics and still cleans up. Sources unavailable for cleanup leave ledger records visible, never hidden; a failed cleanup stops rather than starting another pass.
+**Repair restart:** allow at most **one repair per failure kind per invocation**, across restarts. After a successful Step 6 repair, record `run stop --run <run> --reason other --detail 'configuration repaired; restarting'`, flush the current partial report and run Step 12 completely (`users teardown`, Accounts report update, `services down` only when this run started them, `summary`, `run end`). Retain the **ended run ID** as `<baseline-run>` even though `run end` deletes its private directory. Restart at Step 3 with the same plan and current trusted config, then Step 5 calls `run start <plan> --baseline-run <baseline-run>` (retaining `--generated` if Step 2 set the marker). The durable sidecar keeps the first pass's dirty paths and fingerprints across every restart. Do not reuse the old active run ID, targets, credentials or origin/store locks. A second failure of that kind records a stop with its diagnostics and still cleans up. Sources unavailable for cleanup leave ledger records visible, never hidden; a failed cleanup stops rather than starting another pass.
 
 ## Modes & Safety Guards
 

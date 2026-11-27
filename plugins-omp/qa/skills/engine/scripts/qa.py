@@ -29,8 +29,11 @@ from qa_engine.users import provision
 from qa_engine.users import record_account_cli
 from qa_engine.users import teardown
 from qa_engine.services import services
+from qa_engine.plan import RECORDED_REVIEW_STATES
 from qa_engine.plan import check_plan
 from qa_engine.plan import parse_plan
+from qa_engine.plan import plan_identity
+from qa_engine.plan import record_review
 from qa_engine.plan import resolve_plan
 from qa_engine.report import refresh_accounts
 from qa_engine.report import render_report
@@ -104,6 +107,13 @@ def parser() -> argparse.ArgumentParser:
     resolve = repo_option(plan_operations.add_parser("resolve"))
     resolve.set_defaults(handler=_execute_plan_resolve)
     resolve.add_argument("argument", nargs="?", default="")
+    identity = repo_option(plan_operations.add_parser("identity"))
+    identity.set_defaults(handler=_execute_plan_identity)
+    identity.add_argument("plan", type=Path)
+    review = repo_option(plan_operations.add_parser("review"))
+    review.set_defaults(handler=_execute_plan_review)
+    review.add_argument("plan", type=Path)
+    review.add_argument("--state", choices=RECORDED_REVIEW_STATES, required=True)
     check = repo_option(plan_operations.add_parser("check"))
     check.set_defaults(handler=_execute_plan_check)
     check.add_argument("plan", type=Path)
@@ -312,6 +322,16 @@ def _execute_run_end(repo: Path, args: argparse.Namespace) -> tuple[Mapping[str,
 
 def _execute_plan_resolve(repo: Path, args: argparse.Namespace) -> tuple[dict[str, object], int]:
     return resolve_plan(repo, args.argument), 0
+
+
+def _execute_plan_identity(repo: Path, args: argparse.Namespace) -> tuple[dict[str, str], int]:
+    path = args.plan if args.plan.is_absolute() else repo / args.plan
+    return plan_identity(repo, path), 0
+
+
+def _execute_plan_review(repo: Path, args: argparse.Namespace) -> tuple[dict[str, str], int]:
+    path = args.plan if args.plan.is_absolute() else repo / args.plan
+    return record_review(repo, path, args.state), 0
 
 
 def _execute_plan_check(repo: Path, args: argparse.Namespace) -> tuple[dict[str, object], int]:

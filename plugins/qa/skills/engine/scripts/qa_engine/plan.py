@@ -10,10 +10,12 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from dataclasses import field
+import hashlib
 from pathlib import Path
 import re
 
 from av_config.errors import ConfigError
+from av_config.files import atomic_write
 from av_config.origins import Origin
 from av_config.origins import is_loopback
 from av_config.origins import parse_origin
@@ -43,6 +45,12 @@ USER_TOKEN = re.compile(r"(.+?)_(EMAIL|PASSWORD|ID)\Z")
 ENGINE_TOKENS = frozenset({"TAG", "NEW_PASSWORD"})
 USER_LINE = re.compile(r"^[ \t]*[-*][ \t]+([a-z][a-z0-9_]*)[ \t]*:[ \t]*(existing|registered)\b", re.MULTILINE)
 RELATIVE_PATH = re.compile(r"(?<![A-Za-z0-9_:/])/(?!/)[A-Za-z0-9_{?]")
+RECORDED_REVIEW_STATES = ("approved", "open", "blocked", "unreviewed")
+REVIEW_STATES = ("draft", *RECORDED_REVIEW_STATES)
+# Source matching also runs on unnormalized text so review writes preserve line endings.
+_LINE_START = r"(?:\A|(?<=\n)|(?<=\r)(?!\n))"
+_LINE_BREAK = re.compile(r"\r\n?|\n")
+_SOURCE_BOUNDARY = re.compile(rf"{_LINE_START}#{{1,2}}\s+")
 
 
 @dataclass
@@ -102,6 +110,7 @@ class Plan:
     head: str | None
     scenarios: list[Scenario]
     users: dict[str, str] = field(default_factory=dict)
+    review: str | None = None
 
     @property
     def sections(self) -> dict[str, list[str]]:
@@ -157,16 +166,84 @@ def _edges(text: str) -> list[Assertion]:
     ]
 
 
-def _source(text: str) -> tuple[str | None, str | None]:
-    section = re.search(r"^##[ \t]+Source[ \t]*$", text, re.MULTILINE | re.IGNORECASE)
+def _source_span(text: str) -> tuple[int, int] | None:
+    section = re.search(rf"{_LINE_START}##[ \t]+Source[ \t]*(?=[\r\n]|\Z)", text, re.IGNORECASE)
     if section is None:
-        return None, None
-    following = re.search(r"^#{1,2}\s+", text[section.end():], re.MULTILINE)
-    source = text[section.end():section.end() + following.start() if following else len(text)]
+        return None
+
+    start = section.end()
+    following = _SOURCE_BOUNDARY.search(text, start)
+    return start, following.start() if following else len(text)
+
+
+def _source(text: str) -> dict[str, str]:
+    span = _source_span(text)
+    if span is None:
+        return {}
+
+    start, end = span
     metadata: dict[str, str] = {}
-    for match in re.finditer(r"^[ \t]*(?:-[ \t]*)?(?:\*\*)?(Branch|Head):(?:\*\*)?[ \t]*(.*)$", source, re.MULTILINE | re.IGNORECASE):
+    pattern = rf"{_LINE_START}[ \t]*(?:-[ \t]*)?(?:\*\*)?(Branch|Head|Review):(?:\*\*)?[ \t]*([^\r\n]*)"
+    for match in re.finditer(pattern, text[start:end], re.IGNORECASE):
         metadata[match.group(1).lower()] = match.group(2).strip().strip("`")
-    return metadata.get("branch"), metadata.get("head")
+
+    return metadata
+
+
+def _review_state(metadata: dict[str, str]) -> str | None:
+    review = metadata.get("review", "").lower()
+    return review if review in REVIEW_STATES else None
+
+
+def _read_plan(path: Path) -> tuple[bytes, str]:
+    try:
+        data = path.read_bytes()
+        return data, data.decode("utf-8")
+    except (OSError, UnicodeError) as error:
+        raise ConfigError("plan is not readable") from error
+
+
+def plan_identity(repo: Path, path: Path) -> dict[str, str]:
+    """Return the plan's display path, exact-byte hash, and recorded review state."""
+
+    data, text = _read_plan(path)
+    return {
+        "plan": display_path(repo.resolve(), path.resolve()),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "review": _review_state(_source(text)) or "none",
+    }
+
+
+def record_review(repo: Path, path: Path, state: str) -> dict[str, str]:
+    """Record a review outcome without rewriting line endings, then return the plan identity."""
+
+    if state not in RECORDED_REVIEW_STATES:
+        raise ConfigError("review state must be approved, open, blocked or unreviewed")
+
+    try:
+        path = path.resolve(strict=True)
+    except (OSError, RuntimeError) as error:  # Python 3.11–3.12 raise RuntimeError for symlink loops.
+        raise ConfigError("plan is not readable") from error
+
+    _, text = _read_plan(path)
+    span = _source_span(text)
+    if span is None:
+        raise ConfigError("plan has no Source section")
+
+    start, end = span
+    source = text[start:end]
+    line = f"- Review: {state}"
+    pattern = rf"{_LINE_START}[ \t]*(?:-[ \t]*)?(?:\*\*)?Review:(?:\*\*)?[^\r\n]*"
+    updated, count = re.subn(pattern, lambda _: line, source, flags=re.IGNORECASE)
+    if not count:
+        head = re.search(rf"{_LINE_START}[ \t]*(?:-[ \t]*)?(?:\*\*)?Head:[^\r\n]*", source, re.IGNORECASE)
+        index = head.end() if head else 0
+        line_break = _LINE_BREAK.match(source, index) or _LINE_BREAK.match(source)
+        newline = line_break.group() if line_break else "\n"
+        updated = f"{source[:index]}{newline}{line}{source[index:]}"
+
+    atomic_write(path, f"{text[:start]}{updated}{text[end:]}".encode("utf-8"))
+    return plan_identity(repo, path)
 
 
 def _users_section(text: str) -> dict[str, str]:
@@ -221,11 +298,9 @@ def parse_plan(path: Path) -> Plan:
     Raises ConfigError for an unreadable plan. Payloads remain in memory for
     engine consumers; check_plan does not expose them in its JSON report.
     """
-    try:
-        text = path.read_text()
-    except (OSError, UnicodeError) as error:
-        raise ConfigError("plan is not readable") from error
-    branch, head = _source(text)
+    _, text = _read_plan(path)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    source = _source(text)
     scenarios: list[Scenario] = []
     start: re.Match[str] | None = None
     fence: str | None = None
@@ -244,7 +319,7 @@ def parse_plan(path: Path) -> Plan:
         start = SCENARIO.match(text, match.start())
     if start is not None:
         scenarios.append(_scenario(start, text[start.start():].rstrip()))
-    return Plan(path, branch, head, scenarios, _users_section(text))
+    return Plan(path, source.get("branch"), source.get("head"), scenarios, _users_section(text), _review_state(source))
 
 
 def resolve_plan(repo: Path, argument: str = "") -> dict[str, object]:

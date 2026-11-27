@@ -4,9 +4,11 @@ Run: uv run python -m unittest discover -s plugins/qa/tests -p test_engine_plan.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -16,9 +18,12 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "skills/engine/scripts"
 FIXTURE = Path(__file__).parent / "fixtures/plans/sample-plan.md"
 sys.path.insert(0, str(SCRIPTS))
 
+from av_config.errors import ConfigError
 from qa_engine.config import Config
 from qa_engine.plan import check_plan
 from qa_engine.plan import parse_plan
+from qa_engine.plan import plan_identity
+from qa_engine.plan import record_review
 from qa_engine.plan import resolve_plan
 
 BASE = '''version = 1
@@ -90,10 +95,19 @@ class PlanTests(unittest.TestCase):
         path.write_text(text)
         return path
 
-    def plan(self, body: str = SCENARIO, *, branch: str | None = None, head: str | None = None, name: str = "test-plan.md") -> Path:
+    def plan(
+        self,
+        body: str = SCENARIO,
+        *,
+        branch: str | None = None,
+        head: str | None = None,
+        name: str = "test-plan.md",
+        review: str | None = None,
+    ) -> Path:
+        review_line = f"\n- Review: {review}" if review is not None else ""
         return self.put(
             f"# Test Plan\n\n## Source\n- Branch: {branch or 'feature/profiles'}\n"
-            f"- Head: {head or self.head}\n\n## BE Test Scenarios\n\n{body}",
+            f"- Head: {head or self.head}{review_line}\n\n## BE Test Scenarios\n\n{body}",
             f"docs/testing/plans/{name}",
         )
 
@@ -112,6 +126,174 @@ class PlanTests(unittest.TestCase):
             env={**os.environ, "XDG_STATE_HOME": str(self.state)},
             capture_output=True, text=True, check=False,
         )
+
+    def test_identity_reports_path_hash_and_review_state(self) -> None:
+        for label, expected in (("draft", "draft"), (None, "none"), ("maybe", "none"), ("`ApPrOvEd`", "approved")):
+            with self.subTest(label=label):
+                path = self.plan(review=label)
+                self.assertEqual(plan_identity(self.repo, path), {
+                    "plan": "docs/testing/plans/test-plan.md",
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "review": expected,
+                })
+
+    def test_review_replaces_source_line_and_changes_hash(self) -> None:
+        for newline in (b"\n", b"\r\n", b"\r"):
+            with self.subTest(newline=newline):
+                path = self.plan(SCENARIO + "- Review: open\n", review="draft")
+                original = path.read_bytes().replace(b"\n", newline)
+                path.write_bytes(original)
+                path.chmod(0o640)
+                before = parse_plan(path)
+                self.assertEqual(plan_identity(self.repo, path)["review"], "draft")
+
+                result = record_review(self.repo, path, "approved")
+
+                updated = path.read_bytes()
+                self.assertEqual(updated.splitlines().count(b"- Review: approved"), 1)
+                self.assertEqual(updated, original.replace(b"- Review: draft", b"- Review: approved", 1))
+                self.assertEqual(result["review"], "approved")
+                self.assertEqual(result["sha256"], hashlib.sha256(updated).hexdigest())
+                self.assertNotEqual(result["sha256"], hashlib.sha256(original).hexdigest())
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
+                after = parse_plan(path)
+                self.assertEqual((after.review, after.branch, after.head), ("approved", before.branch, before.head))
+
+    def test_review_replaces_dashless_source_line(self) -> None:
+        path = self.put("## Source\n- Branch: feature/profiles\n- Head: abc\nReview: draft\n")
+
+        result = record_review(self.repo, path, "approved")
+
+        self.assertEqual(result["review"], "approved")
+        self.assertEqual(plan_identity(self.repo, path)["review"], "approved")
+        review_lines = [line for line in path.read_text().splitlines() if "Review:" in line]
+        self.assertEqual(review_lines, ["- Review: approved"])
+
+    def test_review_inserts_after_head_when_missing(self) -> None:
+        for newline in (b"\n", b"\r\n", b"\r"):
+            with self.subTest(newline=newline):
+                path = self.plan()
+                original = path.read_bytes().replace(b"\n", newline)
+                path.write_bytes(original)
+                sections = parse_plan(path).sections
+
+                result = record_review(self.repo, path, "open")
+
+                self.assertEqual(result["review"], "open")
+                head = f"- Head: {self.head}".encode()
+                self.assertEqual(
+                    path.read_bytes(), original.replace(head, head + newline + b"- Review: open", 1),
+                )
+                self.assertEqual(parse_plan(path).sections, sections)
+
+    def test_review_inserts_after_source_heading_when_head_is_missing(self) -> None:
+        for newline in (b"\n", b"\r\n", b"\r"):
+            with self.subTest(newline=newline):
+                path = self.put("## Source\n- Branch: feature/profiles\n")
+                path.write_bytes(path.read_bytes().replace(b"\n", newline))
+
+                result = record_review(self.repo, path, "unreviewed")
+
+                self.assertEqual(result["review"], "unreviewed")
+                expected = newline.join((b"## Source", b"- Review: unreviewed", b"- Branch: feature/profiles", b""))
+                self.assertEqual(path.read_bytes(), expected)
+
+    def test_review_ignores_review_labels_outside_source(self) -> None:
+        text = self.plan(SCENARIO + "- Review: draft\n").read_text()
+        original = text.replace("## BE Test Scenarios", "## Setup\n- Review: draft\n\n## BE Test Scenarios")
+        path = self.put(original)
+        self.assertEqual(plan_identity(self.repo, path)["review"], "none")
+
+        result = record_review(self.repo, path, "approved")
+
+        self.assertEqual(result["review"], "approved")
+        self.assertEqual(
+            path.read_text(), original.replace(f"- Head: {self.head}", f"- Head: {self.head}\n- Review: approved", 1),
+        )
+
+    def test_review_without_source_section_writes_nothing(self) -> None:
+        path = self.put("# Test Plan\n\n## Setup\n- Review: draft\n")
+        original = path.read_bytes()
+
+        with self.assertRaisesRegex(ConfigError, "^plan has no Source section$"):
+            record_review(self.repo, path, "approved")
+
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_review_replaces_each_matching_source_line(self) -> None:
+        path = self.put("## Source\n- Review: draft\n  - **REVIEW:** `open`\n")
+        self.assertEqual(plan_identity(self.repo, path)["review"], "open")
+
+        record_review(self.repo, path, "approved")
+
+        self.assertEqual(path.read_text(), "## Source\n- Review: approved\n- Review: approved\n")
+
+    def test_record_review_updates_symlink_target_without_replacing_link(self) -> None:
+        target = self.plan(name="original.md", review="draft")
+        link = target.with_name("linked.md")
+        link.symlink_to(target.name)
+        expected = target.read_bytes().replace(b"- Review: draft", b"- Review: approved", 1)
+
+        result = record_review(self.repo, link, "approved")
+
+        self.assertEqual(link.readlink(), Path(target.name))
+        self.assertEqual(target.read_bytes(), expected)
+        self.assertEqual(result, plan_identity(self.repo, target))
+
+    def test_record_review_rejects_draft_without_writing(self) -> None:
+        path = self.plan(review="open")
+        original = path.read_bytes()
+
+        with self.assertRaisesRegex(ConfigError, "^review state must be approved, open, blocked or unreviewed$"):
+            record_review(self.repo, path, "draft")
+
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_cli_plan_identity_and_review(self) -> None:
+        path = self.plan(review="draft")
+        relative = path.relative_to(self.repo).as_posix()
+
+        identity = self.cli("plan", "identity", relative)
+        self.assertEqual(identity.returncode, 0, identity.stderr)
+        self.assertEqual(json.loads(identity.stdout), {
+            "plan": relative, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "review": "draft",
+        })
+
+        review = self.cli("plan", "review", relative, "--state", "approved")
+        self.assertEqual(review.returncode, 0, review.stderr)
+        self.assertEqual(json.loads(review.stdout)["review"], "approved")
+
+        missing = self.cli("plan", "identity", "missing.md")
+        self.assertEqual(missing.returncode, 1)
+        self.assertEqual(json.loads(missing.stdout), {"error": "plan is not readable"})
+
+        for args in (("--state", "draft"), ()):
+            with self.subTest(args=args):
+                invalid = self.cli("plan", "review", relative, *args)
+                self.assertEqual(invalid.returncode, 2)
+
+    def test_cli_plan_identity_distinguishes_a_blocker_from_concerns_on_reuse(self) -> None:
+        path = self.plan(review="draft")
+        relative = path.relative_to(self.repo).as_posix()
+
+        for state in ("blocked", "open"):
+            with self.subTest(state=state):
+                recorded = self.cli("plan", "review", relative, "--state", state)
+                self.assertEqual(recorded.returncode, 0, recorded.stdout)
+                self.assertIn(f"- Review: {state}\n", path.read_text())
+                expected = {
+                    "plan": relative, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "review": state,
+                }
+                self.assertEqual(json.loads(recorded.stdout), expected)
+
+                resolved = self.cli("plan", "resolve", relative)
+                self.assertEqual(resolved.returncode, 0, resolved.stdout)
+                selection = json.loads(resolved.stdout)
+                self.assertEqual(selection["action"], "reuse")
+
+                identity = self.cli("plan", "identity", selection["plan"])
+                self.assertEqual(identity.returncode, 0, identity.stdout)
+                self.assertEqual(json.loads(identity.stdout), expected)
 
     def test_parser_retains_scenario_actions_assertions_and_tokens(self) -> None:
         plan = parse_plan(FIXTURE)
